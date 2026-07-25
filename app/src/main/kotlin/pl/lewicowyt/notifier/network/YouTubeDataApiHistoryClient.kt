@@ -280,8 +280,7 @@ internal fun interpretApiKeyValidationResponse(
     val expectedSuccessDocument =
         responseJson != null &&
             responseJson.optString("kind") == "youtube#channelListResponse" &&
-            responseJson.optJSONObject("pageInfo") != null &&
-            responseJson.optJSONArray("items") != null
+            responseJson.optJSONObject("pageInfo") != null
     if (statusCode in 200..299 && error == null && expectedSuccessDocument) {
         return YouTubeApiKeyValidation.Valid
     }

@@ -15,7 +15,7 @@ https://api.github.com/repos/emmunioo/lewicowyt/releases?per_page=20
 ```
 
 Pomija szkice, używa porównania wersji zbliżonego do SemVer i obsługuje wersje
-wstępne, np. `1.0-beta`, `1.0-beta.2` oraz `1.0-rc.1`. Dzięki temu wydanie beta
+wstępne, np. `1.1-beta`, `1.1-beta.2` oraz `1.1-rc.1`. Dzięki temu wydanie beta
 może wykryć kolejną betę, a później wydanie stabilne.
 
 Po znalezieniu nowszej wersji aplikacja akceptuje tylko adresy HTTPS należące do
@@ -32,7 +32,7 @@ Przed pierwszym wysłaniem wykonaj w głównym folderze projektu:
 git init
 git add .
 git status
-git commit -m "Wydanie 1.0-beta"
+git commit -m "Wydanie 1.1-beta"
 git branch -M main
 git remote add origin https://github.com/emmunioo/lewicowyt.git
 git push -u origin main
@@ -94,8 +94,8 @@ oraz w osobnej, zaszyfrowanej kopii awaryjnej.
 Plik `app/build.gradle.kts` powinien zawierać:
 
 ```kotlin
-versionCode = 10
-versionName = "1.0-beta"
+versionCode = 11
+versionName = "1.1-beta"
 ```
 
 Każda kolejna publikacja musi zwiększyć `versionCode`, nawet jeśli zmienia się
@@ -119,8 +119,8 @@ nie plikiem przeznaczonym do publikacji.
 W Android Studio użyj `Build → Analyze APK` i sprawdź:
 
 - nazwę pakietu `pl.lewicowyt.notifier`;
-- `versionName` równe `1.0-beta`;
-- `versionCode` równe `10`;
+- `versionName` równe `1.1-beta`;
+- `versionCode` równe `11`;
 - brak klucza YouTube API, haseł i pliku klucza podpisu.
 
 Jeżeli przekazujesz APK do MobSF lub innego skanera, wybierz podpisany wariant
@@ -132,30 +132,30 @@ problemy wysokiego poziomu.
 Podpis można zweryfikować narzędziem z Android SDK:
 
 ```powershell
-apksigner verify --verbose --print-certs .\lewicowYT-1.0-beta.apk
+apksigner verify --verbose --print-certs .\lewicowYT-1.1-beta.apk
 ```
 
 Zapisz również sumę kontrolną:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\lewicowYT-1.0-beta.apk
+Get-FileHash -Algorithm SHA256 .\lewicowYT-1.1-beta.apk
 ```
 
-## Publikowanie wersji 1.0-beta
+## Publikowanie wersji 1.1-beta
 
 1. Poczekaj, aż kontrole GitHub Actions zakończą się powodzeniem.
 2. W repozytorium otwórz `Releases → Draft a new release`.
 3. Utwórz tag:
 
 ```text
-v1.0-beta
+v1.1-beta
 ```
 
 4. Zaznacz wydanie jako **pre-release**.
 5. Dołącz dokładnie jeden podpisany APK, np.:
 
 ```text
-lewicowYT-1.0-beta.apk
+lewicowYT-1.1-beta.apk
 ```
 
 6. W opisie podaj SHA-256 APK oraz najważniejsze znane ograniczenia.
@@ -166,10 +166,10 @@ lewicowYT-1.0-beta.apk
 Przykładowa kolejność:
 
 ```text
-1.0-beta
-1.0-beta.2
-1.0-rc.1
-1.0
+1.1-beta
+1.1-beta.2
+1.1-rc.1
+1.1
 ```
 
 Dla każdego wydania zwiększ `versionCode`, podpisz APK tym samym kluczem i użyj

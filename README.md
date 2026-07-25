@@ -1,4 +1,4 @@
-# lewicowYT 1.0-beta
+# lewicowYT 1.1-beta
 
 Natywna aplikacja dla Androida do lokalnego obserwowania wybranych kanałów
 YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.

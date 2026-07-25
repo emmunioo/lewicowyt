@@ -22,6 +22,21 @@ class YouTubeApiKeyValidationTest {
     }
 
     @Test
+    fun successfulResponseWithoutItemsConfirmsKey() {
+        val result = interpretApiKeyValidationResponse(
+            statusCode = 200,
+            responseBody = """
+                {
+                  "kind":"youtube#channelListResponse",
+                  "pageInfo":{"totalResults":0,"resultsPerPage":0}
+                }
+            """.trimIndent(),
+        )
+
+        assertEquals(YouTubeApiKeyValidation.Valid, result)
+    }
+
+    @Test
     fun invalidKeyIsRejected() {
         val result = interpretApiKeyValidationResponse(
             statusCode = 400,
