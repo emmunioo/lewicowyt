@@ -1,0 +1,23 @@
+KOMPONENTY ZEWNĘTRZNE
+
+Licencja ACSL 1.4 projektu nie zmienia licencji komponentów zewnętrznych.
+
+AndroidX, Jetpack Compose, WorkManager, DataStore, Material Components,
+Kotlin, OkHttp, Okio i Highway:
+Apache License 2.0 — https://www.apache.org/licenses/LICENSE-2.0
+
+jxl-coder 2.6.1:
+Apache License 2.0 i BSD 3-Clause
+https://github.com/awxkee/jxl-coder
+Copyright Radzivon Bartoshyk i współtwórcy.
+
+JPEG XL / libjxl:
+BSD 3-Clause — https://github.com/libjxl/libjxl
+Copyright JPEG XL Project Authors.
+
+Brotli:
+MIT — https://github.com/google/brotli
+Copyright Google LLC i współtwórcy.
+
+Pełne teksty licencji i przypisania są dostępne w plikach LICENSES oraz
+THIRD_PARTY_NOTICES.md w repozytorium źródłowym.

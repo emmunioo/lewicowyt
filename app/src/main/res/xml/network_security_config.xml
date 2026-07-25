@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <!-- Aplikacja ufa wyłącznie magazynowi certyfikatów systemu. Certyfikat
+             użytkownika lub narzędzia MITM nie może przechwycić klucza API. -->
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

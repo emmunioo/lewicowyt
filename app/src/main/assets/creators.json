@@ -1,0 +1,556 @@
+[
+  {
+    "id": "co-to-bedzie",
+    "name": "Co to będzie",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@Cotobedzie",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "ralindel",
+    "name": "Ralindel",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@ralindel",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "myslec-glebiej",
+    "name": "Myśleć głebiej",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@myslecglebiejluzniej",
+        "externalId": null
+      },
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/MyslecGlebiej",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "synmojegotaty",
+    "name": "SynMojegoTaty",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@Przewa%C5%BCnieRozmowa",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "gilotyna-tv",
+    "name": "Gilotyna TV",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@gilotynaTV",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "nazwex",
+    "name": "Nazwex",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@Nazwex",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "podami",
+    "name": "PoDaMi",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@kanalPoDaMi",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "kemporium",
+    "name": "Kemporium",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@Kemporium",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "krytyka-polityczna",
+    "name": "Krytyka Polityczna",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@KrytykaPolitycznaTV",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "holizm-jakub-zynis",
+    "name": "Holizm / Jakub Żynis",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@holizm",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "lukasz-stelmach",
+    "name": "Łukasz Stelmach",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@lstelmach89",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "kasia-babis-babis-media-live",
+    "name": "Kasia Babis (Babis Media Live)",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@BabisMediaLive",
+        "externalId": null
+      },
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@kasiababischannel",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "doma-gorajek",
+    "name": "Doma Gorajek",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@domagorajek",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "romb",
+    "name": "ROMB",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://youtube.com/@romb1ee",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "lewy-interes",
+    "name": "Lewy Interes",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@LewyInteresPodcast",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "czytu-czytu",
+    "name": "Czytu Czytu",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@czytuczytupodcast8611",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "michalina-kobla",
+    "name": "Michalina Kobla",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@michalinakobla",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "ania-gemma",
+    "name": "Ania Gemma",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@AniaGemma",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "pojecia-przy-pracy",
+    "name": "Pojęcia przy pracy",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@pppracy",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "mistycyzm-popkulturowy",
+    "name": "Mistycyzm Popkulturowy",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@MistyPop",
+        "externalId": null
+      },
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@MistyPopGRY/featured",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "orestes-kowalski",
+    "name": "Orestes Kowalski",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@orestes.kowalski",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "domowy-survival",
+    "name": "Domowy Survival",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@domowysurvival/featured",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "jak-dziala-system",
+    "name": "Jak Działa System?",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@jakdzialasystem",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "stronnictwo-popularow",
+    "name": "Stronnictwo Popularów",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@stronnictwopopularow6718",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "michal-idasiak",
+    "name": "Michał IDasiak",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@MichaIDasiak",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "kolektyw-filmowy",
+    "name": "Kolektyw filmowy",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@kolektywfilmowy5348",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "kawka-z-kaffka",
+    "name": "Kawka z kaffką",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@juliakaffka",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "pro-publico-bono",
+    "name": "Pro Publico Bono",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@ProPublicoBono",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "transgrysy",
+    "name": "TransGrysy",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@TransGrysy",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "kryspin-sobczak",
+    "name": "Kryspin Sobczak",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@KryspinSobczak/videos",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "czaban-robi-raban",
+    "name": "Czaban Robi Raban",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@Czabanrobiraban",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "podcastex",
+    "name": "Podcastex",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@Podcastex",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "program-polityczny",
+    "name": "Program Polityczny",
+    "sources": [
+      {
+        "type": "PLAYLIST",
+        "url": "https://www.youtube.com/playlist?list=PLtvjdkxi9_FFKd_k5GZwzNLREdxwPC4LN",
+        "externalId": "PLtvjdkxi9_FFKd_k5GZwzNLREdxwPC4LN"
+      }
+    ]
+  },
+  {
+    "id": "dem3000",
+    "name": "Dem3000",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@Dem3000",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "lekcjareligii-pl-janusz-omylinski",
+    "name": "lekcjareligii.pl Janusz Omyliński",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@lekcjareligiipl",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "pitau",
+    "name": "PiTau",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@pitau4365/featured",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "emilia-kordas",
+    "name": "Emilia Kordas",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@EmiliaKordas/videos",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "kinocentryk",
+    "name": "Kinocentryk",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@kinocentryk",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "lukasz-malinowski",
+    "name": "Łukasz Malinowski",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@ukaszmalinowski5846",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "pan-od-filozofii",
+    "name": "Pan od filozofii",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@PanodFilozofii",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "mao-powiedziane",
+    "name": "Mao Powiedziane",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@MaoPowiedziane",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "farma-rzepy",
+    "name": "Farma Rzepy",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@farma_rzepy",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "neomysliciele",
+    "name": "Neomyśliciele",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@Neomy%C5%9Bliciele",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "czerwony-front",
+    "name": "Czerwony front",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@czerwonyfront6493",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "pozjadane",
+    "name": "Pozjadane",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@pozjadane9148",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "ezekiel",
+    "name": "Ezekiel",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@PlatekZbozowy",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "fiat-money",
+    "name": "fiat_money",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@fiat_money",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "transmisje-krytyczne",
+    "name": "Transmisje Krytyczne",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@transmisjekrytyczne",
+        "externalId": null
+      }
+    ]
+  },
+  {
+    "id": "remigiusz-cetnar",
+    "name": "Remigiusz Cetnar",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@Remigiusz.Cetnar",
+        "externalId": null
+      }
+    ]
+  }
+]

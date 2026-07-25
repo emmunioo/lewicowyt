@@ -1,0 +1,30 @@
+*.iml
+.gradle
+/local.properties
+/.idea/
+/.agents/
+/.kotlin/
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+app/build
+/app/release/
+*.apk
+*.aab
+*.apks
+*.inspect.ndjson
+/tools/input/*.xlsx
+/tmp/
+
+# Nigdy nie publikuj kluczy podpisu ani haseł
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+
+# Raporty awarii JVM i zrzuty pamięci mogą zawierać ścieżki oraz zmienne środowiska
+hs_err_pid*.log
+replay_pid*.log
+*.hprof
