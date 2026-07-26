@@ -1742,7 +1742,7 @@
       });
 
       const showDownloadCount = (count) => {
-        downloadCount.textContent = new Intl.NumberFormat("pl-PL").format(count);
+        downloadCount.textContent = `~${new Intl.NumberFormat("pl-PL").format(count)}`;
       };
 
       const loadDownloadCount = async () => {
