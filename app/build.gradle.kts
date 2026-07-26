@@ -19,8 +19,8 @@ android {
         applicationId = "pl.lewicowyt.notifier"
         minSdk = 26
         targetSdk = 36
-        versionCode = 11
-        versionName = "1.1-beta"
+        versionCode = 12
+        versionName = "1.2-beta"
 
         buildConfigField(
             "String",

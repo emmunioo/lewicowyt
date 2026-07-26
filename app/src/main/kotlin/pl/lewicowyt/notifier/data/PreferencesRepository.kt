@@ -24,6 +24,11 @@ enum class ThemeMode {
     DARK,
 }
 
+enum class BackgroundMode {
+    BALANCED,
+    RELIABLE,
+}
+
 data class AppSettings(
     val selectedCreatorIds: Set<String> = emptySet(),
     val deselectedCreatorAtMillis: Map<String, Long> = emptyMap(),
@@ -33,12 +38,14 @@ data class AppSettings(
     val historyWindowDays: Int = 14,
     val historyFilters: Set<HistoryFilter> = HistoryFilter.entries.toSet(),
     val allowMobileData: Boolean = true,
-    val requireBatteryNotLow: Boolean = true,
+    val requireBatteryNotLow: Boolean = false,
+    val backgroundMode: BackgroundMode = BackgroundMode.BALANCED,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val accentColorArgb: Long = DEFAULT_ACCENT_COLOR_ARGB,
     val youtubeApiEnabled: Boolean = false,
     val youtubeApiNeedsValidation: Boolean = false,
     val lastSyncAtMillis: Long = 0L,
+    val lastCompletedSyncAtMillis: Long = 0L,
     val lastSyncSummary: String = "Jeszcze nie synchronizowano",
 )
 
@@ -55,6 +62,7 @@ class PreferencesRepository(private val context: Context) {
         val historyFilters = stringSetPreferencesKey("history_filters")
         val allowMobileData = booleanPreferencesKey("allow_mobile_data")
         val batteryNotLow = booleanPreferencesKey("battery_not_low")
+        val backgroundMode = stringPreferencesKey("background_mode")
         val themeMode = stringPreferencesKey("theme_mode")
         val accentColor = longPreferencesKey("accent_color_argb")
         val youtubeApiEnabled = booleanPreferencesKey("youtube_api_enabled")
@@ -62,6 +70,7 @@ class PreferencesRepository(private val context: Context) {
         // Klucz używany wyłącznie do jednorazowej migracji ze starszych wersji.
         val youtubeApiKey = stringPreferencesKey("youtube_api_key")
         val lastSyncAt = longPreferencesKey("last_sync_at")
+        val lastCompletedSyncAt = longPreferencesKey("last_completed_sync_at")
         val lastSyncSummary = stringPreferencesKey("last_sync_summary")
     }
 
@@ -94,7 +103,10 @@ class PreferencesRepository(private val context: Context) {
                     HistoryFilter.entries.toSet()
                 },
                 allowMobileData = preferences[Keys.allowMobileData] ?: true,
-                requireBatteryNotLow = preferences[Keys.batteryNotLow] ?: true,
+                requireBatteryNotLow = preferences[Keys.batteryNotLow] ?: false,
+                backgroundMode = preferences[Keys.backgroundMode]
+                    ?.let { runCatching { BackgroundMode.valueOf(it) }.getOrNull() }
+                    ?: BackgroundMode.BALANCED,
                 themeMode = preferences[Keys.themeMode]
                     ?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() }
                     ?: ThemeMode.SYSTEM,
@@ -108,6 +120,10 @@ class PreferencesRepository(private val context: Context) {
                     preferences[Keys.youtubeApiEnabled] == true &&
                     preferences[Keys.youtubeApiValidated] != true,
                 lastSyncAtMillis = preferences[Keys.lastSyncAt] ?: 0L,
+                // Starsze instalacje nie miały osobnego znacznika ukończenia.
+                lastCompletedSyncAtMillis = preferences[Keys.lastCompletedSyncAt]
+                    ?: preferences[Keys.lastSyncAt]
+                    ?: 0L,
                 lastSyncSummary = preferences[Keys.lastSyncSummary]
                     ?: "Jeszcze nie synchronizowano",
             )
@@ -197,6 +213,10 @@ class PreferencesRepository(private val context: Context) {
         context.settingsDataStore.edit { it[Keys.batteryNotLow] = value }
     }
 
+    suspend fun setBackgroundMode(value: BackgroundMode) {
+        context.settingsDataStore.edit { it[Keys.backgroundMode] = value.name }
+    }
+
     suspend fun setThemeMode(value: ThemeMode) {
         context.settingsDataStore.edit { it[Keys.themeMode] = value.name }
     }
@@ -256,10 +276,23 @@ class PreferencesRepository(private val context: Context) {
         }
     }
 
-    suspend fun updateLastSync(timestamp: Long, summary: String) {
-        context.settingsDataStore.edit {
-            it[Keys.lastSyncAt] = timestamp
-            it[Keys.lastSyncSummary] = summary.take(MAX_SYNC_SUMMARY_CHARS)
+    suspend fun updateLastSync(
+        timestamp: Long,
+        summary: String,
+        completed: Boolean = true,
+    ) {
+        context.settingsDataStore.edit { preferences ->
+            if (completed) {
+                preferences[Keys.lastCompletedSyncAt] = timestamp
+            } else if (!preferences.contains(Keys.lastCompletedSyncAt)) {
+                // Przy pierwszym uruchomieniu po aktualizacji zachowujemy dawny
+                // znacznik jako ostatnie ukończone sprawdzenie. Sama awaria nie
+                // może wyglądać dla harmonogramu jak świeża synchronizacja.
+                preferences[Keys.lastCompletedSyncAt] =
+                    preferences[Keys.lastSyncAt] ?: 0L
+            }
+            preferences[Keys.lastSyncAt] = timestamp
+            preferences[Keys.lastSyncSummary] = summary.take(MAX_SYNC_SUMMARY_CHARS)
         }
     }
 

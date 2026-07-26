@@ -34,6 +34,9 @@ class ScheduleChangeReceiver : BroadcastReceiver() {
             Intent.ACTION_BOOT_COMPLETED,
             Intent.ACTION_TIME_CHANGED,
             Intent.ACTION_TIMEZONE_CHANGED,
+            EXACT_ALARM_PERMISSION_ACTION,
         )
+        const val EXACT_ALARM_PERMISSION_ACTION =
+            "android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED"
     }
 }

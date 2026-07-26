@@ -45,6 +45,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
@@ -82,6 +83,7 @@ import java.net.URI
 import java.util.Locale
 import pl.lewicowyt.notifier.BuildConfig
 import pl.lewicowyt.notifier.R
+import pl.lewicowyt.notifier.data.BackgroundMode
 import pl.lewicowyt.notifier.data.DEFAULT_ACCENT_COLOR_ARGB
 import pl.lewicowyt.notifier.data.MAX_YOUTUBE_API_KEY_CHARS
 import pl.lewicowyt.notifier.data.ThemeMode
@@ -101,7 +103,12 @@ private enum class Screen(val title: String) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LewicowYTApp(viewModel: AppViewModel) {
+fun LewicowYTApp(
+    viewModel: AppViewModel,
+    exactAlarmAccessGranted: Boolean = true,
+    requestExactAlarmAccess: () -> Unit = {},
+    openBatteryOptimizationSettings: () -> Unit = {},
+) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var selectedScreenIndex by rememberSaveable { mutableIntStateOf(0) }
     val screen = Screen.entries[selectedScreenIndex]
@@ -151,7 +158,13 @@ fun LewicowYTApp(viewModel: AppViewModel) {
                 Screen.CREATORS -> CreatorsScreen(state, viewModel)
                 Screen.HISTORY -> HistoryScreen(state, viewModel)
                 Screen.NOTIFICATIONS -> NotificationsScreen(state)
-                Screen.SETTINGS -> SettingsScreen(state, viewModel)
+                Screen.SETTINGS -> SettingsScreen(
+                    state = state,
+                    viewModel = viewModel,
+                    exactAlarmAccessGranted = exactAlarmAccessGranted,
+                    requestExactAlarmAccess = requestExactAlarmAccess,
+                    openBatteryOptimizationSettings = openBatteryOptimizationSettings,
+                )
             }
         }
     }
@@ -541,7 +554,13 @@ private fun NotificationsScreen(state: AppUiState) {
 }
 
 @Composable
-private fun SettingsScreen(state: AppUiState, viewModel: AppViewModel) {
+private fun SettingsScreen(
+    state: AppUiState,
+    viewModel: AppViewModel,
+    exactAlarmAccessGranted: Boolean,
+    requestExactAlarmAccess: () -> Unit,
+    openBatteryOptimizationSettings: () -> Unit,
+) {
     val context = LocalContext.current
     val resources = LocalResources.current
     val uriHandler = LocalUriHandler.current
@@ -619,6 +638,15 @@ private fun SettingsScreen(state: AppUiState, viewModel: AppViewModel) {
             FastHistorySettings(state, viewModel)
         }
         item {
+            BackgroundModeSettings(
+                mode = state.settings.backgroundMode,
+                exactAlarmAccessGranted = exactAlarmAccessGranted,
+                onModeSelected = viewModel::setBackgroundMode,
+                requestExactAlarmAccess = requestExactAlarmAccess,
+                openBatteryOptimizationSettings = openBatteryOptimizationSettings,
+            )
+        }
+        item {
             Text("Częstotliwość", style = MaterialTheme.typography.titleMedium)
             Box {
                 OutlinedButton(onClick = { intervalMenuOpen = true }) {
@@ -664,18 +692,36 @@ private fun SettingsScreen(state: AppUiState, viewModel: AppViewModel) {
             }
         }
         item {
-            SwitchSetting(
-                title = "Zezwól na wykorzystywanie danych komórkowych",
-                checked = state.settings.allowMobileData,
-                onCheckedChange = viewModel::setAllowMobileData,
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SwitchSetting(
+                    title = "Zezwól na wykorzystywanie danych komórkowych",
+                    checked = state.settings.allowMobileData,
+                    onCheckedChange = viewModel::setAllowMobileData,
+                )
+                if (state.settings.backgroundMode == BackgroundMode.RELIABLE) {
+                    Text(
+                        "Alarm zabezpieczający również przestrzega tego ustawienia.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
         }
         item {
-            SwitchSetting(
-                title = "Nie sprawdzaj przy niskim poziomie baterii",
-                checked = state.settings.requireBatteryNotLow,
-                onCheckedChange = viewModel::setBatteryNotLow,
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SwitchSetting(
+                    title = "Nie sprawdzaj przy niskim poziomie baterii",
+                    checked = state.settings.requireBatteryNotLow,
+                    onCheckedChange = viewModel::setBatteryNotLow,
+                    enabled = state.settings.backgroundMode == BackgroundMode.BALANCED,
+                )
+                if (state.settings.backgroundMode == BackgroundMode.RELIABLE) {
+                    Text(
+                        "Tryb zwiększonej niezawodności pomija ten warunek podczas " +
+                            "sprawdzania zabezpieczającego.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
         }
         item {
             Card(Modifier.fillMaxWidth()) {
@@ -764,27 +810,21 @@ private fun SettingsScreen(state: AppUiState, viewModel: AppViewModel) {
         }
         item {
             Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(14.dp)) {
-                    Text("Ostatnia synchronizacja", fontWeight = FontWeight.SemiBold)
-                    Text(state.settings.lastSyncSummary)
-                    if (state.settings.lastSyncAtMillis > 0L) {
-                        Text(
-                            formatTime(state.settings.lastSyncAtMillis),
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                }
-            }
-        }
-        item {
-            Card(Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier.padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text(
-                        text = "WorkManager synchronizuje również przy zgaszonym ekranie i po " +
-                            "restarcie telefonu. Aplikacja sprawdza do 6 źródeł równocześnie, " +
+                        text = if (state.settings.backgroundMode == BackgroundMode.BALANCED) {
+                            "Tryb zbalansowany używa WorkManagera, nadrabia zaległość po " +
+                                "otwarciu aplikacji i ma rzadki, niedokładny alarm kontrolny. " +
+                                "Alarm nie pobiera danych sam: zleca tylko zaległą pracę z " +
+                                "zachowaniem ustawień sieci i baterii. "
+                        } else {
+                            "Tryb zwiększonej niezawodności uzupełnia WorkManager dokładnym " +
+                                "alarmem i krótkim awaryjnym sprawdzeniem. "
+                        } +
+                            "Aplikacja sprawdza do 6 źródeł równocześnie, " +
                             "a rozległe błędy sieci ponawia najwyżej dwa razy z rosnącym odstępem. " +
                             "Doze lub dodatkowe ograniczenia producenta mogą przesunąć termin; " +
                             "minimum harmonogramu to 15 minut.",
@@ -810,18 +850,74 @@ private fun SettingsScreen(state: AppUiState, viewModel: AppViewModel) {
             }
         }
         item {
+            AccentColorSettings(state, viewModel)
+        }
+        item {
+            Text(
+                text = "Informacje",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        item {
+            Card(Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text("Ostatnia synchronizacja", fontWeight = FontWeight.SemiBold)
+                    Text(state.settings.lastSyncSummary)
+                    if (state.settings.lastSyncAtMillis > 0L) {
+                        Text(
+                            formatTime(state.settings.lastSyncAtMillis),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    if (
+                        state.settings.lastCompletedSyncAtMillis > 0L &&
+                        state.settings.lastCompletedSyncAtMillis !=
+                        state.settings.lastSyncAtMillis
+                    ) {
+                        Text(
+                            "Ostatnie ukończone sprawdzenie: " +
+                                formatTime(state.settings.lastCompletedSyncAtMillis),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+        }
+        item {
             PrivacyDnsNote()
+        }
+        item {
+            PipedExperimentalNote()
+        }
+        item {
+            Card(Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text("Strona projektu", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Pobieranie aplikacji, informacje o wydaniu i dokumentacja projektu.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    TextButton(
+                        onClick = {
+                            uriHandler.openUri("https://emmunioo.github.io/lewicowyt")
+                        },
+                    ) {
+                        Text("Otwórz stronę lewicowYT")
+                    }
+                }
+            }
         }
         item {
             TextButton(onClick = { thirdPartyNoticesVisible = true }) {
                 Text("Licencje komponentów zewnętrznych")
             }
-        }
-        item {
-            AccentColorSettings(state, viewModel)
-        }
-        item {
-            PipedExperimentalNote()
         }
     }
 }
@@ -1117,10 +1213,98 @@ private fun ColorChannelSlider(
 }
 
 @Composable
+private fun BackgroundModeSettings(
+    mode: BackgroundMode,
+    exactAlarmAccessGranted: Boolean,
+    onModeSelected: (BackgroundMode) -> Unit,
+    requestExactAlarmAccess: () -> Unit,
+    openBatteryOptimizationSettings: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Działanie w tle", style = MaterialTheme.typography.titleMedium)
+        BackgroundModeOption(
+            title = "Zbalansowany (domyślny)",
+            description =
+                "Oszczędny WorkManager z nadrabianiem zaległości i rzadkim, niedokładnym " +
+                    "alarmem kontrolnym bez dodatkowego uprawnienia.",
+            selected = mode == BackgroundMode.BALANCED,
+            onClick = { onModeSelected(BackgroundMode.BALANCED) },
+        )
+        BackgroundModeOption(
+            title = "Zwiększona niezawodność",
+            description =
+                "WorkManager z alarmem zabezpieczającym. Awaryjne sprawdzenie pokazuje " +
+                    "krótkie powiadomienie i zużywa więcej energii.",
+            selected = mode == BackgroundMode.RELIABLE,
+            onClick = { onModeSelected(BackgroundMode.RELIABLE) },
+        )
+        if (mode == BackgroundMode.RELIABLE) {
+            if (exactAlarmAccessGranted) {
+                Text(
+                    "Dostęp do alarmów jest aktywny. Android może nadal zatrzymać aplikację " +
+                        "po użyciu funkcji „Wymuś zatrzymanie”.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            } else {
+                Text(
+                    "Aby alarm zabezpieczający działał przy wyłączonym ekranie, przyznaj " +
+                        "systemowy dostęp „Alarmy i przypomnienia”. Do tego czasu aplikacja " +
+                        "działa jak w trybie zbalansowanym.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                OutlinedButton(onClick = requestExactAlarmAccess) {
+                    Text("Zezwól na alarmy i przypomnienia")
+                }
+            }
+            Text(
+                "Jeśli producent telefonu nadal usypia aplikację, możesz ręcznie " +
+                    "wyłączyć dla niej optymalizację baterii. Jest to opcjonalne i może " +
+                    "zwiększyć zużycie energii.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            OutlinedButton(onClick = openBatteryOptimizationSettings) {
+                Text("Otwórz optymalizację baterii")
+            }
+        }
+    }
+}
+
+@Composable
+private fun BackgroundModeOption(
+    title: String,
+    description: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Card(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RadioButton(selected = selected, onClick = onClick)
+            Spacer(Modifier.width(8.dp))
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Text(title, fontWeight = FontWeight.SemiBold)
+                Text(description, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+@Composable
 private fun SwitchSetting(
     title: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
+    enabled: Boolean = true,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1133,7 +1317,11 @@ private fun SwitchSetting(
                 .fillMaxWidth(0.82f)
                 .padding(end = 12.dp),
         )
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            enabled = enabled,
+        )
     }
 }
 

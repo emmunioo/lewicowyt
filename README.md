@@ -1,4 +1,4 @@
-# lewicowYT 1.1-beta
+# lewicowYT 1.2-beta
 
 Natywna aplikacja dla Androida do lokalnego obserwowania wybranych kanałów
 YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.
@@ -57,9 +57,19 @@ YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.
 
 - dostępne częstotliwości to od 15 minut do 12 godzin oraz raz dziennie;
 - dla harmonogramu dziennego można wybrać lokalną godzinę;
+- domyślny tryb zbalansowany łączy WorkManager z rzadkim, niedokładnym alarmem
+  kontrolnym i automatycznym nadrabianiem zaległości;
+- tryb zwiększonej niezawodności może użyć dokładnego alarmu oraz krótkiej
+  usługi pierwszoplanowej, jeśli zwykły WorkManager nadmiernie się opóźni;
 - sprawdzanych jest do 6 źródeł równocześnie;
-- wymaganie połączenia bez limitu i warunek odpowiedniego poziomu baterii można
-  zmienić w ustawieniach;
+- ustawienie danych komórkowych obowiązuje zarówno WorkManager, jak i awaryjne
+  sprawdzenie trybu zwiększonej niezawodności;
+- przed awaryjnym sprawdzeniem aplikacja wymaga sieci ze zweryfikowanym przez
+  Androida dostępem do internetu;
+- warunek odpowiedniego poziomu baterii można zmienić w ustawieniach trybu
+  zbalansowanego;
+- użytkownik trybu zwiększonej niezawodności może opcjonalnie otworzyć systemową
+  listę optymalizacji baterii, bez obowiązkowego wyłączania zabezpieczeń;
 - rozległe błędy sieci są ponawiane najwyżej dwa razy z wykładniczo rosnącym
   odstępem.
 
@@ -67,6 +77,17 @@ WorkManager działa również przy zgaszonym ekranie i po odtworzeniu harmonogra
 przez aplikację, ale Android nie gwarantuje wykonania dokładnie co do minuty.
 Doze, brak sieci oraz dodatkowe ograniczenia oszczędzania energii producenta
 telefonu mogą przesunąć synchronizację.
+
+### Aktualizacje
+
+- aplikacja może ręcznie sprawdzić publiczne wydania GitHub bez Firebase i
+  własnego serwera;
+- wykrywa kolejne wydania beta, wersje RC oraz późniejsze wydania stabilne;
+- pokazuje numer wersji, informacje o wydaniu, nazwę APK i udostępniony przez
+  GitHub skrót SHA-256;
+- akceptuje odnośniki do APK wyłącznie z właściwego repozytorium GitHub;
+- pobieranie odbywa się w przeglądarce, a instalacja zawsze wymaga decyzji
+  użytkownika.
 
 ### Wygląd i pamięć obrazów
 
@@ -157,6 +178,10 @@ Kompilacja wariantu debug:
 ```powershell
 .\gradlew.bat :app:assembleDebug
 ```
+
+Odtwarzalne wyniki Gradle są zapisywane poza katalogiem źródeł, w sąsiednim
+katalogu `KOMPILACJA`. Debugowy APK znajdzie się w
+`../KOMPILACJA/app/outputs/apk/debug/`.
 
 Instalacja debug na podłączonym urządzeniu lub emulatorze:
 

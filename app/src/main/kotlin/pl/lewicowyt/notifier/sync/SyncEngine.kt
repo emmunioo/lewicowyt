@@ -50,6 +50,8 @@ class SyncEngine(
 ) {
     private val syncMutex = Mutex()
 
+    fun isSyncInProgress(): Boolean = syncMutex.isLocked
+
     /**
      * Pozwala wykonać operację administracyjną dopiero po zakończeniu lub
      * anulowaniu synchronizacji i blokuje start następnej do czasu jej końca.
