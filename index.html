@@ -1055,7 +1055,7 @@
     }
 
     .final-cta {
-      padding: 32px 0 108px;
+      padding: 32px 0 56px;
     }
 
     .cta-panel {
@@ -1100,6 +1100,44 @@
       margin-bottom: 28px;
       color: #c3c1c7;
       font-size: 1rem;
+    }
+
+    .download-count-section {
+      padding: 0 0 96px;
+    }
+
+    .download-count-panel {
+      padding: clamp(32px, 6vw, 58px);
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      background: rgba(255, 255, 255, .018);
+      text-align: center;
+    }
+
+    .download-count-panel h2 {
+      margin: 0;
+      color: var(--muted);
+      font-size: clamp(1rem, 2vw, 1.3rem);
+      font-weight: 800;
+      letter-spacing: -.02em;
+    }
+
+    .download-count {
+      display: block;
+      margin: 12px 0 10px;
+      color: var(--text);
+      font-size: clamp(3.4rem, 10vw, 7rem);
+      font-variant-numeric: tabular-nums;
+      font-weight: 950;
+      letter-spacing: -.07em;
+      line-height: 1;
+    }
+
+    .download-count-note {
+      max-width: 610px;
+      margin: 0 auto;
+      color: #77757e;
+      font-size: .78rem;
     }
 
     footer {
@@ -1624,6 +1662,18 @@
         </div>
       </div>
     </section>
+
+    <section class="download-count-section" aria-labelledby="download-count-title">
+      <div class="shell">
+        <div class="download-count-panel">
+          <h2 id="download-count-title">Pobrało nas tyle osób</h2>
+          <strong class="download-count" id="download-count" aria-live="polite">…</strong>
+          <p class="download-count-note" id="download-count-note">
+            Łączna liczba pobrań plików APK z GitHub Releases. Nie oznacza liczby unikalnych osób ani instalacji.
+          </p>
+        </div>
+      </div>
+    </section>
   </main>
 
   <footer>
@@ -1648,6 +1698,10 @@
       const menu = document.getElementById("nav-links");
       const copyButton = document.getElementById("copy-hash");
       const hash = document.getElementById("release-hash");
+      const downloadCount = document.getElementById("download-count");
+      const downloadCountNote = document.getElementById("download-count-note");
+      const downloadCountCacheKey = "lewicowyt-download-count";
+      const downloadCountCacheTime = 60 * 60 * 1000;
 
       const updateHeader = () => {
         header.classList.toggle("scrolled", window.scrollY > 12);
@@ -1687,6 +1741,79 @@
         }, 1800);
       });
 
+      const showDownloadCount = (count) => {
+        downloadCount.textContent = new Intl.NumberFormat("pl-PL").format(count);
+      };
+
+      const loadDownloadCount = async () => {
+        let cached = null;
+
+        try {
+          cached = JSON.parse(localStorage.getItem(downloadCountCacheKey));
+          if (
+            Number.isFinite(cached?.count) &&
+            Number.isFinite(cached?.savedAt) &&
+            Date.now() - cached.savedAt < downloadCountCacheTime
+          ) {
+            showDownloadCount(cached.count);
+            return;
+          }
+        } catch {
+          cached = null;
+        }
+
+        try {
+          const response = await fetch(
+            "https://api.github.com/repos/emmunioo/lewicowyt/releases?per_page=100",
+            {
+              headers: {
+                Accept: "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28"
+              }
+            }
+          );
+
+          if (!response.ok) {
+            throw new Error(`GitHub API: ${response.status}`);
+          }
+
+          const releases = await response.json();
+          const count = releases.reduce(
+            (releaseTotal, release) =>
+              releaseTotal +
+              release.assets.reduce(
+                (assetTotal, asset) =>
+                  assetTotal +
+                  (asset.name.toLowerCase().endsWith(".apk") && Number.isFinite(asset.download_count)
+                    ? asset.download_count
+                    : 0),
+                0
+              ),
+            0
+          );
+
+          showDownloadCount(count);
+
+          try {
+            localStorage.setItem(
+              downloadCountCacheKey,
+              JSON.stringify({ count, savedAt: Date.now() })
+            );
+          } catch {
+            // Licznik nadal działa, gdy przeglądarka blokuje pamięć lokalną.
+          }
+        } catch {
+          if (Number.isFinite(cached?.count)) {
+            showDownloadCount(cached.count);
+            downloadCountNote.textContent += " Wyświetlono ostatni zapisany wynik.";
+          } else {
+            downloadCount.textContent = "—";
+            downloadCountNote.textContent = "Licznik jest teraz chwilowo niedostępny.";
+          }
+        }
+      };
+
+      loadDownloadCount();
       document.getElementById("year").textContent = new Date().getFullYear();
     })();
   </script>
