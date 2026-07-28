@@ -11,8 +11,8 @@ internal enum class SyncNetworkAccess {
 }
 
 /**
- * Odwzorowuje ograniczenia WorkManagera: CONNECTED zezwala na sieć taryfową,
- * a UNMETERED wymaga sieci oznaczonej przez Androida jako bez limitu.
+ * Synchronizacja może korzystać z sieci taryfowej tylko po zgodzie użytkownika.
+ * Sieć oznaczona przez Androida jako bez limitu jest dozwolona zawsze.
  */
 internal fun SyncNetworkAccess.allowsSync(allowMobileData: Boolean): Boolean = when (this) {
     SyncNetworkAccess.UNAVAILABLE -> false

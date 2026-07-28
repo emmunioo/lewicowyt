@@ -1,12 +1,12 @@
 # Audyt bezpieczeństwa
 
-Data przeglądu: 25 lipca 2026 r.
+Data przeglądu: 28 lipca 2026 r.
 
 ## Zakres
 
 Sprawdzono kod Kotlin, manifest i zasoby Androida, konfigurację Gradle, skrypty
 startowe dla Windows i systemów uniksowych, katalog twórców, dokumentację oraz
-integracje sieciowe YouTube, Piped i GitHub Releases.
+integracje sieciowe YouTube, DNS i GitHub Releases.
 
 Przeanalizowano również raport statyczny MobSF 4.5.1 (98 stron), pełny `logcat`,
 zrzut `dumpsys` oraz zapis ruchu sieciowego z 25 lipca 2026 r. Raport dotyczył
@@ -41,22 +41,22 @@ certyfikat Android Debug i narzędziowy kod debug).
   weryfikacji integralności. Google wymaga dokładnie odcisku SHA-1 certyfikatu
   podpisującego w nagłówku `X-Android-Cert`, gdy klucz API jest ograniczony do
   aplikacji Android. Zastąpienie go SHA-256 zepsułoby to ograniczenie;
-- `SystemJobService` jest wymagany przez JobScheduler i chroniony systemowym
-  `android.permission.BIND_JOB_SERVICE`. `ProfileInstallReceiver` służy
-  narzędziom profilowania i jest chroniony `android.permission.DUMP`, którego
-  zwykła aplikacja nie może uzyskać. Zbędny `DiagnosticsReceiver` WorkManagera
-  został mimo to usunięty z wariantu release;
+- wskazania `SystemJobService`, `DiagnosticsReceiver` oraz stałych WorkManagera
+  dotyczą starszego APK objętego raportem. Bieżący kod nie zależy od
+  WorkManagera i jego komponenty nie powinny występować w nowym APK.
+  `ProfileInstallReceiver` służy narzędziom profilowania i jest chroniony
+  `android.permission.DUMP`, którego zwykła aplikacja nie może uzyskać;
 - raport powielił analizę bibliotek natywnych dla czterech ABI. Wymagane
   biblioteki JXL mają NX, kod pozycyjnie niezależny, stack canary, pełne RELRO,
   brak RPATH/RUNPATH i usunięte symbole. Nieużywany przez tę jednoprocesową
   aplikację `libdatastore_shared_counter.so`, który nie miał stack canary ani
   usuniętych symboli, został wyłączony z pakowania;
 - `logcat` nie zawierał awarii, ANR ani `OutOfMemoryError`. Pokazał natomiast
-  błąd HTTP 504 jednego kanału, niedostępność Piped i ponowienie całego zadania
-  po częściowym powodzeniu;
-- zrzut systemu potwierdził utworzenie kanału powiadomień oraz prawidłowe
-  uruchomienie WorkManagera z wymaganiami sieci i opcjonalnie nie-niskiego
-  poziomu baterii. Badanie nie obejmowało wiarygodnej próby z wygaszonym ekranem;
+  błąd HTTP 504 jednego kanału oraz zachowanie usuniętej później integracji
+  Piped; ta część raportu nie opisuje bieżącego kodu;
+- zrzut systemu potwierdził utworzenie kanału powiadomień i uruchomienie
+  poprzedniego harmonogramu. Nie opisuje obecnego mechanizmu AlarmManager i nie
+  obejmował wiarygodnej próby z wygaszonym ekranem;
 - zapis ruchu zawierał wyłącznie pięć żądań usług
   `com.google.android.gms` do rejestracji urządzenia/GCM. Nie zarejestrował
   żądania procesu `pl.lewicowyt.notifier`, więc jest niewystarczający do oceny
@@ -69,10 +69,9 @@ certyfikat Android Debug i narzędziowy kod debug).
 - konfiguracja bezpieczeństwa sieci wyłącza ruch nieszyfrowany i jawnie ufa
   wyłącznie systemowemu magazynowi certyfikatów, nie certyfikatom użytkownika ani
   narzędzi MITM;
-- wspólny klient HTTP nie wykonuje automatycznych przekierowań. Zapobiega to
-  przekierowaniu żądania z przejętej instancji Piped do sieci lokalnej lub innego
-  nieoczekiwanego hosta; jedyny obsługiwany ręcznie mechanizm przekierowań dotyczy
-  obrazów i ponownie sprawdza dozwoloną domenę na każdym kroku;
+- wspólny klient HTTP nie wykonuje automatycznych przekierowań. Jedyny
+  obsługiwany ręcznie mechanizm przekierowań dotyczy obrazów i ponownie sprawdza
+  dozwoloną domenę na każdym kroku;
 - wspólny klient sieciowy używa domyślnie AdGuard DNS-over-HTTPS z dwoma
   przypiętymi adresami startowymi; aktywny Prywatny DNS Androida ma pierwszeństwo;
 - błąd `NXDOMAIN` nie uruchamia awaryjnego resolvera systemowego, dzięki czemu
@@ -89,23 +88,15 @@ certyfikat Android Debug i narzędziowy kod debug).
   16 777 216 pikseli, a właściwy bitmapowy wynik dekodowania jest próbkowany do
   maksymalnie 1280 px i 2 097 152 pikseli. Stary cache sprzed tej ochrony jest
   odrzucany;
-- odpowiedzi Piped mają limity czasu i rozmiaru, ograniczoną długość pól oraz
-  walidację poprawnego zagnieżdżenia JSON do głębokości 100;
 - odpowiedzi YouTube Web, RSS i Data API mają limity rozmiaru, a tytuły,
   autorzy, klucze klienta oraz tokeny kontynuacji są ograniczane i walidowane
   przed dalszym użyciem;
-- pobrane dane Piped nie dostarczają aplikacji gotowych odnośników do otwarcia:
-  wykorzystywany jest tylko poprawny, 11-znakowy identyfikator filmu;
-- wpis Piped jest traktowany jako niezaufany i nie trafia do kolejki powiadomień,
-  dopóki YouTube RSS, YouTube Data API albo kontrolowana ścieżka YouTube Web nie
-  zwróci tego materiału dla
-  synchronizowanego kanału. Sprawdzenie samego istnienia i typu filmu nie zmienia
-  jego pochodzenia na YouTube;
-- dane Piped nie mogą przesunąć trwałego kursora powiadomień; punkt odniesienia
-  aktualizują wyłącznie wpisy potwierdzone przez YouTube;
-- kolejki nadchodzących transmisji i gotowych powiadomień filtrują rekordy po
-  pochodzeniu `YOUTUBE`, co blokuje również stare wpisy Piped zapisane w bazie;
-- nieprawidłowe i skrajnie przyszłe daty z RSS, Data API, YouTube Web lub Piped
+- historia każdego źródła zapisuje najpierw małą odpowiedź RSS, a dopiero potem
+  uruchamia stronicowanie Data API albo YouTube Web. Duplikaty są scalane po
+  identyfikatorze filmu;
+- migracja bazy do wersji 10 usuwa niepotwierdzone rekordy pozostawione przez
+  dawną integrację zewnętrzną; zostają ponownie pobrane wyłącznie z YouTube;
+- nieprawidłowe i skrajnie przyszłe daty z RSS, Data API lub YouTube Web
   są pomijane zamiast zastępowania ich bieżącym czasem;
 - klucz YouTube Data API jest szyfrowany AES-256-GCM, a materiał klucza szyfrującego
   pozostaje w Android Keystore; sekret nie trafia do `rememberSaveable`, Bundle ani
@@ -139,9 +130,9 @@ certyfikat Android Debug i narzędziowy kod debug).
 - szczegółowe logi wyjątków sieciowych są kompilowane wyłącznie w wariancie
   debug. Wariant release nie zapisuje do `logcat` nazw wybranych twórców,
   adresów ich kanałów ani stosów wyjątków;
-- pojedynczy niedostępny kanał nie ponawia już całej synchronizacji dziesiątek
-  poprawnie sprawdzonych źródeł. WorkManager ponawia awarię całkowitą albo
-  obejmującą co najmniej połowę prób, najwyżej dwa razy.
+- pojedynczy niedostępny kanał nie ponawia całej synchronizacji dziesiątek
+  poprawnie sprawdzonych źródeł. Dokładny alarm ponawia awarię całkowitą albo
+  obejmującą co najmniej połowę prób najwyżej dwa razy, co 15 minut.
 
 ## Ryzyka pozostające z założenia
 
@@ -149,49 +140,64 @@ certyfikat Android Debug i narzędziowy kod debug).
   aplikacji, maskowany w interfejsie i wyłączony z kopii zapasowej, ale proces
   działający z uprawnieniami roota może przejąć sekret podczas używania go przez
   aplikację;
-- tryb bez klucza zależy od nieoficjalnego formatu strony YouTube oraz publicznych
-  instancji Piped. Zmiany po stronie usług mogą powodować błędy dostępności, nie
-  dają jednak tym usługom dostępu do lokalnej bazy;
-- publiczna instancja Piped widzi adres IP urządzenia i identyfikatory sprawdzanych
-  kanałów;
+- tryb bez klucza zależy od RSS i nieoficjalnego formatu strony YouTube.
+  Zmiany po stronie YouTube mogą powodować błędy dostępności;
 - AdGuard DNS widzi nazwy rozwiązywanych domen i adres IP urządzenia. Jeśli oba
   adresy startowe DoH są niedostępne, aplikacja przechodzi na pięć minut na resolver
   systemowy, co zachowuje dostępność kosztem chwilowego braku aplikacyjnego DoH;
 - sprawdzanie aktualizacji otwiera stronę pobierania w przeglądarce. Ostateczną
   ochroną aktualizacji pozostaje weryfikacja podpisu APK przez Androida.
-- Android oraz nakładka producenta mogą opóźnić WorkManager mimo poprawnego
-  harmonogramu, szczególnie w Doze albo przy restrykcyjnym oszczędzaniu energii.
-  Aplikacja nie może zagwarantować wykonania dokładnie co do minuty.
+- dokładny alarm może obudzić urządzenie w Doze, ale wymaga specjalnego dostępu
+  na Androidzie 12+. „Wymuś zatrzymanie”, odebranie dostępu, brak dozwolonej
+  sieci albo agresywna polityka OEM wobec usługi pierwszoplanowej mogą nadal
+  uniemożliwić synchronizację. Kod nie może zagwarantować wykonania na każdym
+  urządzeniu dokładnie co do minuty;
+- aplikacja odczytuje rzeczywisty stan przez
+  `PowerManager.isIgnoringBatteryOptimizations(packageName)` i dopiero po
+  działaniu użytkownika wysyła systemowe żądanie dotyczące własnego pakietu.
+  `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` jest jednak uprawnieniem podlegającym
+  restrykcyjnej ocenie Google Play i przed publikacją w tym sklepie wymaga
+  ponownej oceny zgodności z jego zasadami;
+- lokalny `AppUpdateTracker` zapisuje wyłącznie ostatni potwierdzony
+  `versionCode`. Czasy instalacji pochodzą z `PackageManager`; mechanizm nie
+  wysyła telemetrii i nie pokazuje okna „Co nowego” przy pierwszej instalacji.
 
 ## Wynik automatycznej walidacji
 
-Końcowy, czysty przebieg lokalny z 25 lipca 2026 r. zakończył się powodzeniem:
+Końcowy przebieg lokalny z 28 lipca 2026 r., po zastąpieniu WorkManagera
+pojedynczym harmonogramem AlarmManager oraz wdrożeniu historii RSS-first bez
+Piped, zakończył się powodzeniem:
 
-- 58 testów jednostkowych wariantu debug i 58 tych samych testów wariantu
+- 66 testów jednostkowych wariantu debug i 66 tych samych testów wariantu
   release: 0 niepowodzeń, 0 błędów i 0 pominięć;
-- kompilacja Kotlin wariantów debug i release: powodzenie;
-- Android Lint dla debug i release: 0 błędów. Pozostało 29 ostrzeżeń
+- kompilacja Kotlin oraz kontrolne złożenie wariantów debug i release:
+  powodzenie;
+- Android Lint dla debug i release: 0 błędów. Pozostały 32 ostrzeżenia
   informacyjnych: dostępność nowszych, celowo jeszcze niewprowadzonych wersji
   zależności, sugestie zamiany jawnych transakcji na skróty KTX, kontrola
-  najnowszego API oraz kształt pomocniczych ikon rastrowych;
+  najnowszego API, kształt pomocniczych ikon rastrowych oraz jawne ostrzeżenie
+  polityki Google Play dla `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`;
 - katalog 49 twórców i 52 źródeł: brak pustych pozycji, zduplikowanych kluczy
   źródeł i adresów spoza dozwolonych hostów YouTube;
 - ponownie scalone i przetworzone biblioteki natywne debug i release zawierają
   po 32 pliki i nie zawierają `libdatastore_shared_counter.so`;
-- scalony manifest release nie zawiera WorkManager `DiagnosticsReceiver`; poza
-  aktywnością startową eksportowane pozostają wyłącznie komponenty AndroidX
-  chronione uprawnieniami systemowymi;
+- scalony manifest release nie zawiera zależności ani komponentów WorkManagera.
+  Zawiera wyłącznie własny odbiornik dokładnego alarmu, odbiornik zdarzeń
+  systemowych i niewyeksportowaną usługę pierwszoplanową `dataSync`;
+- kod aplikacji, wygenerowane pliki pośrednie i lista zawartości APK nie
+  zawierają klienta Piped ani adresów jego publicznych instancji;
 - skan plików publikowanych: brak kluczy podpisu, APK/AAB, zrzutów pamięci,
   raportów awarii, osadzonych kluczy API oraz danych osobowych z certyfikatu.
 
-Końcowy APK nie został wytworzony w tym przebiegu. Podpisany artefakt ma zostać
-wygenerowany przez Android Studio dopiero po utworzeniu właściwego klucza
-wydawcy.
+W przebiegu powstał wyłącznie niepodpisany APK release do kontroli kompilacji.
+Publiczny, podpisany artefakt należy wygenerować w Android Studio właściwym
+kluczem wydawcy; jego nowy SHA-256 trzeba wpisać do dokumentacji wydania.
 
 ## Niezawodność danych i harmonogramu
 
-- prawidłowa, lecz pusta albo niepełna odpowiedź Piped nie kasuje błędu YouTube
-  podczas doładowywania historii; zakres pozostaje częściowy i można go ponowić;
+- odpowiedź RSS jest traktowana jako szybki początek, a nie dowód kompletności
+  zakresu. Historia jest oznaczana jako ukończona dopiero po dojściu Data API
+  albo YouTube Web do granicy czasu lub końca źródła;
 - paginacja YouTube wykrywa powtarzające się kursory i tokeny, nie oznacza
   zakresu jako ukończonego po osiągnięciu limitu bezpieczeństwa oraz nie
   przesuwa kursora powiadomień, dopóki nie obejmie luki od poprzedniego punktu;
@@ -203,15 +209,20 @@ wydawcy.
   powiadomienia;
 - rekord o nieznanym typie jest ponawiany z ograniczeniem prób, dzięki czemu
   pojedynczy trwale nieklasyfikowalny film nie blokuje całej kolejki;
-- harmonogram dzienny używa jednej stałej nazwy unikalnej WorkManagera. Zadanie
-  następującego dnia jest dopinane po terminalnym zakończeniu bieżącego, a zmiana
-  ustawień zastępuje istniejący łańcuch;
+- harmonogram używa jednego jednorazowego alarmu `RTC_WAKEUP` o stałej
+  tożsamości `PendingIntent`. Odbiornik zapisuje następny zwykły termin przed
+  uruchomieniem sieci; ewentualne ponowienie zastępuje go tym samym alarmem,
+  więc nie powstają równoległe łańcuchy. Boot, zmiana czasu i strefy odtwarzają
+  termin;
 - czyszczenie historii wymaga potwierdzenia, anuluje aktywne pobieranie oraz
-  zadania WorkManagera, czeka na wyłączną sekcję synchronizacji, usuwa historię,
+  dokładny alarm, czeka na wyłączną sekcję synchronizacji, usuwa historię,
   skrzynkę, identyfikatory i kursory w jednej transakcji, czyści cache obrazów,
   a następnie odtwarza harmonogram;
 - pliki awarii JVM `hs_err_pid*.log`, `replay_pid*.log` i zrzuty `*.hprof` są
   ignorowane przez repozytorium i nie powinny być publikowane.
+- przypomnienie o optymalizacji baterii opiera się na rzeczywistym stanie
+  systemowym, jest ponawiane przy wejściu do ustawień tylko podczas ograniczania
+  aplikacji i nie zapisuje fałszywej zgody na podstawie samego otwarcia ekranu.
 
 ## Warunki przed publicznym wydaniem
 
@@ -224,8 +235,9 @@ wydawcy.
   sam rozstrzygnąć zgody na znaki towarowe lub wizerunki użyte w grafice;
 - przed tagiem przepuścić pierwszy commit przez przygotowany workflow GitHub
   Actions na Ubuntu;
-- wykonać test instrumentacyjny kodeka JXL oraz próbę synchronizacji i
-  powiadomienia przy zgaszonym ekranie na prawdziwym urządzeniu. WorkManager i
-  natywny kodek zależą od systemu/OEM, więc testy JVM nie mogą tego zastąpić;
+- wykonać test instrumentacyjny kodeka JXL oraz próbę dokładnego alarmu,
+  synchronizacji i powiadomienia przy zgaszonym ekranie oraz w Doze na
+  prawdziwym urządzeniu. AlarmManager, start usługi pierwszoplanowej i natywny
+  kodek zależą od systemu/OEM, więc testy JVM nie mogą tego zastąpić;
 - po wygenerowaniu podpisanego APK sprawdzić jego certyfikat, identyfikator,
   wersję i zawartość według `RELEASES_GITHUB.md`.

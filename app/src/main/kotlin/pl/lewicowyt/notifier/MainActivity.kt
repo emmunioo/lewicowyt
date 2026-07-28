@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -22,11 +23,15 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import pl.lewicowyt.notifier.ui.AppViewModel
 import pl.lewicowyt.notifier.ui.LewicowYTApp
 import pl.lewicowyt.notifier.ui.theme.LewicowYTTheme
+import pl.lewicowyt.notifier.updates.AppUpdateTracker
 
 class MainActivity : ComponentActivity() {
     private val viewModel: AppViewModel by viewModels { AppViewModel.Factory(application) }
+    private val appUpdateTracker by lazy { AppUpdateTracker(this) }
     private var notificationPermissionGranted = false
     private var exactAlarmAccessGranted by mutableStateOf(true)
+    private var batteryOptimizationIgnored by mutableStateOf(true)
+    private var whatsNewVisible by mutableStateOf(false)
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -39,6 +44,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         notificationPermissionGranted = hasNotificationPermission()
         exactAlarmAccessGranted = hasExactAlarmAccess()
+        batteryOptimizationIgnored = isBatteryOptimizationIgnored()
+        whatsNewVisible = appUpdateTracker.shouldShowWhatsNew(BuildConfig.VERSION_CODE)
         handleIntent(intent)
         enableEdgeToEdge()
         setContent {
@@ -50,6 +57,12 @@ class MainActivity : ComponentActivity() {
                 LewicowYTApp(
                     viewModel = viewModel,
                     exactAlarmAccessGranted = exactAlarmAccessGranted,
+                    batteryOptimizationIgnored = batteryOptimizationIgnored,
+                    whatsNewVisible = whatsNewVisible,
+                    acknowledgeWhatsNew = {
+                        appUpdateTracker.acknowledge(BuildConfig.VERSION_CODE)
+                        whatsNewVisible = false
+                    },
                     requestExactAlarmAccess = ::requestExactAlarmAccess,
                     openBatteryOptimizationSettings = ::openBatteryOptimizationSettings,
                 )
@@ -60,13 +73,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        val grantedNow = hasNotificationPermission()
-        if (grantedNow && !notificationPermissionGranted) {
+        val notificationsGrantedNow = hasNotificationPermission()
+        if (notificationsGrantedNow && !notificationPermissionGranted) {
             viewModel.syncNow()
         }
-        notificationPermissionGranted = grantedNow
-        exactAlarmAccessGranted = hasExactAlarmAccess()
-        viewModel.refreshBackgroundSchedule()
+        notificationPermissionGranted = notificationsGrantedNow
+
+        val exactAlarmGrantedNow = hasExactAlarmAccess()
+        if (exactAlarmGrantedNow != exactAlarmAccessGranted) {
+            exactAlarmAccessGranted = exactAlarmGrantedNow
+            viewModel.refreshBackgroundSchedule()
+        }
+        batteryOptimizationIgnored = isBatteryOptimizationIgnored()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -116,23 +134,33 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openBatteryOptimizationSettings() {
-        try {
-            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-        } catch (_: ActivityNotFoundException) {
-            startActivity(
-                Intent(
-                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    "package:$packageName".toUri(),
-                ),
-            )
-        } catch (_: SecurityException) {
-            startActivity(
-                Intent(
-                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    "package:$packageName".toUri(),
-                ),
-            )
+        val packageUri = "package:$packageName".toUri()
+        if (isBatteryOptimizationIgnored()) {
+            openApplicationDetails(packageUri)
+            return
         }
+        try {
+            startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    packageUri,
+                ),
+            )
+        } catch (_: ActivityNotFoundException) {
+            openApplicationDetails(packageUri)
+        } catch (_: SecurityException) {
+            openApplicationDetails(packageUri)
+        }
+    }
+
+    private fun isBatteryOptimizationIgnored(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+        return getSystemService(PowerManager::class.java)
+            .isIgnoringBatteryOptimizations(packageName)
+    }
+
+    private fun openApplicationDetails(packageUri: android.net.Uri) {
+        startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri))
     }
 
     companion object {

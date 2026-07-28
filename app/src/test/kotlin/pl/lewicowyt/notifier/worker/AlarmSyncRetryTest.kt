@@ -5,22 +5,22 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import pl.lewicowyt.notifier.model.SyncOutcome
 
-class YouTubeCheckWorkerTest {
+class AlarmSyncRetryTest {
     @Test
-    fun retriesWidespreadNetworkFailuresOnlyALimitedNumberOfTimes() {
+    fun retriesWidespreadFailuresOnlyALimitedNumberOfTimes() {
         val widespreadFailure = outcome(
             checkedSources = 1,
             errors = listOf("Kanał 1: timeout", "Kanał 2: timeout"),
         )
 
-        assertTrue(shouldRetryBackgroundSync(widespreadFailure, runAttemptCount = 0))
-        assertTrue(shouldRetryBackgroundSync(widespreadFailure, runAttemptCount = 1))
-        assertFalse(shouldRetryBackgroundSync(widespreadFailure, runAttemptCount = 2))
+        assertTrue(shouldRetryAlarmSync(widespreadFailure, retryAttempt = 0))
+        assertTrue(shouldRetryAlarmSync(widespreadFailure, retryAttempt = 1))
+        assertFalse(shouldRetryAlarmSync(widespreadFailure, retryAttempt = 2))
     }
 
     @Test
     fun doesNotRetryASuccessfulRun() {
-        assertFalse(shouldRetryBackgroundSync(outcome(), runAttemptCount = 0))
+        assertFalse(shouldRetryAlarmSync(outcome(), retryAttempt = 0))
     }
 
     @Test
@@ -30,7 +30,7 @@ class YouTubeCheckWorkerTest {
             errors = listOf("Jeden kanał: timeout"),
         )
 
-        assertFalse(shouldRetryBackgroundSync(isolatedFailure, runAttemptCount = 0))
+        assertFalse(shouldRetryAlarmSync(isolatedFailure, retryAttempt = 0))
     }
 
     @Test
@@ -40,7 +40,7 @@ class YouTubeCheckWorkerTest {
             errors = listOf("Kanał: timeout"),
         )
 
-        assertTrue(shouldRetryBackgroundSync(totalFailure, runAttemptCount = 0))
+        assertTrue(shouldRetryAlarmSync(totalFailure, retryAttempt = 0))
     }
 
     @Test
@@ -50,7 +50,7 @@ class YouTubeCheckWorkerTest {
             errors = listOf("Kanał 1: timeout", "Kanał 2: timeout"),
         )
 
-        assertTrue(shouldRetryBackgroundSync(halfFailure, runAttemptCount = 0))
+        assertTrue(shouldRetryAlarmSync(halfFailure, retryAttempt = 0))
     }
 
     private fun outcome(

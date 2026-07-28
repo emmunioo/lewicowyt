@@ -83,7 +83,17 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             )
             db.execSQL(
                 "ALTER TABLE video_history ADD COLUMN " +
-                    "classification_last_attempt_ms INTEGER NOT NULL DEFAULT 0",
+                "classification_last_attempt_ms INTEGER NOT NULL DEFAULT 0",
+            )
+        }
+        if (oldVersion < 10) {
+            // Wersja RSS-first korzysta wyłącznie ze źródeł YouTube. Usuwamy
+            // niepotwierdzone rekordy ze starszej integracji; zostaną ponownie
+            // pobrane i sklasyfikowane przez RSS oraz API/Web.
+            db.delete(
+                "video_history",
+                "origin <> ?",
+                arrayOf(VideoOrigin.YOUTUBE.name),
             )
         }
     }
@@ -305,11 +315,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         writableDatabase.beginTransaction()
         try {
             val now = System.currentTimeMillis()
-            // Tylko dane YouTube mogą ustanowić punkt odniesienia. Publiczna
-            // instancja Piped nie może przesunąć kursora i ukryć późniejszych
-            // prawidłowych publikacji.
             val newestEntry = entries
-                .filter { it.origin == VideoOrigin.YOUTUBE }
                 .maxWithOrNull(
                     compareBy<VideoEntry> { it.publishedAtMillis }.thenBy { it.id },
                 )
@@ -324,17 +330,8 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                     classificationVersion = 0,
                     notificationChecked = true,
                 )
-                if (rowId == -1L && entry.origin == VideoOrigin.YOUTUBE) {
-                    val promoted = promotePipedVideoFromYouTube(
-                        creator = creator,
-                        entry = entry,
-                        kind = VideoKind.VIDEO,
-                        notified = true,
-                        classificationVersion = 0,
-                    )
-                    if (!promoted) {
-                        reconcileHistoricalYouTubeEntry(entry, shouldNotify = false)
-                    }
+                if (rowId == -1L) {
+                    reconcileHistoricalYouTubeEntry(entry, shouldNotify = false)
                 }
             }
             val sourceValues = ContentValues().apply {
@@ -375,7 +372,6 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
 
     @Synchronized
     fun saveNotificationCursor(sourceKey: String, entry: VideoEntry) {
-        if (entry.origin != VideoOrigin.YOUTUBE) return
         val current = getNotificationCursor(sourceKey)
         if (current != null) {
             val movesBackwards = entry.publishedAtMillis < current.publishedAtMillis ||
@@ -433,23 +429,6 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         "SELECT 1 FROM video_history WHERE video_id = ? LIMIT 1",
         arrayOf(videoId),
     ).use { cursor -> cursor.moveToFirst() }
-
-    @Synchronized
-    fun videoOrigin(videoId: String): VideoOrigin? = readableDatabase.query(
-        "video_history",
-        arrayOf("origin"),
-        "video_id = ?",
-        arrayOf(videoId),
-        null,
-        null,
-        null,
-    ).use { cursor ->
-        if (!cursor.moveToFirst()) {
-            null
-        } else {
-            runCatching { VideoOrigin.valueOf(cursor.getString(0)) }.getOrNull()
-        }
-    }
 
     @Synchronized
     fun updateFromVerifiedYouTubeEntry(entry: VideoEntry) {
@@ -518,7 +497,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         try {
             val existing = db.query(
                 "video_history",
-                arrayOf("origin", "notification_checked"),
+                arrayOf("notification_checked"),
                 "video_id = ?",
                 arrayOf(entry.id),
                 null,
@@ -528,8 +507,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                 if (!cursor.moveToFirst()) {
                     null
                 } else {
-                    runCatching { VideoOrigin.valueOf(cursor.getString(0)) }
-                        .getOrDefault(VideoOrigin.PIPED) to (cursor.getInt(1) == 1)
+                    cursor.getInt(0) == 1
                 }
             }
 
@@ -551,24 +529,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                     }
                 }
 
-                existing.first == VideoOrigin.PIPED -> {
-                    db.update(
-                        "video_history",
-                        verifiedSyncValues(
-                            creator = creator,
-                            entry = entry,
-                            kind = kind,
-                            notified = !shouldNotify,
-                            classificationVersion = classificationVersion,
-                            includeCreator = true,
-                        ),
-                        "video_id = ? AND origin = ?",
-                        arrayOf(entry.id, VideoOrigin.PIPED.name),
-                    )
-                    shouldNotify
-                }
-
-                !existing.second -> {
+                !existing -> {
                     db.update(
                         "video_history",
                         verifiedSyncValues(
@@ -634,40 +595,6 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         put("notification_checked", 1)
     }
 
-    /**
-     * Zastępuje niezaufany rekord Piped danymi potwierdzonymi w feedzie/API
-     * konkretnego kanału. Warunek origin=PIPED zapobiega nadpisywaniu rekordu
-     * YouTube, który mógł legalnie pojawić się także w innej playliście.
-     */
-    @Synchronized
-    fun promotePipedVideoFromYouTube(
-        creator: Creator,
-        entry: VideoEntry,
-        kind: VideoKind,
-        notified: Boolean,
-        classificationVersion: Int = 1,
-    ): Boolean {
-        val updated = writableDatabase.update(
-            "video_history",
-            ContentValues().apply {
-                put("creator_id", creator.id)
-                put("creator_name", creator.name)
-                put("title", entry.title)
-                put("url", entry.url)
-                put("published_ms", entry.publishedAtMillis)
-                put("detected_ms", System.currentTimeMillis())
-                put("kind", kind.name)
-                put("notified", if (notified) 1 else 0)
-                put("classification_version", classificationVersion)
-                put("origin", VideoOrigin.YOUTUBE.name)
-                put("notification_checked", 1)
-            },
-            "video_id = ? AND origin = ?",
-            arrayOf(entry.id, VideoOrigin.PIPED.name),
-        )
-        return updated == 1
-    }
-
     @Synchronized
     fun insertNewVideo(
         creator: Creator,
@@ -693,23 +620,11 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     ): Int = insertHistoricalVideosInternal(
         creator = creator,
         items = items,
-        updateExisting = true,
-    )
-
-    @Synchronized
-    fun insertPipedHistoricalVideos(
-        creator: Creator,
-        items: List<YouTubeHistoryItem>,
-    ): Int = insertHistoricalVideosInternal(
-        creator = creator,
-        items = items,
-        updateExisting = false,
     )
 
     private fun insertHistoricalVideosInternal(
         creator: Creator,
         items: List<YouTubeHistoryItem>,
-        updateExisting: Boolean,
     ): Int {
         if (items.isEmpty()) return 0
         var inserted = 0
@@ -729,7 +644,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                 )
                 if (rowId != -1L) {
                     inserted += 1
-                } else if (updateExisting) {
+                } else {
                     updateHistoricalItem(creator, item)
                 }
             }
@@ -741,7 +656,6 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     private fun updateHistoricalItem(creator: Creator, item: YouTubeHistoryItem) {
-        val existingOrigin = videoOrigin(item.entry.id)
         writableDatabase.update(
             "video_history",
             ContentValues().apply {
@@ -755,12 +669,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                     "classification_version",
                     if (item.kind == VideoKind.UNKNOWN) 0 else 1,
                 )
-                // Backfill historii nie decyduje o powiadomieniu. Rekord Piped
-                // pozostaje oznaczony jako niezaufany do czasu, aż synchronizator
-                // powiadomień oceni go względem kursora właściwego kanału.
-                if (existingOrigin != VideoOrigin.PIPED) {
-                    put("origin", item.entry.origin.name)
-                }
+                put("origin", VideoOrigin.YOUTUBE.name)
             },
             "video_id = ?",
             arrayOf(item.entry.id),
@@ -1169,7 +1078,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
 
     private companion object {
         const val DATABASE_NAME = "lewicowyt_notifier.db"
-        const val DATABASE_VERSION = 9
+        const val DATABASE_VERSION = 10
         const val MAX_CLASSIFICATION_ATTEMPTS = 3
         const val DAY_MILLIS = 24L * 60L * 60L * 1000L
         const val MIN_FREE_PAGES_FOR_VACUUM = 128L

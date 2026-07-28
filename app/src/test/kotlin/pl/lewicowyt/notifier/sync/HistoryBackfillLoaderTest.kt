@@ -1,8 +1,12 @@
 package pl.lewicowyt.notifier.sync
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import pl.lewicowyt.notifier.model.VideoEntry
+import pl.lewicowyt.notifier.model.VideoKind
+import pl.lewicowyt.notifier.model.VideoOrigin
 
 class HistoryBackfillLoaderTest {
     @Test
@@ -105,26 +109,27 @@ class HistoryBackfillLoaderTest {
     }
 
     @Test
-    fun successfulPipedFallbackRemainsPartialWhenYoutubeFailed() {
-        val errors = combineHistorySourceErrors(
-            youtubeErrors = listOf("Kanał: YouTube HTTP 503"),
-            pipedSucceeded = true,
-            pipedError = null,
-            creatorName = "Kanał",
+    fun rssHistoryStartsWithRecentUniqueYouTubeEntries() {
+        val items = rssHistoryItems(
+            entries = listOf(
+                rssEntry("AAAAAAAAAAA", publishedAt = 1_500L),
+                rssEntry("BBBBBBBBBBB", publishedAt = 999L),
+                rssEntry("AAAAAAAAAAA", publishedAt = 1_600L),
+            ),
+            cutoff = 1_000L,
         )
 
-        assertTrue(errors.any { "niezweryfikowaną część historii" in it })
+        assertEquals(1, items.size)
+        assertEquals("AAAAAAAAAAA", items.single().entry.id)
+        assertEquals(VideoOrigin.YOUTUBE, items.single().entry.origin)
+        assertEquals(VideoKind.UNKNOWN, items.single().kind)
     }
 
-    @Test
-    fun completeYoutubeResultIgnoresOptionalPipedFailure() {
-        val errors = combineHistorySourceErrors(
-            youtubeErrors = emptyList(),
-            pipedSucceeded = false,
-            pipedError = "timeout",
-            creatorName = "Kanał",
-        )
-
-        assertTrue(errors.isEmpty())
-    }
+    private fun rssEntry(id: String, publishedAt: Long) = VideoEntry(
+        id = id,
+        title = "Tytuł",
+        url = "https://www.youtube.com/watch?v=$id",
+        publishedAtMillis = publishedAt,
+        author = "Kanał",
+    )
 }

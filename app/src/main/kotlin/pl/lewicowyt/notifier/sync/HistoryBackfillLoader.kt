@@ -13,7 +13,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
-import pl.lewicowyt.notifier.AppLog
 import pl.lewicowyt.notifier.data.AppSettings
 import pl.lewicowyt.notifier.data.CreatorCatalog
 import pl.lewicowyt.notifier.data.LocalDatabase
@@ -22,13 +21,17 @@ import pl.lewicowyt.notifier.model.Creator
 import pl.lewicowyt.notifier.model.CreatorSource
 import pl.lewicowyt.notifier.model.HistoryFilter
 import pl.lewicowyt.notifier.model.SourceType
-import pl.lewicowyt.notifier.network.PipedClient
-import pl.lewicowyt.notifier.network.YouTubeHistoryClient
+import pl.lewicowyt.notifier.model.VideoEntry
+import pl.lewicowyt.notifier.model.VideoKind
+import pl.lewicowyt.notifier.model.VideoOrigin
+import pl.lewicowyt.notifier.network.ResolvedSource
 import pl.lewicowyt.notifier.network.YouTubeDataApiHistoryClient
+import pl.lewicowyt.notifier.network.YouTubeFeedClient
+import pl.lewicowyt.notifier.network.YouTubeHistoryClient
 import pl.lewicowyt.notifier.network.YouTubeHistoryCursor
+import pl.lewicowyt.notifier.network.YouTubeHistoryItem
 import pl.lewicowyt.notifier.network.YouTubeHistoryTab
 import pl.lewicowyt.notifier.network.YouTubeSourceResolver
-import pl.lewicowyt.notifier.network.ResolvedSource
 
 data class BackfillResult(
     val insertedCount: Int,
@@ -46,9 +49,9 @@ class HistoryBackfillLoader(
     private val preferences: PreferencesRepository,
     private val database: LocalDatabase,
     private val resolver: YouTubeSourceResolver,
+    private val feedClient: YouTubeFeedClient,
     private val client: YouTubeHistoryClient,
     private val dataApiClient: YouTubeDataApiHistoryClient,
-    private val pipedClient: PipedClient,
 ) {
     private data class Target(
         val creator: Creator,
@@ -154,6 +157,18 @@ class HistoryBackfillLoader(
             )
         }
 
+        // RSS jest najmniejszą i najszybszą odpowiedzią YouTube. Zapisujemy ją
+        // przed uruchomieniem cięższego stronicowania, aby około 15 najnowszych
+        // pozycji mogło pojawić się na ekranie od razu.
+        val rssResult = runSuspendCatching {
+            loadRssSource(
+                creator = firstTarget.creator,
+                resolved = resolved,
+                cutoff = cutoff,
+                reporter = reporter,
+            )
+        }
+
         if (apiKey.isNotBlank()) {
             val apiResult = loadYouTubeTargets(
                 targets,
@@ -163,14 +178,20 @@ class HistoryBackfillLoader(
                 apiKey,
                 reporter,
             )
-            if (apiResult.errors.isEmpty()) return apiResult
+            if (apiResult.errors.isEmpty()) {
+                return mergeRssAndYouTubeResults(
+                    rssResult = rssResult,
+                    youtubeResult = apiResult,
+                    creatorName = firstTarget.creator.name,
+                )
+            }
 
             val fallbackTargets = buildWebTargets(
                 creator = firstTarget.creator,
                 source = firstTarget.source,
                 settings = settings,
             )
-            val fallbackResult = loadWebAndPiped(
+            val fallbackResult = loadYouTubeTargets(
                 targets = fallbackTargets,
                 resolved = resolved,
                 cutoff = cutoff,
@@ -179,74 +200,79 @@ class HistoryBackfillLoader(
                 reporter = reporter,
             )
             if (fallbackResult.errors.isEmpty()) {
-                // Pełny zakres został dostarczony przez ścieżkę bezkluczową.
+                // Pełny zakres został dostarczony przez YouTube Web.
                 // Wadliwy lub wyczerpany klucz nie może wymuszać kolejnych prób.
                 targets.forEach { completedTargets += it.key }
-                return ChannelResult(
-                    insertedCount = apiResult.insertedCount + fallbackResult.insertedCount,
-                    errors = emptyList(),
+                return mergeRssAndYouTubeResults(
+                    rssResult = rssResult,
+                    youtubeResult = ChannelResult(
+                        insertedCount =
+                            apiResult.insertedCount + fallbackResult.insertedCount,
+                        errors = emptyList(),
+                    ),
+                    creatorName = firstTarget.creator.name,
                 )
             }
-            return ChannelResult(
-                insertedCount = apiResult.insertedCount + fallbackResult.insertedCount,
-                errors = (apiResult.errors + fallbackResult.errors).distinct(),
+            return mergeRssAndYouTubeResults(
+                rssResult = rssResult,
+                youtubeResult = ChannelResult(
+                    insertedCount = apiResult.insertedCount + fallbackResult.insertedCount,
+                    errors = (apiResult.errors + fallbackResult.errors).distinct(),
+                ),
+                creatorName = firstTarget.creator.name,
             )
         }
 
-        return loadWebAndPiped(
-            targets = targets,
-            resolved = resolved,
-            cutoff = cutoff,
-            settings = settings,
-            apiKey = apiKey,
-            reporter = reporter,
+        return mergeRssAndYouTubeResults(
+            rssResult = rssResult,
+            youtubeResult = loadYouTubeTargets(
+                targets = targets,
+                resolved = resolved,
+                cutoff = cutoff,
+                settings = settings,
+                apiKey = "",
+                reporter = reporter,
+            ),
+            creatorName = firstTarget.creator.name,
         )
     }
 
-    private suspend fun loadWebAndPiped(
-        targets: List<Target>,
+    private suspend fun loadRssSource(
+        creator: Creator,
         resolved: ResolvedSource,
         cutoff: Long,
-        settings: AppSettings,
-        apiKey: String,
         reporter: ProgressReporter,
-    ): ChannelResult = coroutineScope {
-            val firstTarget = targets.first()
-            val youtube = async(Dispatchers.IO) {
-                loadYouTubeTargets(targets, resolved, cutoff, settings, apiKey, reporter)
-            }
-            val piped = async(Dispatchers.IO) {
-                runSuspendCatching {
-                    loadPipedSource(
-                        creator = firstTarget.creator,
-                        resolved = resolved,
-                        cutoff = cutoff,
-                        settings = settings,
-                        reporter = reporter,
-                    )
-                }
-            }
-            val youtubeResult = youtube.await()
-            val pipedResult = piped.await()
-            pipedResult.exceptionOrNull()?.let { error ->
-                AppLog.warning(
-                    "lewicowYTHistory",
-                    "Piped nie odpowiedział podczas pobierania historii",
-                    error,
-                )
-            }
-            val errors = combineHistorySourceErrors(
-                youtubeErrors = youtubeResult.errors,
-                pipedSucceeded = pipedResult.isSuccess,
-                pipedError = pipedResult.exceptionOrNull()?.message,
-                creatorName = firstTarget.creator.name,
-            )
-            ChannelResult(
-                insertedCount = youtubeResult.insertedCount +
-                    pipedResult.getOrDefault(0),
-                errors = errors,
-            )
+    ): Int {
+        val items = rssHistoryItems(
+            entries = feedClient.fetch(resolved),
+            cutoff = cutoff,
+        )
+        val insertedCount = database.insertHistoricalVideos(creator, items)
+        reporter.report()
+        return insertedCount
+    }
+
+    private fun mergeRssAndYouTubeResults(
+        rssResult: Result<Int>,
+        youtubeResult: ChannelResult,
+        creatorName: String,
+    ): ChannelResult {
+        val rssError = rssResult.exceptionOrNull()?.let { error ->
+            "$creatorName (YouTube RSS): " +
+                (error.message ?: error.javaClass.simpleName).take(MAX_ERROR_DETAIL_CHARS)
         }
+        return ChannelResult(
+            insertedCount = rssResult.getOrDefault(0) + youtubeResult.insertedCount,
+            // RSS jest szybkim początkiem, ale sam nie dowodzi kompletności
+            // wybranego zakresu. Jego błąd zgłaszamy tylko wtedy, gdy zawiodło
+            // również źródło stronicowane.
+            errors = if (youtubeResult.errors.isEmpty()) {
+                emptyList()
+            } else {
+                (listOfNotNull(rssError) + youtubeResult.errors).distinct()
+            },
+        )
+    }
 
     private suspend fun loadYouTubeTargets(
         targets: List<Target>,
@@ -284,67 +310,6 @@ class HistoryBackfillLoader(
             }
         }
         return ChannelResult(insertedCount, errors)
-    }
-
-    private suspend fun loadPipedSource(
-        creator: Creator,
-        resolved: ResolvedSource,
-        cutoff: Long,
-        settings: AppSettings,
-        reporter: ProgressReporter,
-    ): Int {
-        var page = pipedClient.firstHistoryPage(resolved)
-        var insertedCount = 0
-        var pageNumber = 0
-        val seenVideoIds = mutableSetOf<String>()
-        val seenPageTokens = mutableSetOf<String>()
-
-        while (
-            pageNumber < MAX_PIPED_PAGES_PER_SOURCE &&
-            seenVideoIds.size < MAX_PIPED_ITEMS_PER_SOURCE
-        ) {
-            currentCoroutineContext().ensureActive()
-            pageNumber += 1
-            val remaining = MAX_PIPED_ITEMS_PER_SOURCE - seenVideoIds.size
-            val newItems = page.items
-                .filter { seenVideoIds.add(it.entry.id) }
-                .take(remaining)
-            val relevant = newItems.filter {
-                it.entry.publishedAtMillis >= cutoff &&
-                    it.kind.matches(settings.historyFilters)
-            }
-            insertedCount += database.insertPipedHistoricalVideos(creator, relevant)
-            reporter.report()
-
-            val nextPageToken = page.nextPageToken
-            val shouldContinue = if (resolved.type == SourceType.PLAYLIST) {
-                newItems.isNotEmpty() &&
-                    nextPageToken != null &&
-                    pageNumber < MAX_PIPED_PAGES_PER_SOURCE
-            } else {
-                newItems.isNotEmpty() &&
-                    shouldContinueHistoryPaging(
-                        publishedTimes = page.items.map { it.entry.publishedAtMillis },
-                        cutoff = cutoff,
-                        hasNextPage = nextPageToken != null,
-                        loadedPageCount = pageNumber,
-                        maxPages = MAX_PIPED_PAGES_PER_SOURCE,
-                    )
-            }
-            if (!shouldContinue) {
-                break
-            }
-            val requiredNextPageToken = requireNotNull(nextPageToken)
-            if (!seenPageTokens.add(requiredNextPageToken)) {
-                throw IOException("Piped powtórzył token kontynuacji")
-            }
-            page = pipedClient.nextPage(
-                source = resolved,
-                nextPageToken = requiredNextPageToken,
-                instanceBaseUrl = page.instanceBaseUrl,
-            )
-        }
-        return insertedCount
     }
 
     private fun resolveForDataApi(
@@ -520,9 +485,9 @@ class HistoryBackfillLoader(
         append('|')
         append(
             if (apiKey.isBlank()) {
-                "WEB+PIPED"
+                "RSS+WEB"
             } else {
-                apiKey.hashCode()
+                "RSS+API:${apiKey.hashCode()}"
             },
         )
     }
@@ -562,8 +527,6 @@ class HistoryBackfillLoader(
     private companion object {
         const val MAX_PARALLEL_CHANNELS = 8
         const val MAX_PAGES_PER_TARGET = 120
-        const val MAX_PIPED_PAGES_PER_SOURCE = 12
-        const val MAX_PIPED_ITEMS_PER_SOURCE = 1_000
         const val MAX_ERROR_DETAIL_CHARS = 400
         const val MAX_ERROR_LINE_CHARS = 600
         const val PROGRESS_INTERVAL_MILLIS = 400L
@@ -611,19 +574,19 @@ internal fun isHistoryRangeComplete(
     !hasNextPage ||
         (publishedTimes.isNotEmpty() && publishedTimes.min() < cutoff)
 
-internal fun combineHistorySourceErrors(
-    youtubeErrors: List<String>,
-    pipedSucceeded: Boolean,
-    pipedError: String?,
-    creatorName: String,
-): List<String> {
-    if (youtubeErrors.isEmpty()) return emptyList()
-    return if (pipedSucceeded) {
-        youtubeErrors + (
-            "$creatorName: Piped dostarczył tylko niezweryfikowaną część historii; " +
-                "ponów, aby YouTube potwierdził pełny zakres"
-            )
-    } else {
-        youtubeErrors + "$creatorName (Piped): ${pipedError ?: "nieznany błąd"}"
+internal fun rssHistoryItems(
+    entries: List<VideoEntry>,
+    cutoff: Long,
+): List<YouTubeHistoryItem> = entries
+    .asSequence()
+    .filter { it.publishedAtMillis >= cutoff }
+    .distinctBy { it.id }
+    .map { entry ->
+        YouTubeHistoryItem(
+            entry = entry.copy(origin = VideoOrigin.YOUTUBE),
+            // RSS nie rozróżnia niezawodnie filmu, Shorta i transmisji.
+            // Następna odpowiedź API/Web uzupełni dokładny typ.
+            kind = VideoKind.UNKNOWN,
+        )
     }
-}
+    .toList()

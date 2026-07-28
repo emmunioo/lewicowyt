@@ -22,7 +22,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 import pl.lewicowyt.notifier.AppGraph
 import pl.lewicowyt.notifier.MainActivity
 import pl.lewicowyt.notifier.R
-import pl.lewicowyt.notifier.data.BackgroundMode
+import pl.lewicowyt.notifier.data.AppSettings
+import pl.lewicowyt.notifier.model.SyncOutcome
 
 class ReliableSyncService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -35,6 +36,10 @@ class ReliableSyncService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val retryAttempt = intent
+            ?.getIntExtra(SyncScheduler.EXTRA_RETRY_ATTEMPT, 0)
+            ?.coerceIn(0, SyncScheduler.MAX_RETRY_ATTEMPTS)
+            ?: 0
         ServiceCompat.startForeground(
             this,
             FOREGROUND_NOTIFICATION_ID,
@@ -65,36 +70,52 @@ class ReliableSyncService : Service() {
 
         if (syncJob?.isActive == true) return START_NOT_STICKY
         syncJob = serviceScope.launch {
+            var settings: AppSettings? = null
+            var retryNeeded = false
             try {
-                val settings = AppGraph.preferences.current()
+                val currentSettings = AppGraph.preferences.current()
+                settings = currentSettings
                 if (
-                    settings.backgroundMode == BackgroundMode.RELIABLE &&
-                    settings.selectedCreatorIds.isNotEmpty() &&
+                    currentSettings.selectedCreatorIds.isNotEmpty() &&
+                    AppGraph.scheduler.hasExactAlarmAccess() &&
                     currentSyncNetworkAccess(this@ReliableSyncService)
-                        .allowsSync(settings.allowMobileData)
+                        .allowsSync(currentSettings.allowMobileData)
                 ) {
-                    val completed = withTimeoutOrNull(SYNC_TIMEOUT_MILLIS) {
+                    val outcome = withTimeoutOrNull(SYNC_TIMEOUT_MILLIS) {
                         AppGraph.syncEngine.sync()
                     }
-                    if (completed == null) {
-                        recordFailure("Synchronizacja niezawodna przekroczyła limit czasu")
+                    if (outcome == null) {
+                        recordFailure("Automatyczna synchronizacja przekroczyła limit czasu")
+                        retryNeeded = true
+                    } else {
+                        retryNeeded = shouldRetryAlarmSync(outcome, retryAttempt)
                     }
+                } else if (
+                    currentSettings.selectedCreatorIds.isNotEmpty() &&
+                    AppGraph.scheduler.hasExactAlarmAccess()
+                ) {
+                    retryNeeded = true
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
+                retryNeeded = true
                 recordFailure(
-                    "Błąd synchronizacji niezawodnej: " +
+                    "Błąd automatycznej synchronizacji: " +
                         (error.message ?: error.javaClass.simpleName),
                 )
             } finally {
-                try {
-                    // Alarm awaryjny może wyprzedzić opóźniony WorkManager.
-                    // Pełne przeliczenie zastępuje stary termin dzienny,
-                    // zamiast pozostawiać w kolejce drugą synchronizację.
-                    AppGraph.scheduler.schedule(AppGraph.preferences.current())
-                } catch (_: Exception) {
-                    // Alarm odbiornika jest już ustawiony jako zabezpieczenie.
+                if (retryNeeded) {
+                    try {
+                        settings?.let {
+                            AppGraph.scheduler.scheduleRetry(
+                                settings = it,
+                                retryAttempt = retryAttempt + 1,
+                            )
+                        }
+                    } catch (_: Exception) {
+                        // Receiver zapisał już kolejny zwykły termin.
+                    }
                 }
                 ServiceCompat.stopForeground(
                     this@ReliableSyncService,
@@ -130,10 +151,10 @@ class ReliableSyncService : Service() {
     private fun createNotificationChannel() {
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "Sprawdzanie w tle",
+            "Automatyczne sprawdzanie w tle",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "Widoczne tylko podczas awaryjnego sprawdzania nowych materiałów"
+            description = "Widoczne podczas pobierania nowych materiałów po alarmie"
             setShowBadge(false)
         }
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
@@ -144,4 +165,19 @@ class ReliableSyncService : Service() {
         const val FOREGROUND_NOTIFICATION_ID = 0x4C5954
         val SYNC_TIMEOUT_MILLIS = TimeUnit.MINUTES.toMillis(8)
     }
+}
+
+internal fun shouldRetryAlarmSync(
+    outcome: SyncOutcome,
+    retryAttempt: Int,
+    maxRetries: Int = SyncScheduler.MAX_RETRY_ATTEMPTS,
+): Boolean {
+    if (outcome.errors.isEmpty() || retryAttempt >= maxRetries) return false
+
+    // Pojedyncza niedostępna strona nie może ponownie uruchamiać całej,
+    // kosztownej synchronizacji kilkudziesięciu poprawnych źródeł.
+    val failedSources = outcome.errors.size
+    val attemptedSources = outcome.checkedSources + failedSources
+    return outcome.checkedSources == 0 ||
+        failedSources.toLong() * 2L >= attemptedSources.toLong()
 }

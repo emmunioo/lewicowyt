@@ -6,7 +6,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import pl.lewicowyt.notifier.data.NotificationCursor
 import pl.lewicowyt.notifier.model.VideoEntry
-import pl.lewicowyt.notifier.model.VideoOrigin
 
 class NotificationCursorTest {
     @Test
@@ -32,34 +31,6 @@ class NotificationCursorTest {
 
         assertEquals("b", newest?.id)
         assertEquals(2_000L, newest?.publishedAtMillis)
-    }
-
-    @Test
-    fun pipedCannotAdvanceTrustedNotificationCursor() {
-        val newest = newestTrustedNotificationEntry(
-            listOf(
-                entry("youtube", 2_000L),
-                entry("piped-future", 9_999_999L, VideoOrigin.PIPED),
-            ),
-        )
-
-        assertEquals("youtube", newest?.id)
-        assertEquals(VideoOrigin.YOUTUBE, newest?.origin)
-    }
-
-    @Test
-    fun pipedEntryIsNeverEligibleForNotification() {
-        val cursor = NotificationCursor(videoId = "youtube", publishedAtMillis = 5_000L)
-        val recentPiped = entry("piped-new", 4_900L, VideoOrigin.PIPED)
-
-        assertFalse(
-            shouldProcessNotificationEntry(
-                entry = recentPiped,
-                cursor = cursor,
-                lastCheckedMillis = 4_800L,
-                notificationGraceMillis = 100L,
-            ),
-        )
     }
 
     @Test
@@ -132,13 +103,11 @@ class NotificationCursorTest {
     private fun entry(
         id: String,
         publishedAtMillis: Long,
-        origin: VideoOrigin = VideoOrigin.YOUTUBE,
     ) = VideoEntry(
         id = id,
         title = id,
         url = "https://www.youtube.com/watch?v=$id",
         publishedAtMillis = publishedAtMillis,
         author = "Kanał",
-        origin = origin,
     )
 }

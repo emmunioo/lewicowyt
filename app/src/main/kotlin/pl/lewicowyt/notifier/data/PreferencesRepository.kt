@@ -24,11 +24,6 @@ enum class ThemeMode {
     DARK,
 }
 
-enum class BackgroundMode {
-    BALANCED,
-    RELIABLE,
-}
-
 data class AppSettings(
     val selectedCreatorIds: Set<String> = emptySet(),
     val deselectedCreatorAtMillis: Map<String, Long> = emptyMap(),
@@ -38,8 +33,6 @@ data class AppSettings(
     val historyWindowDays: Int = 14,
     val historyFilters: Set<HistoryFilter> = HistoryFilter.entries.toSet(),
     val allowMobileData: Boolean = true,
-    val requireBatteryNotLow: Boolean = false,
-    val backgroundMode: BackgroundMode = BackgroundMode.BALANCED,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val accentColorArgb: Long = DEFAULT_ACCENT_COLOR_ARGB,
     val youtubeApiEnabled: Boolean = false,
@@ -61,8 +54,6 @@ class PreferencesRepository(private val context: Context) {
         val historyWindowDays = intPreferencesKey("history_window_days")
         val historyFilters = stringSetPreferencesKey("history_filters")
         val allowMobileData = booleanPreferencesKey("allow_mobile_data")
-        val batteryNotLow = booleanPreferencesKey("battery_not_low")
-        val backgroundMode = stringPreferencesKey("background_mode")
         val themeMode = stringPreferencesKey("theme_mode")
         val accentColor = longPreferencesKey("accent_color_argb")
         val youtubeApiEnabled = booleanPreferencesKey("youtube_api_enabled")
@@ -103,10 +94,6 @@ class PreferencesRepository(private val context: Context) {
                     HistoryFilter.entries.toSet()
                 },
                 allowMobileData = preferences[Keys.allowMobileData] ?: true,
-                requireBatteryNotLow = preferences[Keys.batteryNotLow] ?: false,
-                backgroundMode = preferences[Keys.backgroundMode]
-                    ?.let { runCatching { BackgroundMode.valueOf(it) }.getOrNull() }
-                    ?: BackgroundMode.BALANCED,
                 themeMode = preferences[Keys.themeMode]
                     ?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() }
                     ?: ThemeMode.SYSTEM,
@@ -207,14 +194,6 @@ class PreferencesRepository(private val context: Context) {
 
     suspend fun setAllowMobileData(value: Boolean) {
         context.settingsDataStore.edit { it[Keys.allowMobileData] = value }
-    }
-
-    suspend fun setRequireBatteryNotLow(value: Boolean) {
-        context.settingsDataStore.edit { it[Keys.batteryNotLow] = value }
-    }
-
-    suspend fun setBackgroundMode(value: BackgroundMode) {
-        context.settingsDataStore.edit { it[Keys.backgroundMode] = value.name }
     }
 
     suspend fun setThemeMode(value: ThemeMode) {

@@ -1,10 +1,28 @@
-# lewicowYT 1.2-beta
+# lewicowYT 1.3-beta
 
 Natywna aplikacja dla Androida do lokalnego obserwowania wybranych kanałów
 YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.
 
 > To niezależny, nieoficjalny projekt. Nie jest produktem ani oficjalnym klientem
-> Google, YouTube lub Piped i nie jest przez nie wspierany.
+> Google ani YouTube i nie jest przez nie wspierany.
+
+## Najważniejsze zmiany w 1.3-beta
+
+- usunięto eksperymentalne źródło Piped. Najnowsze materiały są dostarczane
+  lekką ścieżką YouTube, a starsza historia jest doczytywana bezpośrednio
+  z YouTube Web albo opcjonalnego Data API;
+- usunięto wybór trybów oszczędzania i zwiększonej niezawodności. Aplikacja ma
+  teraz jeden mechanizm działania w tle nastawiony na pewniejsze powiadomienia
+  również przy wygaszonym ekranie;
+- nowy mechanizm może zużyć nieco więcej energii. Przy typowych ustawieniach
+  różnica powinna być niewielka, ale interwał 15 minut i duża liczba
+  obserwowanych kanałów mogą być zauważalne;
+- klucz YouTube Data API może przyspieszyć pobieranie dłuższej historii, ale
+  nie jest przedstawiany jako gwarantowany sposób zmniejszenia zużycia baterii;
+- aplikacja sprawdza rzeczywisty stan ograniczeń baterii Androida i prowadzi
+  bezpośrednio do ustawienia dotyczącego lewicowYT;
+- po aktualizacji istniejącej instalacji najważniejsze zmiany są pokazywane
+  jednorazowo w aplikacji.
 
 ## Co potrafi aplikacja
 
@@ -33,12 +51,14 @@ YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.
   dłuższą historię po kilku stronach;
 - zachowuje lokalne dane odznaczonego twórcy przez 7 dni. Ponowne zaznaczenie
   w tym czasie przywraca je bez ponownego pobierania;
-- pokazuje przy wpisie źródło metadanych: `Piped` lub `YouTube`;
+- dla każdego źródła najpierw zapisuje lekką odpowiedź RSS — zwykle około
+  15 najnowszych pozycji — a następnie uzupełnia starszy zakres przez Data API
+  albo YouTube Web;
 - używa miniatur 640×480 i kadruje je do proporcji 16:9 bez czarnych pasów.
 
 ### Powiadomienia
 
-- sprawdza nowe materiały ręcznie albo okresowo przez WorkManager;
+- sprawdza nowe materiały ręcznie albo przez dokładny alarm systemowy;
 - utrzymuje osobny, trwały punkt odniesienia dla każdego źródła, dzięki czemu
   restart lub aktualizacja aplikacji nie zgłasza ponownie całej historii;
 - przy maksymalnie 3 nowych materiałach tworzy osobne powiadomienie dla każdego,
@@ -49,34 +69,38 @@ YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.
   sekcji „Powiadomienia”, od najnowszej;
 - oznacza materiał jako dostarczony dopiero po przyjęciu powiadomienia przez
   Androida. Brak uprawnienia albo błąd publikacji pozostawia go do ponowienia;
-- nie pozwala, aby sam niezweryfikowany wpis Piped wywołał powiadomienie.
-  Materiał musi zostać pobrany z RSS, YouTube Data API albo kontrolowanej
-  ścieżki YouTube Web dla sprawdzanego źródła.
+- materiał musi zostać pobrany z RSS, YouTube Data API albo kontrolowanej
+  ścieżki YouTube Web dla sprawdzanego źródła;
 
 ### Działanie w tle
 
 - dostępne częstotliwości to od 15 minut do 12 godzin oraz raz dziennie;
 - dla harmonogramu dziennego można wybrać lokalną godzinę;
-- domyślny tryb zbalansowany łączy WorkManager z rzadkim, niedokładnym alarmem
-  kontrolnym i automatycznym nadrabianiem zaległości;
-- tryb zwiększonej niezawodności może użyć dokładnego alarmu oraz krótkiej
-  usługi pierwszoplanowej, jeśli zwykły WorkManager nadmiernie się opóźni;
+- jedynym harmonogramem jest jednorazowy `AlarmManager.setExactAndAllowWhileIdle`
+  z `RTC_WAKEUP`; po każdym wywołaniu aplikacja zapisuje następny termin;
+- alarm uruchamia krótką usługę pierwszoplanową typu `dataSync`, więc pobieranie
+  nie zależy od utrzymania procesu aplikacji ani okresowego WorkManagera;
+- Android 12 i nowszy wymaga przyznania aplikacji systemowego dostępu
+  „Alarmy i przypomnienia”; bez niego automatyczne sprawdzanie jest wyłączone;
 - sprawdzanych jest do 6 źródeł równocześnie;
-- ustawienie danych komórkowych obowiązuje zarówno WorkManager, jak i awaryjne
-  sprawdzenie trybu zwiększonej niezawodności;
-- przed awaryjnym sprawdzeniem aplikacja wymaga sieci ze zweryfikowanym przez
+- ustawienie danych komórkowych obowiązuje każde automatyczne sprawdzenie;
+- przed synchronizacją aplikacja wymaga sieci ze zweryfikowanym przez
   Androida dostępem do internetu;
-- warunek odpowiedniego poziomu baterii można zmienić w ustawieniach trybu
-  zbalansowanego;
-- użytkownik trybu zwiększonej niezawodności może opcjonalnie otworzyć systemową
-  listę optymalizacji baterii, bez obowiązkowego wyłączania zabezpieczeń;
-- rozległe błędy sieci są ponawiane najwyżej dwa razy z wykładniczo rosnącym
-  odstępem.
+- aplikacja sprawdza rzeczywisty stan optymalizacji baterii przez Androida
+  i pokazuje, czy lewicowYT działa w trybie „Bez ograniczeń”;
+- przy każdym wejściu do ustawień przypomina o trybie „Bez ograniczeń”, dopóki
+  system nadal ogranicza aplikację. Przycisk otwiera systemowe żądanie dotyczące
+  bezpośrednio lewicowYT, z awaryjnym przejściem do szczegółów aplikacji;
+- brak dozwolonej sieci lub rozległy błąd jest ponawiany najwyżej dwa razy,
+  co 15 minut;
+- interwał 15 minut bez aktywnego klucza YouTube Data API jest oznaczony jako
+  intensywny: sam RSS jest lekki, ale częste wybudzenia oraz ewentualne
+  uzupełnianie przez YouTube Web mogą zwiększać transfer i zużycie energii.
 
-WorkManager działa również przy zgaszonym ekranie i po odtworzeniu harmonogramu
-przez aplikację, ale Android nie gwarantuje wykonania dokładnie co do minuty.
-Doze, brak sieci oraz dodatkowe ograniczenia oszczędzania energii producenta
-telefonu mogą przesunąć synchronizację.
+Dokładny alarm może obudzić urządzenie także w Doze i przy wygaszonym ekranie.
+Automatyczne sprawdzanie nie zadziała po użyciu funkcji „Wymuś zatrzymanie”,
+bez specjalnego dostępu do alarmów, bez dozwolonej sieci albo jeśli producent
+telefonu dodatkowo blokuje uruchamianie usług w tle.
 
 ### Aktualizacje
 
@@ -87,7 +111,10 @@ telefonu mogą przesunąć synchronizację.
   GitHub skrót SHA-256;
 - akceptuje odnośniki do APK wyłącznie z właściwego repozytorium GitHub;
 - pobieranie odbywa się w przeglądarce, a instalacja zawsze wymaga decyzji
-  użytkownika.
+  użytkownika;
+- po aktualizacji istniejącej instalacji jednorazowo pokazuje lokalne okno
+  „Co nowego”. Nie wyświetla go po pierwszej instalacji ani ponownie po
+  potwierdzeniu.
 
 ### Wygląd i pamięć obrazów
 
@@ -122,20 +149,16 @@ Klucz można uzyskać bezpłatnie w Google Cloud:
 Klucz jest szyfrowany AES-256-GCM. Klucz szyfrujący pozostaje w Android Keystore,
 a sekret nie trafia do zapisywalnego stanu interfejsu ani kopii zapasowej.
 
-### Bez klucza: YouTube Web i Piped
+### Bez klucza: RSS i YouTube Web
 
-Historia jest pobierana równocześnie ze strony YouTube i z publicznych instancji
-Piped. Piped ma przyspieszać pierwsze wyniki i zapewniać dodatkową dostępność,
-ale jest źródłem eksperymentalnym i mniej wiarygodnym niż YouTube.
+Dla każdego kanału lub playlisty aplikacja najpierw pobiera mały kanał RSS
+i natychmiast zapisuje zwrócone pozycje. RSS zwykle obejmuje około 15
+najnowszych materiałów. Następnie YouTube Web uzupełnia starsze strony aż do
+osiągnięcia wybranego zakresu czasu. Duplikaty między RSS i Web są scalane
+lokalnie po identyfikatorze filmu.
 
-- aplikacja próbuje do czterech skonfigurowanych instancji Piped;
-- żądania mają krótkie limity czasu, ograniczenia rozmiaru odpowiedzi i
-  zabezpieczenia przed zapętloną paginacją;
-- wynik Piped jest oznaczony jako niezaufany, dopóki YouTube go nie potwierdzi;
-- potwierdzone dane YouTube zastępują dane Piped;
-- awaria Piped nie blokuje działającego źródła YouTube;
-- publiczna instancja Piped widzi adres IP urządzenia i publiczne identyfikatory
-  sprawdzanych kanałów, lecz nie otrzymuje lokalnej historii ani ustawień.
+Integracja Piped została usunięta. Aplikacja nie łączy się z publicznymi
+instancjami Piped i nie przekazuje im identyfikatorów obserwowanych kanałów.
 
 ## Prywatność i retencja
 
@@ -164,6 +187,9 @@ instalowanie aplikacji z tego źródła.
 Aktualizacja zostanie zaakceptowana tylko wtedy, gdy ma ten sam
 `applicationId`, wyższy `versionCode` i została podpisana tym samym kluczem co
 poprzednia publiczna wersja.
+
+Po pierwszym uruchomieniu zaktualizowanej aplikacji pojawi się jednorazowe
+podsumowanie najważniejszych zmian w danym wydaniu.
 
 ## Kompilowanie
 

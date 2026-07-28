@@ -6,7 +6,6 @@ import pl.lewicowyt.notifier.data.CreatorCatalog
 import pl.lewicowyt.notifier.data.LocalDatabase
 import pl.lewicowyt.notifier.data.PreferencesRepository
 import pl.lewicowyt.notifier.network.HttpTextClient
-import pl.lewicowyt.notifier.network.PipedClient
 import pl.lewicowyt.notifier.network.PrivacyHttpClient
 import pl.lewicowyt.notifier.network.YouTubeFeedClient
 import pl.lewicowyt.notifier.network.YouTubeHistoryClient
@@ -56,7 +55,7 @@ object AppGraph {
             database = LocalDatabase(appContext)
             notifications = NotificationHelper(appContext, database)
             val http = HttpTextClient(PrivacyHttpClient.get(appContext))
-            val pipedClient = PipedClient(http)
+            val feedClient = YouTubeFeedClient(http)
             dataApiClient = YouTubeDataApiHistoryClient(
                 http = http,
                 apiRequestHeaders = androidApiRequestHeaders(appContext),
@@ -68,16 +67,16 @@ object AppGraph {
                 preferences = preferences,
                 database = database,
                 resolver = resolver,
+                feedClient = feedClient,
                 client = historyClient,
                 dataApiClient = dataApiClient,
-                pipedClient = pipedClient,
             )
             syncEngine = SyncEngine(
                 catalog = catalog,
                 preferences = preferences,
                 database = database,
                 resolver = resolver,
-                feedClient = YouTubeFeedClient(http),
+                feedClient = feedClient,
                 classifier = YouTubePageClassifier(http),
                 notifications = notifications,
                 dataApiClient = dataApiClient,

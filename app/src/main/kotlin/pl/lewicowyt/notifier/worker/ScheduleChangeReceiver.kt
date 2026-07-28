@@ -11,7 +11,7 @@ import pl.lewicowyt.notifier.AppGraph
 
 /**
  * Przelicza trwały harmonogram po restarcie oraz po zmianie zegara lub strefy.
- * Receiver wykonuje wyłącznie krótki zapis do WorkManagera.
+ * Receiver wykonuje wyłącznie krótki zapis następnego alarmu systemowego.
  */
 class ScheduleChangeReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {

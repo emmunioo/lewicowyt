@@ -9,45 +9,61 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import pl.lewicowyt.notifier.AppGraph
-import pl.lewicowyt.notifier.data.BackgroundMode
 
 class ReliableSyncAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != SyncScheduler.ACTION_RELIABLE_SYNC_ALARM) return
+        if (intent.action != SyncScheduler.ACTION_SYNC_ALARM) return
+        val retryAttempt = intent.getIntExtra(SyncScheduler.EXTRA_RETRY_ATTEMPT, 0)
+            .coerceIn(0, SyncScheduler.MAX_RETRY_ATTEMPTS)
         val pendingResult = goAsync()
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            var retrySettings: pl.lewicowyt.notifier.data.AppSettings? = null
             try {
                 val appContext = context.applicationContext
                 AppGraph.initialize(appContext)
                 val settings = AppGraph.preferences.current()
-
-                // Alarm jest jednorazowy. Następny termin zapisujemy przed
-                // uruchomieniem sieci, aby awaria procesu nie przerwała nadzoru.
-                AppGraph.scheduler.scheduleReliableWatchdog(settings)
+                retrySettings = settings
 
                 if (
-                    settings.backgroundMode != BackgroundMode.RELIABLE ||
                     settings.selectedCreatorIds.isEmpty() ||
-                    !AppGraph.scheduler.hasExactAlarmAccess() ||
-                    AppGraph.syncEngine.isSyncInProgress() ||
-                    !currentSyncNetworkAccess(appContext)
-                        .allowsSync(settings.allowMobileData) ||
-                    !shouldRunReliableAlarm(
-                        nowMillis = System.currentTimeMillis(),
-                        lastSuccessfulSyncMillis = settings.lastCompletedSyncAtMillis,
-                        intervalMinutes = settings.intervalMinutes,
-                    )
+                    !AppGraph.scheduler.hasExactAlarmAccess()
                 ) {
+                    return@launch
+                }
+
+                // Alarm jest jednorazowy. Następny zwykły termin zapisujemy
+                // przed uruchomieniem sieci, aby awaria procesu nie przerwała
+                // całego harmonogramu.
+                AppGraph.scheduler.scheduleNext(settings)
+                if (AppGraph.syncEngine.isSyncInProgress()) return@launch
+
+                if (
+                    !currentSyncNetworkAccess(appContext)
+                        .allowsSync(settings.allowMobileData)
+                ) {
+                    AppGraph.scheduler.scheduleRetry(
+                        settings = settings,
+                        retryAttempt = retryAttempt + 1,
+                    )
                     return@launch
                 }
 
                 ContextCompat.startForegroundService(
                     appContext,
-                    Intent(appContext, ReliableSyncService::class.java),
+                    Intent(appContext, ReliableSyncService::class.java)
+                        .putExtra(SyncScheduler.EXTRA_RETRY_ATTEMPT, retryAttempt),
                 )
             } catch (_: Exception) {
-                // Następny alarm został już zaplanowany. Otwarcie aplikacji
-                // również odtworzy harmonogram, jeśli system go usunie.
+                try {
+                    retrySettings?.let {
+                        AppGraph.scheduler.scheduleRetry(
+                            settings = it,
+                            retryAttempt = retryAttempt + 1,
+                        )
+                    }
+                } catch (_: Exception) {
+                    // Następny zwykły termin został zapisany przed próbą startu.
+                }
             } finally {
                 pendingResult.finish()
             }

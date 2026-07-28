@@ -25,7 +25,6 @@ import kotlinx.coroutines.withContext
 import pl.lewicowyt.notifier.AppGraph
 import pl.lewicowyt.notifier.BuildConfig
 import pl.lewicowyt.notifier.data.AppSettings
-import pl.lewicowyt.notifier.data.BackgroundMode
 import pl.lewicowyt.notifier.data.ThemeMode
 import pl.lewicowyt.notifier.images.JxlImageCache
 import pl.lewicowyt.notifier.model.Creator
@@ -228,7 +227,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         refreshHistory()
-        viewModelScope.launch { graph.scheduler.ensureScheduled() }
     }
 
     fun setQuery(value: String) {
@@ -286,20 +284,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun setAllowMobileData(value: Boolean) {
         viewModelScope.launch {
             graph.preferences.setAllowMobileData(value)
-            graph.scheduler.schedule(graph.preferences.current())
-        }
-    }
-
-    fun setBatteryNotLow(value: Boolean) {
-        viewModelScope.launch {
-            graph.preferences.setRequireBatteryNotLow(value)
-            graph.scheduler.schedule(graph.preferences.current())
-        }
-    }
-
-    fun setBackgroundMode(value: BackgroundMode) {
-        viewModelScope.launch {
-            graph.preferences.setBackgroundMode(value)
             graph.scheduler.schedule(graph.preferences.current())
         }
     }

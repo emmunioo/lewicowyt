@@ -45,7 +45,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
@@ -83,7 +82,6 @@ import java.net.URI
 import java.util.Locale
 import pl.lewicowyt.notifier.BuildConfig
 import pl.lewicowyt.notifier.R
-import pl.lewicowyt.notifier.data.BackgroundMode
 import pl.lewicowyt.notifier.data.DEFAULT_ACCENT_COLOR_ARGB
 import pl.lewicowyt.notifier.data.MAX_YOUTUBE_API_KEY_CHARS
 import pl.lewicowyt.notifier.data.ThemeMode
@@ -92,7 +90,6 @@ import pl.lewicowyt.notifier.model.HistoryFilter
 import pl.lewicowyt.notifier.model.HistoryItem
 import pl.lewicowyt.notifier.model.SourceType
 import pl.lewicowyt.notifier.model.VideoKind
-import pl.lewicowyt.notifier.model.VideoOrigin
 
 private enum class Screen(val title: String) {
     CREATORS("Twórcy"),
@@ -106,11 +103,17 @@ private enum class Screen(val title: String) {
 fun LewicowYTApp(
     viewModel: AppViewModel,
     exactAlarmAccessGranted: Boolean = true,
+    batteryOptimizationIgnored: Boolean = true,
+    whatsNewVisible: Boolean = false,
+    acknowledgeWhatsNew: () -> Unit = {},
     requestExactAlarmAccess: () -> Unit = {},
     openBatteryOptimizationSettings: () -> Unit = {},
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var selectedScreenIndex by rememberSaveable { mutableIntStateOf(0) }
+    var batteryOptimizationNoticeVisible by remember {
+        mutableStateOf(false)
+    }
     val screen = Screen.entries[selectedScreenIndex]
 
     LaunchedEffect(screen) {
@@ -118,10 +121,92 @@ fun LewicowYTApp(
             viewModel.refreshHistory()
         }
     }
+    LaunchedEffect(screen, batteryOptimizationIgnored) {
+        batteryOptimizationNoticeVisible = shouldShowBatteryOptimizationNotice(
+            isSettingsScreen = screen == Screen.SETTINGS,
+            batteryOptimizationIgnored = batteryOptimizationIgnored,
+        )
+    }
     LaunchedEffect(state.notificationNavigationRequest) {
         if (state.notificationNavigationRequest > 0L) {
             selectedScreenIndex = Screen.NOTIFICATIONS.ordinal
         }
+    }
+
+    if (whatsNewVisible) {
+        AlertDialog(
+            onDismissRequest = acknowledgeWhatsNew,
+            title = { Text("Co nowego w lewicowYT 1.3-beta") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 440.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("Szybsze dostarczanie historii", fontWeight = FontWeight.Bold)
+                    Text(
+                        "Usunęliśmy eksperymentalne źródło Piped. Najnowsze materiały " +
+                            "pojawiają się szybciej, a starsza historia jest doczytywana " +
+                            "w razie potrzeby bezpośrednio z YouTube.",
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text("Jeden pewniejszy tryb działania", fontWeight = FontWeight.Bold)
+                    Text(
+                        "Usunęliśmy tryby oszczędzania energii i zastąpiliśmy je jednym " +
+                            "mechanizmem nastawionym na pewniejsze powiadomienia również " +
+                            "przy wygaszonym ekranie.",
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text("Wpływ na baterię", fontWeight = FontWeight.Bold)
+                    Text(
+                        "Nowy sposób może zużyć nieco więcej energii. Przy typowych " +
+                            "ustawieniach różnica powinna być niewielka, ale sprawdzanie co " +
+                            "15 minut i obserwowanie wielu kanałów może być zauważalne. " +
+                            "Klucz API może przyspieszyć dłuższą historię, lecz nie " +
+                            "gwarantuje mniejszego zużycia baterii.",
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text("Lepsza kontrola ustawień Androida", fontWeight = FontWeight.Bold)
+                    Text(
+                        "Aplikacja pokazuje teraz rzeczywisty stan ograniczeń baterii " +
+                            "i prowadzi bezpośrednio do ustawienia dotyczącego lewicowYT.",
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = acknowledgeWhatsNew) {
+                    Text("Rozumiem")
+                }
+            },
+        )
+    } else if (batteryOptimizationNoticeVisible) {
+        AlertDialog(
+            onDismissRequest = { batteryOptimizationNoticeVisible = false },
+            title = { Text("Wymagane działanie bez ograniczeń") },
+            text = {
+                Text(
+                    "Aby automatyczne sprawdzanie i powiadomienia działały możliwie " +
+                        "niezawodnie również przy wyłączonym ekranie, ustaw dla lewicowYT " +
+                        "użycie baterii „Bez ograniczeń”. Może to zwiększyć zużycie energii.",
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        batteryOptimizationNoticeVisible = false
+                        openBatteryOptimizationSettings()
+                    },
+                ) {
+                    Text("Przejdź do ustawień")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { batteryOptimizationNoticeVisible = false }) {
+                    Text("Później")
+                }
+            },
+        )
     }
 
     Scaffold(
@@ -162,6 +247,7 @@ fun LewicowYTApp(
                     state = state,
                     viewModel = viewModel,
                     exactAlarmAccessGranted = exactAlarmAccessGranted,
+                    batteryOptimizationIgnored = batteryOptimizationIgnored,
                     requestExactAlarmAccess = requestExactAlarmAccess,
                     openBatteryOptimizationSettings = openBatteryOptimizationSettings,
                 )
@@ -439,7 +525,6 @@ private fun HistoryScreen(state: AppUiState, viewModel: AppViewModel) {
                                     modifier = Modifier.weight(1f),
                                     style = MaterialTheme.typography.bodySmall,
                                 )
-                                VideoOriginBadge(item.origin)
                             }
                         }
                     }
@@ -544,7 +629,6 @@ private fun NotificationsScreen(state: AppUiState) {
                                 modifier = Modifier.weight(1f),
                                 style = MaterialTheme.typography.bodySmall,
                             )
-                            VideoOriginBadge(item.origin)
                         }
                     }
                 }
@@ -558,6 +642,7 @@ private fun SettingsScreen(
     state: AppUiState,
     viewModel: AppViewModel,
     exactAlarmAccessGranted: Boolean,
+    batteryOptimizationIgnored: Boolean,
     requestExactAlarmAccess: () -> Unit,
     openBatteryOptimizationSettings: () -> Unit,
 ) {
@@ -638,10 +723,9 @@ private fun SettingsScreen(
             FastHistorySettings(state, viewModel)
         }
         item {
-            BackgroundModeSettings(
-                mode = state.settings.backgroundMode,
+            ExactAlarmSettings(
                 exactAlarmAccessGranted = exactAlarmAccessGranted,
-                onModeSelected = viewModel::setBackgroundMode,
+                batteryOptimizationIgnored = batteryOptimizationIgnored,
                 requestExactAlarmAccess = requestExactAlarmAccess,
                 openBatteryOptimizationSettings = openBatteryOptimizationSettings,
             )
@@ -667,6 +751,19 @@ private fun SettingsScreen(
                     }
                 }
             }
+            if (
+                state.settings.intervalMinutes == 15 &&
+                !state.settings.youtubeApiEnabled
+            ) {
+                Text(
+                    text = "Interwał 15 minut bez aktywnego klucza YouTube Data API " +
+                        "częściej wybudza urządzenie. RSS jest lekkie, ale gdy potrzebne " +
+                        "jest uzupełnienie przez YouTube Web, rośnie transfer i praca " +
+                        "procesora.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
         }
         if (state.settings.intervalMinutes == 1440) {
             item {
@@ -685,8 +782,9 @@ private fun SettingsScreen(
                     Text(formatClock(state.settings.dailyHour, state.settings.dailyMinute))
                 }
                 Text(
-                    text = "Android może nieznacznie opóźnić raport z powodu Doze " +
-                        "lub oszczędzania baterii.",
+                    text = "Alarm jest ustawiany na wybraną godzinę. Synchronizacja " +
+                        "wymaga jednak dostępnej, dozwolonej sieci i nie zadziała po " +
+                        "użyciu systemowej funkcji „Wymuś zatrzymanie”.",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -698,29 +796,11 @@ private fun SettingsScreen(
                     checked = state.settings.allowMobileData,
                     onCheckedChange = viewModel::setAllowMobileData,
                 )
-                if (state.settings.backgroundMode == BackgroundMode.RELIABLE) {
-                    Text(
-                        "Alarm zabezpieczający również przestrzega tego ustawienia.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
-        }
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                SwitchSetting(
-                    title = "Nie sprawdzaj przy niskim poziomie baterii",
-                    checked = state.settings.requireBatteryNotLow,
-                    onCheckedChange = viewModel::setBatteryNotLow,
-                    enabled = state.settings.backgroundMode == BackgroundMode.BALANCED,
+                Text(
+                    "Każde automatyczne sprawdzenie uruchomione przez alarm przestrzega " +
+                        "tego ustawienia.",
+                    style = MaterialTheme.typography.bodySmall,
                 )
-                if (state.settings.backgroundMode == BackgroundMode.RELIABLE) {
-                    Text(
-                        "Tryb zwiększonej niezawodności pomija ten warunek podczas " +
-                            "sprawdzania zabezpieczającego.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
             }
         }
         item {
@@ -815,19 +895,12 @@ private fun SettingsScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text(
-                        text = if (state.settings.backgroundMode == BackgroundMode.BALANCED) {
-                            "Tryb zbalansowany używa WorkManagera, nadrabia zaległość po " +
-                                "otwarciu aplikacji i ma rzadki, niedokładny alarm kontrolny. " +
-                                "Alarm nie pobiera danych sam: zleca tylko zaległą pracę z " +
-                                "zachowaniem ustawień sieci i baterii. "
-                        } else {
-                            "Tryb zwiększonej niezawodności uzupełnia WorkManager dokładnym " +
-                                "alarmem i krótkim awaryjnym sprawdzeniem. "
-                        } +
-                            "Aplikacja sprawdza do 6 źródeł równocześnie, " +
-                            "a rozległe błędy sieci ponawia najwyżej dwa razy z rosnącym odstępem. " +
-                            "Doze lub dodatkowe ograniczenia producenta mogą przesunąć termin; " +
-                            "minimum harmonogramu to 15 minut.",
+                        text = "Automatyczne sprawdzanie używa wyłącznie dokładnego alarmu " +
+                            "systemowego i krótkiej usługi pierwszoplanowej. Alarm może " +
+                            "obudzić urządzenie w Doze, a następny termin jest zapisywany " +
+                            "zanim rozpocznie się pobieranie. Aplikacja sprawdza do 6 źródeł " +
+                            "równocześnie i ponawia rozległą awarię najwyżej dwa razy. " +
+                            "Minimum harmonogramu to 15 minut.",
                     )
                     TextButton(
                         onClick = {
@@ -891,9 +964,6 @@ private fun SettingsScreen(
             PrivacyDnsNote()
         }
         item {
-            PipedExperimentalNote()
-        }
-        item {
             Card(Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier.padding(14.dp),
@@ -918,45 +988,6 @@ private fun SettingsScreen(
             TextButton(onClick = { thirdPartyNoticesVisible = true }) {
                 Text("Licencje komponentów zewnętrznych")
             }
-        }
-    }
-}
-
-@Composable
-private fun VideoOriginBadge(origin: VideoOrigin) {
-    val label = when (origin) {
-        VideoOrigin.PIPED -> "Piped"
-        VideoOrigin.YOUTUBE -> "YouTube"
-    }
-    Surface(
-        shape = RoundedCornerShape(6.dp),
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-    ) {
-        Text(
-            text = label,
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
-}
-
-@Composable
-private fun PipedExperimentalNote() {
-    Card(Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Text("Informacja o Piped", fontWeight = FontWeight.SemiBold)
-            Text(
-                "Piped został dodany, aby przyspieszyć działanie aplikacji w trybie bez " +
-                    "klucza API. Integracja ma częściowo testowy charakter, ponieważ Piped " +
-                    "jest mniej wiarygodnym źródłem informacji niż sam YouTube. Gdy YouTube " +
-                    "potwierdzi materiał, jego dane zastępują dane Piped.",
-                style = MaterialTheme.typography.bodySmall,
-            )
         }
     }
 }
@@ -1001,9 +1032,9 @@ private fun FastHistorySettings(state: AppUiState, viewModel: AppViewModel) {
                 "Opcjonalny klucz YouTube Data API v3 pozwala pobierać historię dużo szybciej " +
                     "i zatrzymywać pobieranie po osiągnięciu wybranego zakresu czasu. " +
                     "Gdy klucz jest aktywny, API wykrywa i klasyfikuje również materiały " +
-                    "dla powiadomień. " +
-                    "Bez klucza aplikacja równocześnie używa Piped oraz strony YouTube: " +
-                    "Piped szybko dostarcza wpisy, a YouTube je weryfikuje i poprawia.",
+                    "dla powiadomień. Historia zawsze zaczyna od lekkiego kanału RSS, " +
+                    "który zwykle zwraca około 15 najnowszych pozycji. Starszy zakres " +
+                    "uzupełnia następnie Data API albo, bez klucza, YouTube Web.",
                 style = MaterialTheme.typography.bodySmall,
             )
             OutlinedTextField(
@@ -1078,10 +1109,10 @@ private fun FastHistorySettings(state: AppUiState, viewModel: AppViewModel) {
                     "Zapisany wcześniej klucz nie został zweryfikowany i pozostaje wyłączony. " +
                         "Wklej go ponownie, aby aplikacja sprawdziła go przed aktywacją."
                 } else if (!state.settings.youtubeApiEnabled) {
-                    "Aktywny: tryb hybrydowy Piped + YouTube Web. Publiczna instancja " +
-                        "Piped otrzymuje ID sprawdzanych kanałów."
+                    "Aktywny: YouTube RSS dla najnowszych pozycji, następnie YouTube Web."
                 } else {
-                    "Aktywny: oficjalne YouTube Data API dla historii i powiadomień"
+                    "Aktywny: YouTube RSS, następnie oficjalne Data API dla historii " +
+                        "i powiadomień."
                 },
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -1213,91 +1244,69 @@ private fun ColorChannelSlider(
 }
 
 @Composable
-private fun BackgroundModeSettings(
-    mode: BackgroundMode,
+private fun ExactAlarmSettings(
     exactAlarmAccessGranted: Boolean,
-    onModeSelected: (BackgroundMode) -> Unit,
+    batteryOptimizationIgnored: Boolean,
     requestExactAlarmAccess: () -> Unit,
     openBatteryOptimizationSettings: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Działanie w tle", style = MaterialTheme.typography.titleMedium)
-        BackgroundModeOption(
-            title = "Zbalansowany (domyślny)",
-            description =
-                "Oszczędny WorkManager z nadrabianiem zaległości i rzadkim, niedokładnym " +
-                    "alarmem kontrolnym bez dodatkowego uprawnienia.",
-            selected = mode == BackgroundMode.BALANCED,
-            onClick = { onModeSelected(BackgroundMode.BALANCED) },
+        Text(
+            "Automatyczne sprawdzanie korzysta z AlarmManagera. Dokładny alarm " +
+                "RTC_WAKEUP może obudzić urządzenie także przy wyłączonym ekranie, " +
+                "a pobieranie wykonuje widoczna usługa pierwszoplanowa.",
+            style = MaterialTheme.typography.bodySmall,
         )
-        BackgroundModeOption(
-            title = "Zwiększona niezawodność",
-            description =
-                "WorkManager z alarmem zabezpieczającym. Awaryjne sprawdzenie pokazuje " +
-                    "krótkie powiadomienie i zużywa więcej energii.",
-            selected = mode == BackgroundMode.RELIABLE,
-            onClick = { onModeSelected(BackgroundMode.RELIABLE) },
-        )
-        if (mode == BackgroundMode.RELIABLE) {
-            if (exactAlarmAccessGranted) {
-                Text(
-                    "Dostęp do alarmów jest aktywny. Android może nadal zatrzymać aplikację " +
-                        "po użyciu funkcji „Wymuś zatrzymanie”.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            } else {
-                Text(
-                    "Aby alarm zabezpieczający działał przy wyłączonym ekranie, przyznaj " +
-                        "systemowy dostęp „Alarmy i przypomnienia”. Do tego czasu aplikacja " +
-                        "działa jak w trybie zbalansowanym.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-                OutlinedButton(onClick = requestExactAlarmAccess) {
-                    Text("Zezwól na alarmy i przypomnienia")
-                }
-            }
+        if (exactAlarmAccessGranted) {
             Text(
-                "Jeśli producent telefonu nadal usypia aplikację, możesz ręcznie " +
-                    "wyłączyć dla niej optymalizację baterii. Jest to opcjonalne i może " +
-                    "zwiększyć zużycie energii.",
+                "Automatyczne alarmy są aktywne. Android może nadal zatrzymać " +
+                    "aplikację po użyciu funkcji „Wymuś zatrzymanie”.",
                 style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
             )
-            OutlinedButton(onClick = openBatteryOptimizationSettings) {
-                Text("Otwórz optymalizację baterii")
+        } else {
+            Text(
+                "Automatyczne sprawdzanie nie zadziała, dopóki nie przyznasz " +
+                    "systemowego dostępu „Alarmy i przypomnienia”.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            OutlinedButton(onClick = requestExactAlarmAccess) {
+                Text("Zezwól na alarmy i przypomnienia")
             }
+        }
+        if (batteryOptimizationIgnored) {
+            Text(
+                "Optymalizacja baterii: Bez ograniczeń.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        } else {
+            Text(
+                "Optymalizacja baterii nadal ogranicza aplikację. Ustaw dla lewicowYT " +
+                    "użycie baterii „Bez ograniczeń”, aby zwiększyć niezawodność " +
+                    "powiadomień przy wyłączonym ekranie. Może to zwiększyć zużycie energii.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        OutlinedButton(onClick = openBatteryOptimizationSettings) {
+            Text(
+                if (batteryOptimizationIgnored) {
+                    "Otwórz ustawienia aplikacji"
+                } else {
+                    "Ustaw działanie bez ograniczeń"
+                },
+            )
         }
     }
 }
 
-@Composable
-private fun BackgroundModeOption(
-    title: String,
-    description: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-) {
-    Card(Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onClick)
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            RadioButton(selected = selected, onClick = onClick)
-            Spacer(Modifier.width(8.dp))
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(3.dp),
-            ) {
-                Text(title, fontWeight = FontWeight.SemiBold)
-                Text(description, style = MaterialTheme.typography.bodySmall)
-            }
-        }
-    }
-}
+internal fun shouldShowBatteryOptimizationNotice(
+    isSettingsScreen: Boolean,
+    batteryOptimizationIgnored: Boolean,
+): Boolean = isSettingsScreen && !batteryOptimizationIgnored
 
 @Composable
 private fun SwitchSetting(

@@ -19,8 +19,8 @@ android {
         applicationId = "pl.lewicowyt.notifier"
         minSdk = 26
         targetSdk = 36
-        versionCode = 12
-        versionName = "1.2-beta"
+        versionCode = 13
+        versionName = "1.3-beta"
 
         buildConfigField(
             "String",
@@ -99,7 +99,6 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:$lifecycleVersion")
 
     implementation("androidx.datastore:datastore-preferences:1.2.1")
-    implementation("androidx.work:work-runtime-ktx:2.11.2")
     implementation("io.github.awxkee:jxl-coder:2.6.1")
     implementation("com.squareup.okhttp3:okhttp:5.3.0")
     implementation("com.squareup.okhttp3:okhttp-dnsoverhttps:5.3.0")

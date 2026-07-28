@@ -2,7 +2,7 @@ KOMPONENTY ZEWNĘTRZNE
 
 Licencja ACSL 1.4 projektu nie zmienia licencji komponentów zewnętrznych.
 
-AndroidX, Jetpack Compose, WorkManager, DataStore, Material Components,
+AndroidX, Jetpack Compose, DataStore, Material Components,
 Kotlin, OkHttp, Okio i Highway:
 Apache License 2.0 — https://www.apache.org/licenses/LICENSE-2.0
 

@@ -27,7 +27,6 @@ enum class VideoKind {
 }
 
 enum class VideoOrigin {
-    PIPED,
     YOUTUBE,
 }
 
