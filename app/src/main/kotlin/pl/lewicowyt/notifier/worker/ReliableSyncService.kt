@@ -90,6 +90,11 @@ class ReliableSyncService : Service() {
                     } else {
                         retryNeeded = shouldRetryAlarmSync(outcome, retryAttempt)
                     }
+                    // Kontrola wydania współdzieli wybudzenie i dostęp do sieci
+                    // ze sprawdzaniem YouTube. Wewnętrzny znacznik czasu blokuje
+                    // kolejne zapytanie przez co najmniej dwie godziny.
+                    AppGraph.backgroundUpdateCoordinator
+                        .checkAfterYouTubeSync(currentSettings)
                 } else if (
                     currentSettings.selectedCreatorIds.isNotEmpty() &&
                     AppGraph.scheduler.hasExactAlarmAccess()

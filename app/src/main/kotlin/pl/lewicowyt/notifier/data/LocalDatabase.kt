@@ -96,6 +96,48 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                 arrayOf(VideoOrigin.YOUTUBE.name),
             )
         }
+        if (oldVersion < 11) {
+            // Starszy resolver HTML mógł odczytać identyfikator polecanego kanału
+            // zamiast kanału otwartego na stronie. Schemat historii nie przechowuje
+            // ID kanału przy filmie, więc nie da się bezpiecznie odróżnić zatrutych
+            // rekordów. Jednorazowo odbudowujemy historię ze zweryfikowanego katalogu.
+            db.delete("notification_inbox", null, null)
+            db.delete("notification_ids", null, null)
+            db.delete("video_history", null, null)
+            db.delete("source_state", null, null)
+        }
+        if (oldVersion < 12) {
+            // Starszy klasyfikator nie rozpoznawał aktualnego znacznika Shortów.
+            // Ponawiamy klasyfikacje, które po kilku błędach uznano awaryjnie
+            // za zwykły film.
+            db.execSQL(
+                """
+                UPDATE video_history
+                SET kind = ?,
+                    classification_version = 0,
+                    classification_attempts = 0,
+                    classification_last_attempt_ms = 0
+                WHERE classification_attempts >= ?
+                """.trimIndent(),
+                arrayOf<Any>(VideoKind.UNKNOWN.name, MAX_CLASSIFICATION_ATTEMPTS),
+            )
+        }
+        // Migracje 13 i 14 w starszym wydaniu zerowały `kind`. Nie wolno tego
+        // powtarzać przy bezpośredniej aktualizacji starszej bazy do bieżącej
+        // wersji: niepewna ponowna klasyfikacja nie może usuwać streamów z UI.
+        if (oldVersion < 15) {
+            // Urządzenia, które zdążyły uruchomić wadliwą migrację 14, wymagają
+            // ponownej klasyfikacji. Zachowujemy jednak aktualny typ do chwili,
+            // gdy YouTube dostarczy jednoznaczną odpowiedź.
+            db.execSQL(
+                """
+                UPDATE video_history
+                SET classification_version = 0,
+                    classification_attempts = 0,
+                    classification_last_attempt_ms = 0
+                """.trimIndent(),
+            )
+        }
     }
 
     private fun createSourceStateTable(db: SQLiteDatabase) {
@@ -639,7 +681,13 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                     kind = item.kind,
                     notified = true,
                     detectedAt = now,
-                    classificationVersion = if (item.kind == VideoKind.UNKNOWN) 0 else 1,
+                    classificationVersion = if (
+                        item.kind == VideoKind.UNKNOWN || !item.kindVerified
+                    ) {
+                        0
+                    } else {
+                        1
+                    },
                     notificationChecked = false,
                 )
                 if (rowId != -1L) {
@@ -656,7 +704,8 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     private fun updateHistoricalItem(creator: Creator, item: YouTubeHistoryItem) {
-        writableDatabase.update(
+        val db = writableDatabase
+        db.update(
             "video_history",
             ContentValues().apply {
                 put("creator_id", creator.id)
@@ -664,16 +713,44 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                 put("title", item.entry.title)
                 put("url", item.entry.url)
                 put("published_ms", item.entry.publishedAtMillis)
-                put("kind", item.kind.name)
-                put(
-                    "classification_version",
-                    if (item.kind == VideoKind.UNKNOWN) 0 else 1,
-                )
                 put("origin", VideoOrigin.YOUTUBE.name)
             },
             "video_id = ?",
             arrayOf(item.entry.id),
         )
+        if (item.kind != VideoKind.UNKNOWN) {
+            // Typ szczegółowy z potwierdzonej karty może poprawić ogólny VIDEO.
+            // Ogólny VIDEO nie może natomiast usunąć zachowanego streama/Shorta
+            // w trakcie ponownej klasyfikacji po migracji.
+            val selection = when {
+                !item.kindVerified ->
+                    "video_id = ? AND classification_version = 0 AND kind IN (?, ?)"
+                item.kind == VideoKind.VIDEO ->
+                    "video_id = ? AND classification_version = 0"
+                else ->
+                    "video_id = ? AND (classification_version = 0 OR kind IN (?, ?))"
+            }
+            val selectionArgs = if (item.kindVerified && item.kind == VideoKind.VIDEO) {
+                arrayOf(item.entry.id)
+            } else {
+                arrayOf(
+                    item.entry.id,
+                    VideoKind.UNKNOWN.name,
+                    VideoKind.VIDEO.name,
+                )
+            }
+            db.update(
+                "video_history",
+                ContentValues().apply {
+                    put("kind", item.kind.name)
+                    put("classification_version", if (item.kindVerified) 1 else 0)
+                    put("classification_attempts", 0)
+                    put("classification_last_attempt_ms", System.currentTimeMillis())
+                },
+                selection,
+                selectionArgs,
+            )
+        }
     }
 
     private fun insertVideoInternal(
@@ -855,6 +932,32 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     @Synchronized
+    fun unclassifiedVideoIds(videoIds: Collection<String>): List<String> {
+        val distinctIds = videoIds
+            .asSequence()
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(MAX_CLASSIFICATION_QUERY_IDS)
+            .toList()
+        if (distinctIds.isEmpty()) return emptyList()
+        val placeholders = distinctIds.joinToString(",") { "?" }
+        return readableDatabase.rawQuery(
+            """
+            SELECT video_id
+            FROM video_history
+            WHERE classification_version = 0
+              AND origin = ?
+              AND video_id IN ($placeholders)
+            """.trimIndent(),
+            arrayOf(VideoOrigin.YOUTUBE.name, *distinctIds.toTypedArray()),
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) add(cursor.getString(0))
+            }
+        }
+    }
+
+    @Synchronized
     fun markVideoClassification(
         videoId: String,
         kind: VideoKind,
@@ -877,24 +980,11 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             """
             UPDATE video_history
             SET classification_attempts = classification_attempts + 1,
-                classification_last_attempt_ms = ?,
-                kind = CASE
-                    WHEN classification_attempts + 1 >= ?
-                    THEN ?
-                    ELSE kind
-                END,
-                classification_version = CASE
-                    WHEN classification_attempts + 1 >= ?
-                    THEN 1
-                    ELSE classification_version
-                END
+                classification_last_attempt_ms = ?
             WHERE video_id = ? AND origin = ?
             """.trimIndent(),
             arrayOf<Any>(
                 System.currentTimeMillis(),
-                MAX_CLASSIFICATION_ATTEMPTS,
-                VideoKind.VIDEO.name,
-                MAX_CLASSIFICATION_ATTEMPTS,
                 videoId,
                 VideoOrigin.YOUTUBE.name,
             ),
@@ -1078,8 +1168,9 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
 
     private companion object {
         const val DATABASE_NAME = "lewicowyt_notifier.db"
-        const val DATABASE_VERSION = 10
+        const val DATABASE_VERSION = 15
         const val MAX_CLASSIFICATION_ATTEMPTS = 3
+        const val MAX_CLASSIFICATION_QUERY_IDS = 100
         const val DAY_MILLIS = 24L * 60L * 60L * 1000L
         const val MIN_FREE_PAGES_FOR_VACUUM = 128L
     }

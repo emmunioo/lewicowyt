@@ -17,6 +17,17 @@ data class ResolvedSource(
     val feedUrl: String,
 )
 
+/**
+ * Reads only metadata that identifies the channel whose page is open.
+ *
+ * A YouTube channel page also contains IDs of recommended channels. Generic
+ * `channelId` fields and `/channel/...` links must not be used here.
+ */
+internal fun extractCanonicalYouTubeChannelId(html: String): String? =
+    CANONICAL_CHANNEL_ID_PATTERNS.firstNotNullOfOrNull { pattern ->
+        pattern.find(html)?.groupValues?.getOrNull(1)
+    }
+
 class YouTubeSourceResolver(
     private val http: HttpTextClient,
     private val database: LocalDatabase,
@@ -90,9 +101,8 @@ class YouTubeSourceResolver(
 
         val pageUrl = normalizeChannelPageUrl(source.url)
         val html = http.getText(pageUrl)
-        val id = CHANNEL_ID_PATTERNS.firstNotNullOfOrNull { pattern ->
-            pattern.find(html)?.groupValues?.getOrNull(1)
-        } ?: throw IOException("Nie udało się rozpoznać ID kanału z $pageUrl")
+        val id = extractCanonicalYouTubeChannelId(html)
+            ?: throw IOException("Nie udało się rozpoznać ID kanału z $pageUrl")
 
         database.saveResolvedId(sourceKey, id)
         extractAvatarUrl(html)?.let { database.saveCreatorAvatar(creator.id, it) }
@@ -171,16 +181,16 @@ class YouTubeSourceResolver(
         )
         const val MAX_YOUTUBE_PATH_CHARS = 500
         const val MAX_IMAGE_URL_CHARS = 2_048
-        val CHANNEL_ID_PATTERNS = listOf(
-            Regex("""<meta[^>]+itemprop=[\"']channelId[\"'][^>]+content=[\"'](UC[\w-]{18,})[\"']"""),
-            Regex("""<meta[^>]+content=[\"'](UC[\w-]{18,})[\"'][^>]+itemprop=[\"']channelId[\"']"""),
-            Regex("""[\"']channelId[\"']\s*:\s*[\"'](UC[\w-]{18,})[\"']"""),
-            Regex("""youtube\.com/channel/(UC[\w-]{18,})"""),
-        )
         val AVATAR_PATTERNS = listOf(
-            Regex("""[\"']avatar[\"']\s*:\s*\{[\s\S]{0,800}?[\"']url[\"']\s*:\s*[\"']([^\"']+)[\"']"""),
             Regex("""<meta[^>]+property=[\"']og:image[\"'][^>]+content=[\"']([^\"']+)[\"']"""),
             Regex("""<meta[^>]+content=[\"']([^\"']+)[\"'][^>]+property=[\"']og:image[\"']"""),
+            Regex("""[\"']avatar[\"']\s*:\s*\{[\s\S]{0,800}?[\"']url[\"']\s*:\s*[\"']([^\"']+)[\"']"""),
         )
     }
 }
+
+private val CANONICAL_CHANNEL_ID_PATTERNS = listOf(
+    Regex(""""externalId"\s*:\s*"(UC[A-Za-z0-9_-]{22})""""),
+    Regex("""<meta[^>]+itemprop=["']channelId["'][^>]+content=["'](UC[A-Za-z0-9_-]{22})["']"""),
+    Regex("""<meta[^>]+content=["'](UC[A-Za-z0-9_-]{22})["'][^>]+itemprop=["']channelId["']"""),
+)

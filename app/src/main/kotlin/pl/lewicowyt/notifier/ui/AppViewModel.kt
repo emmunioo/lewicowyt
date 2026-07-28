@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -13,6 +14,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
@@ -52,6 +54,8 @@ sealed interface UpdateUiState {
     data object NotConfigured : UpdateUiState
     data class UpToDate(val latestVersion: String) : UpdateUiState
     data class Available(val update: AvailableUpdate) : UpdateUiState
+    data class Downloading(val update: AvailableUpdate) : UpdateUiState
+    data class ReadyToInstall(val update: AvailableUpdate) : UpdateUiState
     data class Error(val message: String) : UpdateUiState
 }
 
@@ -115,6 +119,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val notificationNavigationRequest = MutableStateFlow(0L)
     private var historyLoadJob: Job? = null
     private var syncJob: Job? = null
+    private var lastManualUpdateCheckAtMillis = 0L
 
     private data class StoredItems(
         val history: List<HistoryItem>,
@@ -288,6 +293,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setAutomaticUpdatesEnabled(value: Boolean) {
+        viewModelScope.launch {
+            graph.preferences.setAutomaticUpdatesEnabled(value)
+        }
+    }
+
     fun refreshBackgroundSchedule() {
         viewModelScope.launch { graph.scheduler.ensureScheduled() }
     }
@@ -387,6 +398,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun checkForUpdates() {
         if (updateStatus.value == UpdateUiState.Checking) return
+        if (updateStatus.value is UpdateUiState.Downloading) return
+        val now = System.currentTimeMillis()
+        if (now - lastManualUpdateCheckAtMillis < MANUAL_UPDATE_CHECK_INTERVAL_MILLIS) {
+            val previous = updateStatus.value
+            updateStatus.value = UpdateUiState.Checking
+            viewModelScope.launch {
+                delay(CACHED_CHECK_INDICATOR_MILLIS)
+                if (updateStatus.value == UpdateUiState.Checking) {
+                    updateStatus.value = previous
+                }
+            }
+            return
+        }
+        lastManualUpdateCheckAtMillis = now
         updateStatus.value = UpdateUiState.Checking
         viewModelScope.launch {
             updateStatus.value = try {
@@ -401,6 +426,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 UpdateUiState.Error(error.displayMessage())
             }
         }
+    }
+
+    fun downloadAndInstallUpdate(update: AvailableUpdate) {
+        if (updateStatus.value is UpdateUiState.Downloading) return
+        updateStatus.value = UpdateUiState.Downloading(update)
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    graph.updateManager.prepare(update)
+                }
+                updateStatus.value = UpdateUiState.ReadyToInstall(update)
+                graph.updateManager.launchInstaller()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                updateStatus.value = UpdateUiState.Error(error.displayMessage())
+            }
+        }
+    }
+
+    fun openPreparedUpdateInstaller() {
+        graph.updateManager.launchInstaller()
     }
 
     fun refreshHistory() {
@@ -564,6 +611,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
 private fun Throwable.displayMessage(): String =
     (message ?: javaClass.simpleName).take(MAX_VISIBLE_ERROR_CHARS)
+
+private val MANUAL_UPDATE_CHECK_INTERVAL_MILLIS = TimeUnit.MINUTES.toMillis(15)
+private const val CACHED_CHECK_INDICATOR_MILLIS = 550L
 
 internal fun expiredDeselectedCreatorIds(
     deselectedAtMillis: Map<String, Long>,

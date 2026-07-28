@@ -8,20 +8,58 @@ https://github.com/emmunioo/lewicowyt
 
 ## Jak działa sprawdzanie aktualizacji
 
-Aplikacja odpytuje listę maksymalnie 20 publicznych wydań:
+Aplikacja odpytuje listę maksymalnie 100 publicznych wydań:
 
 ```text
-https://api.github.com/repos/emmunioo/lewicowyt/releases?per_page=20
+https://api.github.com/repos/emmunioo/lewicowyt/releases?per_page=100
 ```
 
 Pomija szkice, używa porównania wersji zbliżonego do SemVer i obsługuje wersje
-wstępne, np. `1.3-beta`, `1.3-beta.2` oraz `1.3-rc.1`. Dzięki temu wydanie beta
+wstępne, np. `1.4-beta`, `1.4-beta.2` oraz `1.4-rc.1`. Dzięki temu wydanie beta
 może wykryć kolejną betę, a później wydanie stabilne.
 
-Po znalezieniu nowszej wersji aplikacja akceptuje tylko adresy HTTPS należące do
-skonfigurowanego repozytorium GitHub. Pobieranie odbywa się w przeglądarce;
-aplikacja nie instaluje APK samodzielnie i nie ma uprawnienia
-`REQUEST_INSTALL_PACKAGES`.
+Automatyczna kontrola odbywa się razem ze sprawdzaniem YouTube, najwyżej raz na
+2 godziny. Ręczny przycisk wykonuje jedno żądanie w ciągu 15 minut. Aplikacja
+akceptuje tylko adresy HTTPS należące do skonfigurowanego repozytorium.
+
+APK jest pobierane do prywatnego cache bez otwierania przeglądarki. Przed
+uruchomieniem systemowego instalatora sprawdzane są:
+
+- SHA-256, gdy GitHub udostępnia pole `digest`;
+- `applicationId`;
+- certyfikat podpisujący względem zainstalowanej aplikacji;
+- zgodność `versionName` z tagiem;
+- wyższy `versionCode`.
+
+Uprawnienie `REQUEST_INSTALL_PACKAGES` pozwala wywołać instalator, ale nie
+pozwala samodzielnie zatwierdzić instalacji. Zwykła aplikacja musi otrzymać
+potwierdzenie użytkownika w systemowym oknie Androida.
+
+## Awaryjne wycofanie wydania
+
+Jeśli na liście GitHub Releases nie ma wydania z APK odpowiadającego
+zainstalowanemu `versionName`, aplikacja uznaje wersję za wycofaną. Wtedy:
+
+1. nowsze dostępne wydanie staje się obowiązkową aktualizacją bezpieczeństwa;
+2. gdy nowszego nie ma, wybierane jest najwyższe starsze wydanie;
+3. pobieranie odbywa się niezależnie od przełącznika automatycznych aktualizacji;
+4. użytkownik otrzymuje trwałe powiadomienie i nadal potwierdza instalację
+   w systemie.
+
+Nie wolno po prostu wskazać dawnego APK z niższym `versionCode`, ponieważ Android
+zablokuje downgrade. Aby wycofać przykładową wersję `1.4-beta` z
+`versionCode = 14`:
+
+1. przywróć kod ostatniej bezpiecznej wersji;
+2. ustaw nowy `versionName`, np. `1.3-security-rollback.1`;
+3. ustaw `versionCode` większy od 14, np. `15`;
+4. podpisz APK tym samym kluczem;
+5. opublikuj go jako osobne wydanie z identycznym tagiem
+   `v1.3-security-rollback.1`;
+6. dopiero po sprawdzeniu awaryjnego APK usuń wydanie `v1.4-beta`.
+
+Usunięcie wydania jest zdalnym sygnałem bezpieczeństwa, dlatego nie należy robić
+tego tylko w celu porządkowania listy Releases.
 
 ## Pierwsze wysłanie kodu
 
@@ -32,7 +70,7 @@ Przed pierwszym wysłaniem wykonaj w głównym folderze projektu:
 git init
 git add .
 git status
-git commit -m "Wydanie 1.3-beta"
+git commit -m "Wydanie 1.4-beta"
 git branch -M main
 git remote add origin https://github.com/emmunioo/lewicowyt.git
 git push -u origin main
@@ -94,8 +132,8 @@ oraz w osobnej, zaszyfrowanej kopii awaryjnej.
 Plik `app/build.gradle.kts` powinien zawierać:
 
 ```kotlin
-versionCode = 13
-versionName = "1.3-beta"
+versionCode = 14
+versionName = "1.4-beta"
 ```
 
 Każda kolejna publikacja musi zwiększyć `versionCode`, nawet jeśli zmienia się
@@ -123,8 +161,8 @@ nie plikiem przeznaczonym do publikacji.
 W Android Studio użyj `Build → Analyze APK` i sprawdź:
 
 - nazwę pakietu `pl.lewicowyt.notifier`;
-- `versionName` równe `1.3-beta`;
-- `versionCode` równe `13`;
+- `versionName` równe `1.4-beta`;
+- `versionCode` równe `14`;
 - brak klucza YouTube API, haseł i pliku klucza podpisu.
 
 Jeżeli przekazujesz APK do MobSF lub innego skanera, wybierz podpisany wariant
@@ -136,30 +174,30 @@ problemy wysokiego poziomu.
 Podpis można zweryfikować narzędziem z Android SDK:
 
 ```powershell
-apksigner verify --verbose --print-certs .\lewicowYT-1.3-beta.apk
+apksigner verify --verbose --print-certs .\lewicowYT-1.4-beta.apk
 ```
 
 Zapisz również sumę kontrolną:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\lewicowYT-1.3-beta.apk
+Get-FileHash -Algorithm SHA256 .\lewicowYT-1.4-beta.apk
 ```
 
-## Publikowanie wersji 1.3-beta
+## Publikowanie wersji 1.4-beta
 
 1. Poczekaj, aż kontrole GitHub Actions zakończą się powodzeniem.
 2. W repozytorium otwórz `Releases → Draft a new release`.
 3. Utwórz tag:
 
 ```text
-v1.3-beta
+v1.4-beta
 ```
 
 4. Zaznacz wydanie jako **pre-release**.
 5. Dołącz dokładnie jeden podpisany APK, np.:
 
 ```text
-lewicowYT-1.3-beta.apk
+lewicowYT-1.4-beta.apk
 ```
 
 6. W opisie podaj SHA-256 APK oraz najważniejsze znane ograniczenia.
@@ -170,10 +208,10 @@ lewicowYT-1.3-beta.apk
 Przykładowa kolejność:
 
 ```text
-1.3-beta
-1.3-beta.2
-1.3-rc.1
-1.3
+1.4-beta
+1.4-beta.2
+1.4-rc.1
+1.4
 ```
 
 Dla każdego wydania zwiększ `versionCode`, podpisz APK tym samym kluczem i użyj

@@ -86,6 +86,54 @@ class GitHubUpdateCheckerTest {
         assertEquals("1.1-beta", selected?.version)
     }
 
+    @Test
+    fun existingCurrentReleaseKeepsNewerUpdateOptional() {
+        val releases = JSONArray()
+            .put(release(version = "1.3-beta", hasApk = true, prerelease = true))
+            .put(release(version = "1.4-beta", hasApk = true, prerelease = true))
+
+        val result = selectUpdateResultFromReleases(
+            releases = releases,
+            currentVersion = "1.3-beta",
+            repository = "emmunioo/lewicowyt",
+        ) as UpdateCheckResult.Available
+
+        assertEquals("1.4-beta", result.update.version)
+        assertEquals(UpdatePolicy.OPTIONAL, result.update.policy)
+    }
+
+    @Test
+    fun removedCurrentReleaseMakesNewerReplacementMandatory() {
+        val releases = JSONArray()
+            .put(release(version = "1.4-beta", hasApk = true, prerelease = true))
+            .put(release(version = "1.2-beta", hasApk = true, prerelease = true))
+
+        val result = selectUpdateResultFromReleases(
+            releases = releases,
+            currentVersion = "1.3-beta",
+            repository = "emmunioo/lewicowyt",
+        ) as UpdateCheckResult.Available
+
+        assertEquals("1.4-beta", result.update.version)
+        assertEquals(UpdatePolicy.MANDATORY_SECURITY_UPDATE, result.update.policy)
+    }
+
+    @Test
+    fun removedCurrentReleaseSelectsNewestOlderSecurityRollback() {
+        val releases = JSONArray()
+            .put(release(version = "1.2-beta", hasApk = true, prerelease = true))
+            .put(release(version = "1.1-beta", hasApk = true, prerelease = true))
+
+        val result = selectUpdateResultFromReleases(
+            releases = releases,
+            currentVersion = "1.3-beta",
+            repository = "emmunioo/lewicowyt",
+        ) as UpdateCheckResult.Available
+
+        assertEquals("1.2-beta", result.update.version)
+        assertEquals(UpdatePolicy.SECURITY_ROLLBACK, result.update.policy)
+    }
+
     private fun release(
         version: String,
         hasApk: Boolean,

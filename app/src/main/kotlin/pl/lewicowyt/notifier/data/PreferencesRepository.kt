@@ -37,6 +37,8 @@ data class AppSettings(
     val accentColorArgb: Long = DEFAULT_ACCENT_COLOR_ARGB,
     val youtubeApiEnabled: Boolean = false,
     val youtubeApiNeedsValidation: Boolean = false,
+    val automaticUpdatesEnabled: Boolean = true,
+    val lastBackgroundUpdateCheckAtMillis: Long = 0L,
     val lastSyncAtMillis: Long = 0L,
     val lastCompletedSyncAtMillis: Long = 0L,
     val lastSyncSummary: String = "Jeszcze nie synchronizowano",
@@ -58,6 +60,9 @@ class PreferencesRepository(private val context: Context) {
         val accentColor = longPreferencesKey("accent_color_argb")
         val youtubeApiEnabled = booleanPreferencesKey("youtube_api_enabled")
         val youtubeApiValidated = booleanPreferencesKey("youtube_api_validated")
+        val automaticUpdatesEnabled = booleanPreferencesKey("automatic_updates_enabled")
+        val lastBackgroundUpdateCheckAt =
+            longPreferencesKey("last_background_update_check_at")
         // Klucz używany wyłącznie do jednorazowej migracji ze starszych wersji.
         val youtubeApiKey = stringPreferencesKey("youtube_api_key")
         val lastSyncAt = longPreferencesKey("last_sync_at")
@@ -106,6 +111,10 @@ class PreferencesRepository(private val context: Context) {
                 youtubeApiNeedsValidation = hasStoredApiKey &&
                     preferences[Keys.youtubeApiEnabled] == true &&
                     preferences[Keys.youtubeApiValidated] != true,
+                automaticUpdatesEnabled =
+                    preferences[Keys.automaticUpdatesEnabled] ?: true,
+                lastBackgroundUpdateCheckAtMillis =
+                    preferences[Keys.lastBackgroundUpdateCheckAt] ?: 0L,
                 lastSyncAtMillis = preferences[Keys.lastSyncAt] ?: 0L,
                 // Starsze instalacje nie miały osobnego znacznika ukończenia.
                 lastCompletedSyncAtMillis = preferences[Keys.lastCompletedSyncAt]
@@ -194,6 +203,27 @@ class PreferencesRepository(private val context: Context) {
 
     suspend fun setAllowMobileData(value: Boolean) {
         context.settingsDataStore.edit { it[Keys.allowMobileData] = value }
+    }
+
+    suspend fun setAutomaticUpdatesEnabled(value: Boolean) {
+        context.settingsDataStore.edit { it[Keys.automaticUpdatesEnabled] = value }
+    }
+
+    suspend fun reserveBackgroundUpdateCheck(
+        minimumIntervalMillis: Long,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): Boolean {
+        require(minimumIntervalMillis > 0L)
+        var reserved = false
+        context.settingsDataStore.edit { preferences ->
+            val previous = preferences[Keys.lastBackgroundUpdateCheckAt] ?: 0L
+            val clockMovedBackwards = nowMillis < previous
+            if (clockMovedBackwards || nowMillis - previous >= minimumIntervalMillis) {
+                preferences[Keys.lastBackgroundUpdateCheckAt] = nowMillis
+                reserved = true
+            }
+        }
+        return reserved
     }
 
     suspend fun setThemeMode(value: ThemeMode) {

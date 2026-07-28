@@ -1,4 +1,4 @@
-# lewicowYT 1.3-beta
+# lewicowYT 1.4-beta
 
 Natywna aplikacja dla Androida do lokalnego obserwowania wybranych kanałów
 YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.
@@ -6,23 +6,26 @@ YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.
 > To niezależny, nieoficjalny projekt. Nie jest produktem ani oficjalnym klientem
 > Google ani YouTube i nie jest przez nie wspierany.
 
-## Najważniejsze zmiany w 1.3-beta
+## Najważniejsze zmiany w 1.4-beta
 
-- usunięto eksperymentalne źródło Piped. Najnowsze materiały są dostarczane
-  lekką ścieżką YouTube, a starsza historia jest doczytywana bezpośrednio
-  z YouTube Web albo opcjonalnego Data API;
-- usunięto wybór trybów oszczędzania i zwiększonej niezawodności. Aplikacja ma
-  teraz jeden mechanizm działania w tle nastawiony na pewniejsze powiadomienia
-  również przy wygaszonym ekranie;
-- nowy mechanizm może zużyć nieco więcej energii. Przy typowych ustawieniach
-  różnica powinna być niewielka, ale interwał 15 minut i duża liczba
-  obserwowanych kanałów mogą być zauważalne;
-- klucz YouTube Data API może przyspieszyć pobieranie dłuższej historii, ale
-  nie jest przedstawiany jako gwarantowany sposób zmniejszenia zużycia baterii;
-- aplikacja sprawdza rzeczywisty stan ograniczeń baterii Androida i prowadzi
-  bezpośrednio do ustawienia dotyczącego lewicowYT;
-- po aktualizacji istniejącej instalacji najważniejsze zmiany są pokazywane
-  jednorazowo w aplikacji.
+- przebudowano historię działającą bez klucza API. Po szybkim odczycie RSS
+  aplikacja pobiera od razu żądaną kartę YouTube Web, bez dodatkowego zapytania
+  o pełną listę kart dla każdego kanału;
+- odpowiedź YouTube jest sprawdzana przed przypisaniem typu. Gdy kanał nie ma
+  karty transmisji, strona główna lub karta filmów nie może zostać błędnie
+  zapisana jako lista streamów;
+- dodano obsługę aktualnego formatu kafelków YouTube `lockupViewModel` oraz
+  poprawiono kończenie paginacji, gdy serwer powtarza ostatni kursor;
+- ponowna klasyfikacja zachowuje dotychczasowy rodzaj materiału do czasu
+  uzyskania pewnej odpowiedzi. Nieudana próba nie zamienia już streamów ani
+  Shortów w filmy i nie usuwa ich z aktywnej zakładki;
+- migracja bazy 15 ponawia klasyfikację bez zerowania zapisanego rodzaju.
+  Istniejące błędne wpisy są poprawiane w miejscu podczas synchronizacji;
+- klucz YouTube Data API nadal jest opcjonalny. Może przyspieszyć dłuższą
+  historię, zapewnia oficjalne stronicowanie i jest mniej podatny na zmiany
+  interfejsu YouTube, ale nie jest wymagany do normalnego działania;
+- po aktualizacji istniejącej instalacji podsumowanie tych zmian jest
+  pokazywane jednorazowo w aplikacji.
 
 ## Co potrafi aplikacja
 
@@ -54,6 +57,9 @@ YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.
 - dla każdego źródła najpierw zapisuje lekką odpowiedź RSS — zwykle około
   15 najnowszych pozycji — a następnie uzupełnia starszy zakres przez Data API
   albo YouTube Web;
+- w trybie YouTube Web pobiera bezpośrednio właściwą kartę i sprawdza kartę
+  faktycznie zaznaczoną przez serwer. Nieistniejąca karta jest bezpiecznie
+  pomijana, zamiast zwracać materiały innego rodzaju;
 - używa miniatur 640×480 i kadruje je do proporcji 16:9 bez czarnych pasów.
 
 ### Powiadomienia
@@ -104,17 +110,33 @@ telefonu dodatkowo blokuje uruchamianie usług w tle.
 
 ### Aktualizacje
 
-- aplikacja może ręcznie sprawdzić publiczne wydania GitHub bez Firebase i
-  własnego serwera;
+- aplikacja może ręcznie lub automatycznie sprawdzać publiczne wydania GitHub
+  bez Firebase i własnego serwera;
+- kontrola automatyczna współdzieli wybudzenie ze sprawdzaniem YouTube i wykonuje
+  zapytanie najwyżej raz na 2 godziny;
+- przełącznik w ustawieniach pozwala wyłączyć automatyczne pobieranie zwykłych
+  aktualizacji;
+- ręczny przycisk używa sieci tylko przy pierwszym naciśnięciu w ciągu 15 minut;
 - wykrywa kolejne wydania beta, wersje RC oraz późniejsze wydania stabilne;
 - pokazuje numer wersji, informacje o wydaniu, nazwę APK i udostępniony przez
   GitHub skrót SHA-256;
-- akceptuje odnośniki do APK wyłącznie z właściwego repozytorium GitHub;
-- pobieranie odbywa się w przeglądarce, a instalacja zawsze wymaga decyzji
-  użytkownika;
+- pobiera APK bezpośrednio do prywatnego cache aplikacji, bez otwierania
+  przeglądarki;
+- przed instalacją sprawdza SHA-256, identyfikator pakietu, certyfikat podpisu,
+  `versionName` i rosnący `versionCode`;
+- instalacja jest przekazywana systemowemu instalatorowi Androida i zawsze
+  wymaga potwierdzenia użytkownika;
+- brak wydania odpowiadającego zainstalowanej wersji jest traktowany jako
+  awaryjne wycofanie. Wydanie zastępcze jest pobierane niezależnie od ustawienia
+  automatycznych aktualizacji;
 - po aktualizacji istniejącej instalacji jednorazowo pokazuje lokalne okno
   „Co nowego”. Nie wyświetla go po pierwszej instalacji ani ponownie po
   potwierdzeniu.
+
+Zwykła aplikacja Android nie może zatwierdzić instalacji bez udziału
+użytkownika. Awaryjny rollback musi zawierać kod poprzedniej bezpiecznej wersji,
+ale zostać zbudowany z wyższym `versionCode` niż wycofany APK i podpisany tym
+samym kluczem.
 
 ### Wygląd i pamięć obrazów
 
@@ -130,9 +152,15 @@ telefonu dodatkowo blokuje uruchamianie usług w tle.
 
 ### Z opcjonalnym kluczem YouTube Data API
 
-YouTube Data API v3 pobiera historię partiami, rozpoznaje rodzaje materiałów
-i uczestniczy w wykrywaniu powiadomień. RSS YouTube pozostaje dodatkowym źródłem
-dla najnowszych publikacji.
+YouTube Data API v3 pobiera historię partiami do 50 pozycji, zapewnia dokładne
+daty publikacji, oficjalne tokeny kolejnych stron i szczegóły transmisji.
+Uczestniczy również w wykrywaniu powiadomień. RSS YouTube pozostaje szybkim
+źródłem najnowszych publikacji.
+
+API nie jest wymagane do działania aplikacji. Jest opcjonalnym trybem
+zwiększonej stabilności i szybkości przy długiej historii. Rozpoznawanie
+Shortów w ścieżce API wykorzystuje również czas trwania materiału, dlatego
+krótki poziomy film może wymagać późniejszego skorygowania przez dane YouTube.
 
 Klucz można uzyskać bezpłatnie w Google Cloud:
 
@@ -154,8 +182,10 @@ a sekret nie trafia do zapisywalnego stanu interfejsu ani kopii zapasowej.
 Dla każdego kanału lub playlisty aplikacja najpierw pobiera mały kanał RSS
 i natychmiast zapisuje zwrócone pozycje. RSS zwykle obejmuje około 15
 najnowszych materiałów. Następnie YouTube Web uzupełnia starsze strony aż do
-osiągnięcia wybranego zakresu czasu. Duplikaty między RSS i Web są scalane
-lokalnie po identyfikatorze filmu.
+osiągnięcia wybranego zakresu czasu. Aplikacja pobiera bezpośrednio karty
+filmów, transmisji i Shortów, a przed zapisaniem sprawdza, którą kartę YouTube
+rzeczywiście zwrócił. Duplikaty między RSS i Web są scalane lokalnie po
+identyfikatorze filmu.
 
 Integracja Piped została usunięta. Aplikacja nie łączy się z publicznymi
 instancjami Piped i nie przekazuje im identyfikatorów obserwowanych kanałów.
@@ -180,9 +210,9 @@ Szczegóły modelu zaufania i zabezpieczeń opisuje
 
 ## Instalacja
 
-Pobierz podpisany plik APK z zakładki **Releases** repozytorium. Jeżeli Android
-o to poprosi, jednorazowo zezwól przeglądarce lub menedżerowi plików na
-instalowanie aplikacji z tego źródła.
+Pobierz podpisany plik APK z zakładki **Releases** repozytorium. Przy pierwszej
+aktualizacji pobieranej wewnątrz aplikacji Android może poprosić o zezwolenie
+lewicowYT na instalowanie aplikacji z tego źródła.
 
 Aktualizacja zostanie zaakceptowana tylko wtedy, gdy ma ten sam
 `applicationId`, wyższy `versionCode` i została podpisana tym samym kluczem co

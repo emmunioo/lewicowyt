@@ -90,6 +90,8 @@ import pl.lewicowyt.notifier.model.HistoryFilter
 import pl.lewicowyt.notifier.model.HistoryItem
 import pl.lewicowyt.notifier.model.SourceType
 import pl.lewicowyt.notifier.model.VideoKind
+import pl.lewicowyt.notifier.updates.AppUpdateManager
+import pl.lewicowyt.notifier.updates.UpdatePolicy
 
 private enum class Screen(val title: String) {
     CREATORS("Twórcy"),
@@ -136,7 +138,7 @@ fun LewicowYTApp(
     if (whatsNewVisible) {
         AlertDialog(
             onDismissRequest = acknowledgeWhatsNew,
-            title = { Text("Co nowego w lewicowYT 1.3-beta") },
+            title = { Text("Co nowego w lewicowYT 1.4-beta") },
             text = {
                 Column(
                     modifier = Modifier
@@ -144,33 +146,33 @@ fun LewicowYTApp(
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text("Szybsze dostarczanie historii", fontWeight = FontWeight.Bold)
+                    Text("Stabilniejsza historia bez klucza API", fontWeight = FontWeight.Bold)
                     Text(
-                        "Usunęliśmy eksperymentalne źródło Piped. Najnowsze materiały " +
-                            "pojawiają się szybciej, a starsza historia jest doczytywana " +
-                            "w razie potrzeby bezpośrednio z YouTube.",
+                        "Najnowsze materiały nadal pojawiają się szybko dzięki RSS. " +
+                            "Starsza historia jest teraz pobierana bezpośrednio z właściwej " +
+                            "karty YouTube przy mniejszej liczbie zapytań.",
                     )
                     Spacer(Modifier.height(2.dp))
-                    Text("Jeden pewniejszy tryb działania", fontWeight = FontWeight.Bold)
+                    Text("Poprawny podział materiałów", fontWeight = FontWeight.Bold)
                     Text(
-                        "Usunęliśmy tryby oszczędzania energii i zastąpiliśmy je jednym " +
-                            "mechanizmem nastawionym na pewniejsze powiadomienia również " +
-                            "przy wygaszonym ekranie.",
+                        "Filmy, Shorty oraz transmisje są rozpoznawane z aktualnych danych " +
+                            "YouTube. Kanał bez karty transmisji nie może już zwrócić " +
+                            "zwykłych filmów jako streamów.",
                     )
                     Spacer(Modifier.height(2.dp))
-                    Text("Wpływ na baterię", fontWeight = FontWeight.Bold)
+                    Text("Historia nie znika podczas poprawiania typu", fontWeight = FontWeight.Bold)
                     Text(
-                        "Nowy sposób może zużyć nieco więcej energii. Przy typowych " +
-                            "ustawieniach różnica powinna być niewielka, ale sprawdzanie co " +
-                            "15 minut i obserwowanie wielu kanałów może być zauważalne. " +
-                            "Klucz API może przyspieszyć dłuższą historię, lecz nie " +
-                            "gwarantuje mniejszego zużycia baterii.",
+                        "Ponowna klasyfikacja zachowuje dotychczasowy rodzaj materiału, " +
+                            "dopóki YouTube nie dostarczy pewnej odpowiedzi. Nieudana próba " +
+                            "nie zamienia już streamów ani Shortów w filmy.",
                     )
                     Spacer(Modifier.height(2.dp))
-                    Text("Lepsza kontrola ustawień Androida", fontWeight = FontWeight.Bold)
+                    Text("Klucz YouTube API pozostaje opcjonalny", fontWeight = FontWeight.Bold)
                     Text(
-                        "Aplikacja pokazuje teraz rzeczywisty stan ograniczeń baterii " +
-                            "i prowadzi bezpośrednio do ustawienia dotyczącego lewicowYT.",
+                        "Aplikacja działa również bez klucza. Data API może nadal szybciej " +
+                            "pobierać długą historię i jest mniej podatne na zmiany strony " +
+                            "YouTube, dlatego pozostaje opcjonalnym trybem zwiększonej " +
+                            "stabilności.",
                     )
                 }
             },
@@ -814,9 +816,21 @@ private fun SettingsScreen(
                         "Zainstalowana wersja: ${BuildConfig.VERSION_NAME}",
                         style = MaterialTheme.typography.bodySmall,
                     )
+                    SwitchSetting(
+                        title = "Automatyczne aktualizacje",
+                        checked = state.settings.automaticUpdatesEnabled,
+                        onCheckedChange = viewModel::setAutomaticUpdatesEnabled,
+                    )
+                    Text(
+                        "Po włączeniu aplikacja pobiera nowe APK w tle podczas zwykłego " +
+                            "sprawdzania YouTube. Instalacja nie otwiera przeglądarki, ale " +
+                            "Android wymaga jej potwierdzenia.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                     Button(
                         onClick = viewModel::checkForUpdates,
-                        enabled = state.updateState != UpdateUiState.Checking,
+                        enabled = state.updateState != UpdateUiState.Checking &&
+                            state.updateState !is UpdateUiState.Downloading,
                     ) {
                         if (state.updateState == UpdateUiState.Checking) {
                             CircularProgressIndicator(
@@ -849,6 +863,20 @@ private fun SettingsScreen(
                         )
                         is UpdateUiState.Available -> {
                             Text("Dostępna wersja: ${updateState.update.version}")
+                            when (updateState.update.policy) {
+                                UpdatePolicy.OPTIONAL -> Unit
+                                UpdatePolicy.MANDATORY_SECURITY_UPDATE -> Text(
+                                    "Bieżące wydanie zostało wycofane. Z powodów " +
+                                        "bezpieczeństwa ta aktualizacja jest obowiązkowa.",
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                UpdatePolicy.SECURITY_ROLLBACK -> Text(
+                                    AppUpdateManager.SECURITY_ROLLBACK_MESSAGE,
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
                             if (updateState.update.releaseNotes.isNotBlank()) {
                                 Text(
                                     updateState.update.releaseNotes,
@@ -865,10 +893,10 @@ private fun SettingsScreen(
                             }
                             OutlinedButton(
                                 onClick = {
-                                    uriHandler.openUri(updateState.update.apkDownloadUrl)
+                                    viewModel.downloadAndInstallUpdate(updateState.update)
                                 },
                             ) {
-                                Text("Pobierz APK")
+                                Text("Pobierz i przygotuj aktualizację")
                             }
                             TextButton(
                                 onClick = {
@@ -878,11 +906,42 @@ private fun SettingsScreen(
                                 Text("Szczegóły wydania na GitHubie")
                             }
                         }
+                        is UpdateUiState.Downloading -> {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                                Text("Pobieranie i sprawdzanie APK…")
+                            }
+                        }
+                        is UpdateUiState.ReadyToInstall -> {
+                            Text(
+                                "APK zostało pobrane i sprawdzone. Potwierdź instalację " +
+                                    "w systemie Android.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            OutlinedButton(onClick = viewModel::openPreparedUpdateInstaller) {
+                                Text("Otwórz instalator ponownie")
+                            }
+                        }
                     }
                     Text(
-                        "Pobranie odbywa się w przeglądarce. Android zaakceptuje aktualizację " +
-                            "tylko wtedy, gdy APK ma ten sam identyfikator pakietu i jest " +
-                            "podpisany tym samym kluczem co zainstalowana wersja.",
+                        "Kontrola aktualizacji w tle odbywa się najwyżej raz na 2 godziny. " +
+                            "Przed instalacją aplikacja sprawdza SHA-256, identyfikator, " +
+                            "podpis i techniczny numer wersji APK.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        "Jeśli wydanie odpowiadające zainstalowanej wersji zostanie usunięte " +
+                            "z GitHuba, aplikacja potraktuje to jako wycofanie ze względów " +
+                            "bezpieczeństwa. Niezależnie od ustawienia automatycznych " +
+                            "aktualizacji pobierze wydanie zastępcze i poprosi o jego " +
+                            "instalację. Awaryjny rollback musi być podpisany tym samym " +
+                            "kluczem i mieć wyższy versionCode, choć zawiera starszy kod.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }

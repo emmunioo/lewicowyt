@@ -2,6 +2,8 @@
 
 Data przeglądu: 28 lipca 2026 r.
 
+Wersja kodu: `1.4-beta` (`versionCode 14`).
+
 ## Zakres
 
 Sprawdzono kod Kotlin, manifest i zasoby Androida, konfigurację Gradle, skrypty
@@ -94,6 +96,16 @@ certyfikat Android Debug i narzędziowy kod debug).
 - historia każdego źródła zapisuje najpierw małą odpowiedź RSS, a dopiero potem
   uruchamia stronicowanie Data API albo YouTube Web. Duplikaty są scalane po
   identyfikatorze filmu;
+- tryb YouTube Web wysyła od razu żądanie właściwej karty i przed parsowaniem
+  sprawdza parametry faktycznie zaznaczonego `tabRenderer`. Jeżeli kanał nie ma
+  karty transmisji albo Shortów, odpowiedź zastępcza strony głównej nie jest
+  przypisywana do żądanego rodzaju;
+- parser historii akceptuje aktualny `lockupViewModel` wyłącznie jako
+  `LOCKUP_CONTENT_TYPE_VIDEO`, odczytuje tytuł i datę z właściwej sekcji
+  metadanych oraz ignoruje lockupy playlist;
+- migracja bazy do wersji 15 ponawia klasyfikację bez zerowania `kind`.
+  Nieudana klasyfikacja zachowuje dotychczasowy rodzaj, a potwierdzona karta lub
+  odtwarzacz poprawia rekord w miejscu;
 - migracja bazy do wersji 10 usuwa niepotwierdzone rekordy pozostawione przez
   dawną integrację zewnętrzną; zostają ponownie pobrane wyłącznie z YouTube;
 - nieprawidłowe i skrajnie przyszłe daty z RSS, Data API lub YouTube Web
@@ -145,8 +157,10 @@ certyfikat Android Debug i narzędziowy kod debug).
 - AdGuard DNS widzi nazwy rozwiązywanych domen i adres IP urządzenia. Jeśli oba
   adresy startowe DoH są niedostępne, aplikacja przechodzi na pięć minut na resolver
   systemowy, co zachowuje dostępność kosztem chwilowego braku aplikacyjnego DoH;
-- sprawdzanie aktualizacji otwiera stronę pobierania w przeglądarce. Ostateczną
-  ochroną aktualizacji pozostaje weryfikacja podpisu APK przez Androida.
+- aktualizator pobiera APK do prywatnego cache aplikacji i przekazuje je
+  systemowemu instalatorowi. Aplikacja weryfikuje SHA-256 udostępniony przez
+  GitHub, pakiet, wersję i zgodność certyfikatu, ale ostateczne zatwierdzenie
+  instalacji nadal należy do użytkownika i Androida;
 - dokładny alarm może obudzić urządzenie w Doze, ale wymaga specjalnego dostępu
   na Androidzie 12+. „Wymuś zatrzymanie”, odebranie dostępu, brak dozwolonej
   sieci albo agresywna polityka OEM wobec usługi pierwszoplanowej mogą nadal
@@ -164,15 +178,15 @@ certyfikat Android Debug i narzędziowy kod debug).
 
 ## Wynik automatycznej walidacji
 
-Końcowy przebieg lokalny z 28 lipca 2026 r., po zastąpieniu WorkManagera
-pojedynczym harmonogramem AlarmManager oraz wdrożeniu historii RSS-first bez
-Piped, zakończył się powodzeniem:
+Końcowy przebieg lokalny z 28 lipca 2026 r. dla kodu `1.4-beta`, po
+przebudowaniu głębszej historii YouTube Web i klasyfikacji rodzajów materiałów,
+zakończył się powodzeniem:
 
-- 66 testów jednostkowych wariantu debug i 66 tych samych testów wariantu
+- 91 testów jednostkowych wariantu debug i 91 tych samych testów wariantu
   release: 0 niepowodzeń, 0 błędów i 0 pominięć;
 - kompilacja Kotlin oraz kontrolne złożenie wariantów debug i release:
   powodzenie;
-- Android Lint dla debug i release: 0 błędów. Pozostały 32 ostrzeżenia
+- Android Lint dla debug i release: 0 błędów. Pozostały 34 ostrzeżenia
   informacyjnych: dostępność nowszych, celowo jeszcze niewprowadzonych wersji
   zależności, sugestie zamiany jawnych transakcji na skróty KTX, kontrola
   najnowszego API, kształt pomocniczych ikon rastrowych oraz jawne ostrzeżenie
@@ -198,17 +212,20 @@ kluczem wydawcy; jego nowy SHA-256 trzeba wpisać do dokumentacji wydania.
 - odpowiedź RSS jest traktowana jako szybki początek, a nie dowód kompletności
   zakresu. Historia jest oznaczana jako ukończona dopiero po dojściu Data API
   albo YouTube Web do granicy czasu lub końca źródła;
-- paginacja YouTube wykrywa powtarzające się kursory i tokeny, nie oznacza
-  zakresu jako ukończonego po osiągnięciu limitu bezpieczeństwa oraz nie
-  przesuwa kursora powiadomień, dopóki nie obejmie luki od poprzedniego punktu;
+- paginacja YouTube traktuje samo echo ostatniego kursora jako wyczerpanie
+  odpowiedzi, a cykle obejmujące różne wcześniejsze tokeny nadal zatrzymuje
+  ochroną przed pętlą. Nie oznacza zakresu jako ukończonego po osiągnięciu
+  limitu bezpieczeństwa ani nie przesuwa kursora powiadomień, dopóki nie
+  obejmie luki od poprzedniego punktu;
 - ręcznie sortowana playlista nie jest uznawana za chronologiczną: historia i
   wykrywanie powiadomień dochodzą do jej końca albo jawnego limitu
   bezpieczeństwa zamiast zatrzymywać się na pierwszym starszym materiale;
 - zapis wpisu historii, jego pochodzenia, stanu sprawdzenia dla powiadomień oraz
   decyzji o kolejce jest atomowy, więc równoległy backfill nie może zgubić
   powiadomienia;
-- rekord o nieznanym typie jest ponawiany z ograniczeniem prób, dzięki czemu
-  pojedynczy trwale nieklasyfikowalny film nie blokuje całej kolejki;
+- rekord o niepewnym typie pozostaje dostępny pod dotychczasowym rodzajem i jest
+  ponawiany w kolejności uwzględniającej czas ostatniej próby. Błąd klasyfikacji
+  nie wymusza już ogólnego typu `VIDEO`;
 - harmonogram używa jednego jednorazowego alarmu `RTC_WAKEUP` o stałej
   tożsamości `PendingIntent`. Odbiornik zapisuje następny zwykły termin przed
   uruchomieniem sieci; ewentualne ponowienie zastępuje go tym samym alarmem,

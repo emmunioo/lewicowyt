@@ -31,6 +31,7 @@ import pl.lewicowyt.notifier.network.YouTubeHistoryClient
 import pl.lewicowyt.notifier.network.YouTubeHistoryCursor
 import pl.lewicowyt.notifier.network.YouTubeHistoryItem
 import pl.lewicowyt.notifier.network.YouTubeHistoryTab
+import pl.lewicowyt.notifier.network.YouTubePageClassifier
 import pl.lewicowyt.notifier.network.YouTubeSourceResolver
 
 data class BackfillResult(
@@ -52,6 +53,7 @@ class HistoryBackfillLoader(
     private val feedClient: YouTubeFeedClient,
     private val client: YouTubeHistoryClient,
     private val dataApiClient: YouTubeDataApiHistoryClient,
+    private val classifier: YouTubePageClassifier,
 ) {
     private data class Target(
         val creator: Creator,
@@ -74,6 +76,7 @@ class HistoryBackfillLoader(
 
     private val loadMutex = Mutex()
     private val channelSemaphore = Semaphore(MAX_PARALLEL_CHANNELS)
+    private val classificationSemaphore = Semaphore(MAX_PARALLEL_CLASSIFICATIONS)
     private var completedSignature: String? = null
     private var activeSignature: String? = null
     private val completedTargets = ConcurrentHashMap.newKeySet<String>()
@@ -166,6 +169,7 @@ class HistoryBackfillLoader(
                 resolved = resolved,
                 cutoff = cutoff,
                 reporter = reporter,
+                classifyEntries = apiKey.isBlank(),
             )
         }
 
@@ -242,6 +246,7 @@ class HistoryBackfillLoader(
         resolved: ResolvedSource,
         cutoff: Long,
         reporter: ProgressReporter,
+        classifyEntries: Boolean,
     ): Int {
         val items = rssHistoryItems(
             entries = feedClient.fetch(resolved),
@@ -249,7 +254,41 @@ class HistoryBackfillLoader(
         )
         val insertedCount = database.insertHistoricalVideos(creator, items)
         reporter.report()
+        if (classifyEntries) classifyRssItems(items, reporter)
         return insertedCount
+    }
+
+    /**
+     * RSS nie zawiera rodzaju materiału. Karty kanału są lżejszym źródłem tej
+     * informacji, ale w EOG YouTube może zamiast nich zwrócić stronę zgody.
+     * Najnowsze wpisy klasyfikujemy więc również po publicznej stronie filmu.
+     */
+    private suspend fun classifyRssItems(
+        items: List<YouTubeHistoryItem>,
+        reporter: ProgressReporter,
+    ) {
+        val unclassifiedIds = database.unclassifiedVideoIds(
+            items.map { it.entry.id },
+        )
+        if (unclassifiedIds.isEmpty()) return
+
+        val results = coroutineScope {
+            unclassifiedIds.map { videoId ->
+                async(Dispatchers.IO) {
+                    videoId to classificationSemaphore.withPermit {
+                        classifier.classify(videoId)
+                    }
+                }
+            }.awaitAll()
+        }
+        results.forEach { (videoId, kind) ->
+            if (kind == VideoKind.UNKNOWN) {
+                database.recordFailedVideoClassification(videoId)
+            } else {
+                database.markVideoClassification(videoId, kind)
+            }
+        }
+        reporter.report()
     }
 
     private fun mergeRssAndYouTubeResults(
@@ -526,6 +565,7 @@ class HistoryBackfillLoader(
 
     private companion object {
         const val MAX_PARALLEL_CHANNELS = 8
+        const val MAX_PARALLEL_CLASSIFICATIONS = 6
         const val MAX_PAGES_PER_TARGET = 120
         const val MAX_ERROR_DETAIL_CHARS = 400
         const val MAX_ERROR_LINE_CHARS = 600
@@ -587,6 +627,7 @@ internal fun rssHistoryItems(
             // RSS nie rozróżnia niezawodnie filmu, Shorta i transmisji.
             // Następna odpowiedź API/Web uzupełni dokładny typ.
             kind = VideoKind.UNKNOWN,
+            kindVerified = false,
         )
     }
     .toList()

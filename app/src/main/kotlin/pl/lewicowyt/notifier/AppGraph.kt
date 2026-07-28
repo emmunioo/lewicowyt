@@ -16,6 +16,8 @@ import pl.lewicowyt.notifier.network.androidApiRequestHeaders
 import pl.lewicowyt.notifier.notifications.NotificationHelper
 import pl.lewicowyt.notifier.sync.SyncEngine
 import pl.lewicowyt.notifier.sync.HistoryBackfillLoader
+import pl.lewicowyt.notifier.updates.AppUpdateManager
+import pl.lewicowyt.notifier.updates.BackgroundUpdateCoordinator
 import pl.lewicowyt.notifier.updates.GitHubUpdateChecker
 import pl.lewicowyt.notifier.worker.SyncScheduler
 
@@ -44,6 +46,10 @@ object AppGraph {
         private set
     lateinit var updateChecker: GitHubUpdateChecker
         private set
+    lateinit var updateManager: AppUpdateManager
+        private set
+    lateinit var backgroundUpdateCoordinator: BackgroundUpdateCoordinator
+        private set
 
     fun initialize(context: Context) {
         if (initialized) return
@@ -54,13 +60,15 @@ object AppGraph {
             preferences = PreferencesRepository(appContext)
             database = LocalDatabase(appContext)
             notifications = NotificationHelper(appContext, database)
-            val http = HttpTextClient(PrivacyHttpClient.get(appContext))
+            val okHttp = PrivacyHttpClient.get(appContext)
+            val http = HttpTextClient(okHttp)
             val feedClient = YouTubeFeedClient(http)
             dataApiClient = YouTubeDataApiHistoryClient(
                 http = http,
                 apiRequestHeaders = androidApiRequestHeaders(appContext),
             )
             val historyClient = YouTubeHistoryClient(http)
+            val pageClassifier = YouTubePageClassifier(http)
             resolver = YouTubeSourceResolver(http, database)
             historyBackfill = HistoryBackfillLoader(
                 catalog = catalog,
@@ -70,6 +78,7 @@ object AppGraph {
                 feedClient = feedClient,
                 client = historyClient,
                 dataApiClient = dataApiClient,
+                classifier = pageClassifier,
             )
             syncEngine = SyncEngine(
                 catalog = catalog,
@@ -77,13 +86,19 @@ object AppGraph {
                 database = database,
                 resolver = resolver,
                 feedClient = feedClient,
-                classifier = YouTubePageClassifier(http),
+                classifier = pageClassifier,
                 notifications = notifications,
                 dataApiClient = dataApiClient,
                 historyClient = historyClient,
             )
             scheduler = SyncScheduler(appContext, preferences)
             updateChecker = GitHubUpdateChecker(http, BuildConfig.UPDATE_REPOSITORY)
+            updateManager = AppUpdateManager(appContext, okHttp)
+            backgroundUpdateCoordinator = BackgroundUpdateCoordinator(
+                preferences = preferences,
+                checker = updateChecker,
+                manager = updateManager,
+            )
             initialized = true
         }
     }

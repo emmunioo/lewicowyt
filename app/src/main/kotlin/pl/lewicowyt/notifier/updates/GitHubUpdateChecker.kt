@@ -12,6 +12,12 @@ sealed interface UpdateCheckResult {
     data class Available(val update: AvailableUpdate) : UpdateCheckResult
 }
 
+enum class UpdatePolicy {
+    OPTIONAL,
+    MANDATORY_SECURITY_UPDATE,
+    SECURITY_ROLLBACK,
+}
+
 data class AvailableUpdate(
     val version: String,
     val releasePageUrl: String,
@@ -19,6 +25,7 @@ data class AvailableUpdate(
     val apkName: String,
     val sha256Digest: String?,
     val releaseNotes: String,
+    val policy: UpdatePolicy = UpdatePolicy.OPTIONAL,
 )
 
 class GitHubUpdateChecker(
@@ -35,8 +42,8 @@ class GitHubUpdateChecker(
             http.getText(
                 // /latest pomija wydania oznaczone przez GitHub jako prerelease.
                 // Lista pozwala becie wykrywać kolejne bety i późniejsze stable.
-                url = "https://api.github.com/repos/$normalizedRepository/releases?per_page=20",
-                maxChars = 1_000_000,
+                url = "https://api.github.com/repos/$normalizedRepository/releases?per_page=100",
+                maxChars = 4_000_000,
                 headers = mapOf("Accept" to "application/vnd.github+json"),
             )
         } catch (error: IOException) {
@@ -49,20 +56,11 @@ class GitHubUpdateChecker(
             throw error
         }
         val releases = JSONArray(json)
-        val latestRelease = selectNewestInstallableRelease(
+        return selectUpdateResultFromReleases(
             releases = releases,
             currentVersion = currentVersion,
             repository = normalizedRepository,
         )
-            ?: throw IllegalStateException(
-                "Repozytorium nie ma publicznego wydania z poprawnym plikiem APK.",
-            )
-        val latestVersion = latestRelease.version
-        if (compareReleaseVersions(latestVersion, currentVersion) <= 0) {
-            return UpdateCheckResult.UpToDate(latestVersion)
-        }
-
-        return UpdateCheckResult.Available(latestRelease.update)
     }
 
     private companion object {
@@ -143,11 +141,86 @@ internal fun selectNewestInstallableRelease(
     releases: JSONArray,
     currentVersion: String,
     repository: String,
-): ReleaseCandidate? {
-    val allowPrereleases = runCatching {
-        parseReleaseVersion(currentVersion).prerelease.isNotEmpty()
-    }.getOrDefault(false)
+): ReleaseCandidate? =
+    installableReleaseCandidates(
+        releases = releases,
+        repository = repository,
+        includePrereleases = currentVersionAllowsPrereleases(currentVersion),
+    )
+        .maxWithOrNull { left, right ->
+            compareReleaseVersions(left.version, right.version)
+        }
 
+internal fun selectUpdateResultFromReleases(
+    releases: JSONArray,
+    currentVersion: String,
+    repository: String,
+): UpdateCheckResult {
+    val allCandidates = installableReleaseCandidates(
+        releases = releases,
+        repository = repository,
+        includePrereleases = true,
+    )
+    if (allCandidates.isEmpty()) {
+        throw IllegalStateException(
+            "Repozytorium nie ma publicznego wydania z poprawnym plikiem APK.",
+        )
+    }
+
+    val currentReleaseExists = allCandidates.any {
+        compareReleaseVersions(it.version, currentVersion) == 0
+    }
+    val candidates = if (currentReleaseExists) {
+        installableReleaseCandidates(
+            releases = releases,
+            repository = repository,
+            includePrereleases = currentVersionAllowsPrereleases(currentVersion),
+        )
+    } else {
+        // Wycofanie wydania jest trybem awaryjnym. Wtedy instalacja stabilna
+        // może otrzymać również jawnie oznaczoną wersję ratunkową prerelease.
+        allCandidates
+    }
+    val newerRelease = candidates
+        .filter { compareReleaseVersions(it.version, currentVersion) > 0 }
+        .maxWithOrNull { left, right ->
+            compareReleaseVersions(left.version, right.version)
+        }
+
+    if (currentReleaseExists) {
+        return newerRelease
+            ?.let { UpdateCheckResult.Available(it.update) }
+            ?: UpdateCheckResult.UpToDate(currentVersion)
+    }
+
+    // Brak bieżącego wydania z APK jest sygnałem awaryjnym. Jeśli istnieje
+    // nowsza wersja, jest bezpieczniejszym celem niż cofnięcie. Gdy jej nie ma,
+    // wybieramy najnowsze starsze wydanie. Android zaakceptuje taki rollback
+    // wyłącznie wtedy, gdy awaryjny APK ma wyższy techniczny versionCode.
+    if (newerRelease != null) {
+        return UpdateCheckResult.Available(
+            newerRelease.update.copy(policy = UpdatePolicy.MANDATORY_SECURITY_UPDATE),
+        )
+    }
+
+    val rollback = candidates
+        .filter { compareReleaseVersions(it.version, currentVersion) < 0 }
+        .maxWithOrNull { left, right ->
+            compareReleaseVersions(left.version, right.version)
+        }
+        ?: throw IllegalStateException(
+            "Bieżące wydanie zostało wycofane, ale nie ma awaryjnego APK.",
+        )
+    return UpdateCheckResult.Available(
+        rollback.update.copy(policy = UpdatePolicy.SECURITY_ROLLBACK),
+    )
+}
+
+private fun installableReleaseCandidates(
+    releases: JSONArray,
+    repository: String,
+    includePrereleases: Boolean,
+): List<ReleaseCandidate> {
     return (0 until releases.length())
         .mapNotNull { index ->
             val release = releases.optJSONObject(index) ?: return@mapNotNull null
@@ -158,7 +231,7 @@ internal fun selectNewestInstallableRelease(
                 val version = rawTag.removePrefix("v").removePrefix("V")
                 val parsedVersion = parseReleaseVersion(version)
                 if (
-                    !allowPrereleases &&
+                    !includePrereleases &&
                     (release.optBoolean("prerelease", false) ||
                         parsedVersion.prerelease.isNotEmpty())
                 ) {
@@ -201,10 +274,11 @@ internal fun selectNewestInstallableRelease(
                 )
             }.getOrNull()
         }
-        .maxWithOrNull { left, right ->
-            compareReleaseVersions(left.version, right.version)
-        }
 }
+
+private fun currentVersionAllowsPrereleases(currentVersion: String): Boolean =
+    runCatching { parseReleaseVersion(currentVersion).prerelease.isNotEmpty() }
+        .getOrDefault(false)
 
 private val SHA256 = Regex("""[a-fA-F0-9]{64}""")
 private const val MAX_VERSION_CHARS = 100
