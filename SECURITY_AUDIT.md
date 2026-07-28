@@ -203,9 +203,19 @@ zakończył się powodzeniem:
 - skan plików publikowanych: brak kluczy podpisu, APK/AAB, zrzutów pamięci,
   raportów awarii, osadzonych kluczy API oraz danych osobowych z certyfikatu.
 
-W przebiegu powstał wyłącznie niepodpisany APK release do kontroli kompilacji.
-Publiczny, podpisany artefakt należy wygenerować w Android Studio właściwym
-kluczem wydawcy; jego nowy SHA-256 trzeba wpisać do dokumentacji wydania.
+Przebieg Gradle tworzył wyłącznie niepodpisany APK release do kontroli
+kompilacji. Oddzielnie wygenerowany w Android Studio podpisany artefakt
+`lewicowYT-1.4-beta.apk` został następnie sprawdzony narzędziami Android SDK:
+
+- SHA-256 APK:
+  `ea534b9b2307c1d4f7dbdd079e4162479a72ec8f7ca480eed7c2806ac12a6938`;
+- pakiet `pl.lewicowyt.notifier`, `versionCode 14`, `versionName 1.4-beta`;
+- podpis APK Signature Scheme v2 jest poprawny, liczba sygnatariuszy: 1;
+- SHA-256 certyfikatu:
+  `2d242f3390a37913459085f86edf96484f2ccc3866e327325d2915c74a8e980a`;
+- minimalny Android API 26, docelowy API 36 oraz cztery deklarowane ABI.
+
+Skrót APK jest zgodny z identyfikatorem opublikowanego raportu VirusTotal.
 
 ## Niezawodność danych i harmonogramu
 

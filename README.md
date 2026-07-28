@@ -8,6 +8,19 @@ YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.
 
 ## Najważniejsze zmiany w 1.4-beta
 
+- dodano automatyczne aktualizacje z publicznych wydań GitHub. Aplikacja może
+  sprawdzać je razem z synchronizacją YouTube, jednak nie częściej niż raz na
+  2 godziny, a zwykłe automatyczne pobieranie można wyłączyć w ustawieniach;
+- aktualizacja jest pobierana do prywatnej pamięci aplikacji bez otwierania
+  przeglądarki. Przed przekazaniem jej systemowemu instalatorowi sprawdzane są:
+  HTTPS, limit rozmiaru, dostępny SHA-256, identyfikator pakietu, certyfikat
+  podpisujący, `versionName` oraz rosnący `versionCode`;
+- usunięcie bieżącego wydania z GitHuba jest traktowane jako sygnał
+  bezpieczeństwa. Aplikacja wymaga wtedy nowszego wydania zastępczego albo
+  przygotowanego przez autora rollbacku ze starszym kodem i wyższym technicznym
+  `versionCode`. Android nadal zawsze wymaga potwierdzenia instalacji;
+- ręczne sprawdzanie aktualizacji wykorzystuje przez 15 minut zapisany wynik,
+  aby kolejne naciśnięcia nie wykonywały zbędnych żądań sieciowych;
 - przebudowano historię działającą bez klucza API. Po szybkim odczycie RSS
   aplikacja pobiera od razu żądaną kartę YouTube Web, bez dodatkowego zapytania
   o pełną listę kart dla każdego kanału;
@@ -21,6 +34,9 @@ YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.
   Shortów w filmy i nie usuwa ich z aktywnej zakładki;
 - migracja bazy 15 ponawia klasyfikację bez zerowania zapisanego rodzaju.
   Istniejące błędne wpisy są poprawiane w miejscu podczas synchronizacji;
+- poprawiono rozpoznawanie tożsamości kanału i wpisy w katalogu twórców, aby
+  materiały polecanego albo obcego kanału nie mogły zostać przypisane do
+  obserwowanego twórcy;
 - klucz YouTube Data API nadal jest opcjonalny. Może przyspieszyć dłuższą
   historię, zapewnia oficjalne stronicowanie i jest mniej podatny na zmiany
   interfejsu YouTube, ale nie jest wymagany do normalnego działania;

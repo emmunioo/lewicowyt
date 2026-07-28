@@ -203,6 +203,34 @@ lewicowYT-1.4-beta.apk
 6. W opisie podaj SHA-256 APK oraz najważniejsze znane ograniczenia.
 7. Opublikuj wydanie i sprawdź w aplikacji przycisk `Sprawdź aktualizacje`.
 
+### Zakres zmian 1.4-beta
+
+Opis istniejącego wydania GitHub można edytować również po opublikowaniu APK.
+W informacji o wersji 1.4-beta należy uwzględnić:
+
+- automatyczne sprawdzanie aktualizacji wraz z synchronizacją YouTube, nie
+  częściej niż raz na 2 godziny, oraz przełącznik zwykłych automatycznych
+  aktualizacji w ustawieniach;
+- pobieranie APK do prywatnej pamięci aplikacji bez przechodzenia do
+  przeglądarki oraz przekazanie go systemowemu instalatorowi Androida;
+- weryfikację HTTPS, rozmiaru, SHA-256, pakietu, certyfikatu podpisującego,
+  `versionName` i rosnącego `versionCode`;
+- wykrywanie usunięcia bieżącego wydania i obsługę obowiązkowej aktualizacji
+  bezpieczeństwa albo przygotowanego rollbacku;
+- poprawki przypisania identyfikatorów kanałów i ochronę przed przypisaniem
+  materiału obcego kanału do obserwowanego twórcy;
+- stabilniejsze doczytywanie historii YouTube Web, obsługę aktualnych kafelków,
+  poprawne zakończenie powtarzającego się kursora oraz weryfikację wybranej
+  karty kanału;
+- poprawiony podział filmów, Shortów i transmisji oraz zachowanie istniejącego
+  typu wpisu, gdy ponowna klasyfikacja chwilowo się nie powiedzie;
+- pozostawienie YouTube Data API jako opcjonalnego trybu zwiększonej
+  stabilności i szybkości długiej historii.
+
+Android nie pozwala zwykłej aplikacji zatwierdzić instalacji bez działania
+użytkownika. „Automatyczna aktualizacja” oznacza automatyczne wykrycie,
+pobranie i sprawdzenie APK; końcową instalację zatwierdza użytkownik.
+
 ## Kolejne wydania
 
 Przykładowa kolejność:
