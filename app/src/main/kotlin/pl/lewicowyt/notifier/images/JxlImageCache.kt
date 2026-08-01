@@ -11,7 +11,6 @@ import com.awxkee.jxlcoder.JxlEffort
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
-import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
@@ -32,6 +31,8 @@ import pl.lewicowyt.notifier.network.PrivacyHttpClient
 /**
  * Obraz jest dostępny od razu z pobranego JPG, a jego zamiana na JXL odbywa się
  * w tle. Plik źródłowy jest usuwany dopiero po zapisaniu i zweryfikowaniu JXL.
+ * Pliki są adresowane SHA-256 zawartości, dlatego historia, powiadomienia i
+ * awatary współdzielą jedną kopię identycznego obrazu niezależnie od URL.
  */
 object JxlImageCache {
     private val memory = object : LruCache<String, Bitmap>(MEMORY_CACHE_KIB) {
@@ -44,65 +45,129 @@ object JxlImageCache {
     private val cacheMutationLock = Any()
 
     suspend fun load(context: Context, url: String): Bitmap? = withContext(Dispatchers.IO) {
-        synchronized(memory) { memory.get(url) }?.let { return@withContext it }
-
-        val cacheDir = imageCacheDir(context)
-        val key = sha256(url)
-        val jxlFile = File(cacheDir, "$key.jxl")
-        val jpgFile = File(cacheDir, "$key.jpg")
-        val legacyFile = File(cacheDir, key)
-
-        decodeJxl(jxlFile)?.let { bitmap ->
-            jpgFile.delete()
-            legacyFile.delete()
-            remember(url, bitmap)
-            return@withContext bitmap
+        if (BundledAvatarStore.isBundledAvatarUrl(url)) {
+            synchronized(memory) { memory.get(url) }?.let { return@withContext it }
+            return@withContext BundledAvatarStore.load(context, url)?.also { bitmap ->
+                remember(url, bitmap)
+            }
         }
-
-        if (jxlFile.exists()) jxlFile.delete()
-        val sourceFile = normalizeLegacyFile(legacyFile, jpgFile)
-        decodeOriginal(sourceFile)?.let { bitmap ->
-            remember(url, bitmap)
-            scheduleConversion(key, sourceFile, jxlFile)
-            return@withContext bitmap
+        val generation = cacheGeneration.get()
+        val directories = cacheDirectories(context)
+        val urlKey = ImageContentAddressing.urlKey(url)
+        val referenceFile = ImageContentAddressing.referenceFile(directories.references, urlKey)
+        loadReferenced(referenceFile, directories.content)?.let {
+            return@withContext it
         }
-        if (sourceFile.exists()) sourceFile.delete()
+        loadUrlAddressedCache(
+            context = context,
+            urlKey = urlKey,
+            directories = directories,
+            referenceFile = referenceFile,
+            generation = generation,
+        )?.let { return@withContext it }
 
         val downloaded = download(context, url) ?: return@withContext null
         val bitmap = decodeOriginal(downloaded)
             ?: return@withContext null
-        writeAtomically(jpgFile, downloaded)
-        remember(url, bitmap)
-        scheduleConversion(key, jpgFile, jxlFile)
+        val contentKey = ImageContentAddressing.contentKey(downloaded)
+        val jpgFile = ImageContentAddressing.contentFile(
+            directories.content,
+            contentKey,
+            ORIGINAL_EXTENSION,
+        )
+        val jxlFile = ImageContentAddressing.contentFile(
+            directories.content,
+            contentKey,
+            JXL_EXTENSION,
+        )
+        val stored = synchronized(cacheMutationLock) {
+            if (generation != cacheGeneration.get()) return@synchronized false
+            if (!jxlFile.isFile && !jpgFile.isFile) {
+                writeAtomically(jpgFile, downloaded)
+            }
+            val contentExists = jxlFile.isFile || jpgFile.isFile
+            contentExists &&
+                writeAtomically(referenceFile, contentKey.toByteArray(Charsets.US_ASCII))
+        }
+        if (stored) {
+            remember(contentKey, bitmap)
+            if (!jxlFile.isFile) {
+                scheduleConversion(contentKey, jpgFile, jxlFile)
+            }
+        }
         bitmap
     }
 
+    data class DownloadedAvatar(
+        val bytes: ByteArray,
+        val sha256: String,
+    )
+
+    /** Pobiera dokładnie jeden obraz i sprawdza, czy CDN zwrócił avatar 176x176. */
+    suspend fun downloadValidatedAvatar(context: Context, url: String): DownloadedAvatar? =
+        withContext(Dispatchers.IO) {
+            val bytes = download(context, url) ?: return@withContext null
+            val bitmap = decodeOriginal(bytes) ?: return@withContext null
+            val valid = bitmap.width == AVATAR_SIZE_PX && bitmap.height == AVATAR_SIZE_PX
+            bitmap.recycle()
+            if (!valid) return@withContext null
+            DownloadedAvatar(bytes, ImageContentAddressing.contentKey(bytes))
+        }
+
     /**
-     * Po aktualizacji aplikacji konwertuje również pliki starego cache, nawet
-     * zanim odpowiadające im elementy ponownie pojawią się na ekranie.
+     * Zapisuje już pobrane bajty bez drugiego żądania sieciowego. JPG jest
+     * podmieniany w tle na JXL 69 / effort 10 tak samo jak miniatury.
+     */
+    suspend fun cacheDownloaded(
+        context: Context,
+        url: String,
+        bytes: ByteArray,
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (BundledAvatarStore.isBundledAvatarUrl(url)) return@withContext false
+        val parsedUrl = url.toHttpUrlOrNull() ?: return@withContext false
+        if (!isAllowedImageUrl(parsedUrl)) return@withContext false
+        val bitmap = decodeOriginal(bytes) ?: return@withContext false
+        val generation = cacheGeneration.get()
+        val directories = cacheDirectories(context)
+        val contentKey = ImageContentAddressing.contentKey(bytes)
+        val jpgFile = ImageContentAddressing.contentFile(
+            directories.content,
+            contentKey,
+            ORIGINAL_EXTENSION,
+        )
+        val jxlFile = ImageContentAddressing.contentFile(
+            directories.content,
+            contentKey,
+            JXL_EXTENSION,
+        )
+        val referenceFile = ImageContentAddressing.referenceFile(
+            directories.references,
+            ImageContentAddressing.urlKey(url),
+        )
+        val stored = synchronized(cacheMutationLock) {
+            if (generation != cacheGeneration.get()) return@synchronized false
+            if (!jxlFile.isFile && !jpgFile.isFile) writeAtomically(jpgFile, bytes)
+            (jxlFile.isFile || jpgFile.isFile) && writeAtomically(
+                referenceFile,
+                contentKey.toByteArray(Charsets.US_ASCII),
+            )
+        }
+        if (stored) {
+            remember(contentKey, bitmap)
+            if (!jxlFile.isFile) scheduleConversion(contentKey, jpgFile, jxlFile)
+        } else {
+            bitmap.recycle()
+        }
+        stored
+    }
+
+    /**
+     * Najstarszy katalog nie miał jednoznacznego formatu. Cache v2 zachowujemy
+     * i migrujemy leniwie podczas pierwszego użycia konkretnego URL-u, dzięki
+     * czemu aktualizacja nie pobiera ani nie kompresuje obrazów ponownie.
      */
     fun migrateExisting(context: Context) {
-        // Starszy katalog mógł zawierać duże pliki JXL utworzone przed
-        // wprowadzeniem limitu rozmiaru dekodowanego obrazu. Cache jest
-        // odtwarzalny, dlatego bezpieczniej usunąć go niż dekodować w ciemno.
         deleteCacheDirectory(context, LEGACY_CACHE_DIRECTORY)
-        val cacheDir = imageCacheDir(context)
-        cacheDir.listFiles()
-            .orEmpty()
-            .filter {
-                it.isFile && (it.extension.isBlank() || it.extension.equals("jpg", true))
-            }
-            .forEach { source ->
-                val key = if (source.extension.isBlank()) source.name else source.nameWithoutExtension
-                val jpgFile = File(cacheDir, "$key.jpg")
-                val jxlFile = File(cacheDir, "$key.jxl")
-                val sourceFile = if (source.extension.isBlank()) {
-                    normalizeLegacyFile(source, jpgFile)
-                } else {
-                    source
-                }
-                scheduleConversion(key, sourceFile, jxlFile)
-            }
     }
 
     /**
@@ -114,7 +179,22 @@ object JxlImageCache {
         nowMillis: Long = System.currentTimeMillis(),
     ) {
         val cutoff = DataRetentionPolicy.cutoffs(nowMillis).historyBeforeMillis
-        imageCacheDir(context).listFiles()
+        val directories = cacheDirectories(context)
+        directories.references.listFiles()
+            .orEmpty()
+            .filter { it.isFile && it.lastModified() < cutoff }
+            .forEach(File::delete)
+        val referencedKeys = ImageContentAddressing.referencedContentKeys(directories.references)
+        directories.content.listFiles()
+            .orEmpty()
+            .filter { file ->
+                file.isFile &&
+                    file.lastModified() < cutoff &&
+                    file.nameWithoutExtension !in referencedKeys
+            }
+            .forEach(File::delete)
+        File(context.applicationContext.cacheDir, URL_ADDRESSED_CACHE_DIRECTORY)
+            .listFiles()
             .orEmpty()
             .filter { it.isFile && it.lastModified() < cutoff }
             .forEach(File::delete)
@@ -129,8 +209,121 @@ object JxlImageCache {
             cacheGeneration.incrementAndGet()
             synchronized(memory) { memory.evictAll() }
             deleteCacheDirectory(context, CACHE_DIRECTORY)
+            deleteCacheDirectory(context, URL_ADDRESSED_CACHE_DIRECTORY)
             deleteCacheDirectory(context, LEGACY_CACHE_DIRECTORY)
         }
+    }
+
+    private fun loadReferenced(
+        referenceFile: File,
+        contentDirectory: File,
+    ): Bitmap? {
+        val contentKey = ImageContentAddressing.readReference(referenceFile)
+        if (contentKey == null) {
+            if (referenceFile.exists()) referenceFile.delete()
+            return null
+        }
+        synchronized(memory) { memory.get(contentKey) }?.let { bitmap ->
+            touch(referenceFile)
+            return bitmap
+        }
+
+        val jxlFile = ImageContentAddressing.contentFile(
+            contentDirectory,
+            contentKey,
+            JXL_EXTENSION,
+        )
+        val jpgFile = ImageContentAddressing.contentFile(
+            contentDirectory,
+            contentKey,
+            ORIGINAL_EXTENSION,
+        )
+        decodeJxl(jxlFile)?.let { bitmap ->
+            jpgFile.delete()
+            touch(referenceFile)
+            touch(jxlFile)
+            remember(contentKey, bitmap)
+            return bitmap
+        }
+
+        if (jxlFile.exists()) jxlFile.delete()
+        decodeOriginal(jpgFile)?.let { bitmap ->
+            touch(referenceFile)
+            touch(jpgFile)
+            remember(contentKey, bitmap)
+            scheduleConversion(contentKey, jpgFile, jxlFile)
+            return bitmap
+        }
+
+        if (jpgFile.exists()) jpgFile.delete()
+        referenceFile.delete()
+        return null
+    }
+
+    private fun loadUrlAddressedCache(
+        context: Context,
+        urlKey: String,
+        directories: CacheDirectories,
+        referenceFile: File,
+        generation: Long,
+    ): Bitmap? {
+        val legacyDirectory = File(
+            context.applicationContext.cacheDir,
+            URL_ADDRESSED_CACHE_DIRECTORY,
+        )
+        if (!legacyDirectory.isDirectory) return null
+        val candidates = listOf(
+            LegacyImage(File(legacyDirectory, "$urlKey.$JXL_EXTENSION"), JXL_EXTENSION),
+            LegacyImage(File(legacyDirectory, "$urlKey.$ORIGINAL_EXTENSION"), ORIGINAL_EXTENSION),
+            LegacyImage(File(legacyDirectory, urlKey), ORIGINAL_EXTENSION),
+        )
+        for (candidate in candidates) {
+            val source = candidate.file
+            if (!source.isFile || source.length() !in 1..MAX_IMAGE_BYTES.toLong()) continue
+            val bytes = runCatching { source.readBytes() }.getOrNull() ?: continue
+            val bitmap = if (candidate.extension == JXL_EXTENSION) {
+                if (!JxlCoder.isJXL(bytes)) continue
+                runCatching { JxlCoder.decode(bytes) }.getOrNull()
+                    ?.takeIf { isSafeDecodedSize(it.width, it.height) }
+            } else {
+                decodeOriginal(bytes)
+            } ?: continue
+            val contentKey = ImageContentAddressing.contentKey(bytes)
+            val target = ImageContentAddressing.contentFile(
+                directories.content,
+                contentKey,
+                candidate.extension,
+            )
+            val migrated = synchronized(cacheMutationLock) {
+                if (generation != cacheGeneration.get()) return@synchronized false
+                val contentStored = if (target.isFile && target.length() == bytes.size.toLong()) {
+                    true
+                } else {
+                    if (target.exists()) target.delete()
+                    writeAtomically(target, bytes)
+                }
+                contentStored && writeAtomically(
+                    referenceFile,
+                    contentKey.toByteArray(Charsets.US_ASCII),
+                )
+            }
+            if (!migrated) {
+                bitmap.recycle()
+                continue
+            }
+            source.delete()
+            remember(contentKey, bitmap)
+            if (candidate.extension == ORIGINAL_EXTENSION) {
+                val jxlFile = ImageContentAddressing.contentFile(
+                    directories.content,
+                    contentKey,
+                    JXL_EXTENSION,
+                )
+                scheduleConversion(contentKey, target, jxlFile)
+            }
+            return bitmap
+        }
+        return null
     }
 
     private fun scheduleConversion(
@@ -231,19 +424,23 @@ object JxlImageCache {
         }
     }
 
-    private fun normalizeLegacyFile(legacyFile: File, jpgFile: File): File {
-        if (jpgFile.isFile) return jpgFile
-        if (!legacyFile.isFile) return jpgFile
-        if (legacyFile.renameTo(jpgFile)) return jpgFile
-        return legacyFile
+    private fun remember(contentKey: String, bitmap: Bitmap) {
+        synchronized(memory) { memory.put(contentKey, bitmap) }
     }
 
-    private fun remember(url: String, bitmap: Bitmap) {
-        synchronized(memory) { memory.put(url, bitmap) }
+    private fun cacheDirectories(context: Context): CacheDirectories {
+        val root = File(context.applicationContext.cacheDir, CACHE_DIRECTORY).apply { mkdirs() }
+        return CacheDirectories(
+            references = File(root, REFERENCES_DIRECTORY).apply { mkdirs() },
+            content = File(root, CONTENT_DIRECTORY).apply { mkdirs() },
+        )
     }
 
-    private fun imageCacheDir(context: Context): File =
-        File(context.applicationContext.cacheDir, CACHE_DIRECTORY).apply { mkdirs() }
+    private fun touch(file: File) {
+        if (file.isFile) {
+            file.setLastModified(System.currentTimeMillis())
+        }
+    }
 
     private fun deleteCacheDirectory(context: Context, directoryName: String) {
         val appCache = context.applicationContext.cacheDir
@@ -331,11 +528,6 @@ object JxlImageCache {
         }
     }
 
-    private fun sha256(value: String): String = MessageDigest
-        .getInstance("SHA-256")
-        .digest(value.toByteArray(Charsets.UTF_8))
-        .joinToString("") { "%02x".format(it) }
-
     private fun isSafeImageSize(width: Int, height: Int): Boolean =
         width in 1..MAX_IMAGE_DIMENSION &&
             height in 1..MAX_IMAGE_DIMENSION &&
@@ -348,8 +540,14 @@ object JxlImageCache {
 
     const val JXL_QUALITY = 69
     const val JXL_EFFORT = 10
-    private const val CACHE_DIRECTORY = "remote_images_v2"
+    private const val AVATAR_SIZE_PX = 176
+    private const val CACHE_DIRECTORY = "remote_images_v3"
+    private const val URL_ADDRESSED_CACHE_DIRECTORY = "remote_images_v2"
     private const val LEGACY_CACHE_DIRECTORY = "remote_images"
+    private const val REFERENCES_DIRECTORY = "references"
+    private const val CONTENT_DIRECTORY = "content"
+    private const val ORIGINAL_EXTENSION = "jpg"
+    private const val JXL_EXTENSION = "jxl"
     private const val MEMORY_CACHE_KIB = 12 * 1024
     private const val MAX_IMAGE_BYTES = 8 * 1024 * 1024
     private const val MAX_IMAGE_DIMENSION = 4_096
@@ -362,5 +560,15 @@ object JxlImageCache {
         "ytimg.com",
         "ggpht.com",
         "googleusercontent.com",
+    )
+
+    private data class CacheDirectories(
+        val references: File,
+        val content: File,
+    )
+
+    private data class LegacyImage(
+        val file: File,
+        val extension: String,
     )
 }

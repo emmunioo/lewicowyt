@@ -5,7 +5,9 @@ import java.net.URI
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.Locale
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import pl.lewicowyt.notifier.data.LocalDatabase
+import pl.lewicowyt.notifier.images.BundledAvatarStore
 import pl.lewicowyt.notifier.model.Creator
 import pl.lewicowyt.notifier.model.CreatorSource
 import pl.lewicowyt.notifier.model.SourceType
@@ -27,6 +29,41 @@ internal fun extractCanonicalYouTubeChannelId(html: String): String? =
     CANONICAL_CHANNEL_ID_PATTERNS.firstNotNullOfOrNull { pattern ->
         pattern.find(html)?.groupValues?.getOrNull(1)
     }
+
+/**
+ * Prosi CDN YouTube o kwadratowy avatar 176 px. Modyfikujemy wyłącznie
+ * zweryfikowane adresy yt3; zwykła miniatura filmu nigdy nie może zostać
+ * przypadkowo potraktowana jak zdjęcie twórcy.
+ */
+internal fun normalizeYouTubeAvatarUrl(value: String): String? = runCatching {
+    if (value.length > MAX_IMAGE_URL_CHARS) return@runCatching null
+    val url = value.toHttpUrlOrNull() ?: return@runCatching null
+    val host = url.host.lowercase(Locale.ROOT).trimEnd('.')
+    if (
+        !url.isHttps ||
+        host !in YOUTUBE_AVATAR_HOSTS ||
+        url.username.isNotEmpty() ||
+        url.password.isNotEmpty() ||
+        url.port != 443
+    ) {
+        return@runCatching null
+    }
+    val rawPath = url.encodedPath
+    if (rawPath.isBlank() || rawPath.length > MAX_IMAGE_URL_CHARS) {
+        return@runCatching null
+    }
+    val normalizedPath = if (AVATAR_SIZE_SUFFIX.containsMatchIn(rawPath)) {
+        rawPath.replace(AVATAR_SIZE_SUFFIX, AVATAR_176_SUFFIX)
+    } else {
+        "$rawPath$AVATAR_176_SUFFIX"
+    }
+    url.newBuilder()
+        .host(host)
+        .encodedPath(normalizedPath)
+        .build()
+        .toString()
+        .takeIf { it.length <= MAX_IMAGE_URL_CHARS }
+}.getOrNull()
 
 class YouTubeSourceResolver(
     private val http: HttpTextClient,
@@ -64,8 +101,25 @@ class YouTubeSourceResolver(
      * W przypadku playlisty próbuje odczytać avatar właściciela z jej strony.
      */
     fun resolveCreatorAvatar(creator: Creator): String? {
-        database.getCreatorAvatar(creator.id)?.takeIf { it.isNotBlank() }?.let { return it }
+        database.getCreatorAvatar(creator.id)
+            ?.takeIf { it.isNotBlank() }
+            ?.let { cached ->
+                if (BundledAvatarStore.isBundledAvatarUrl(cached)) return cached
+                normalizeYouTubeAvatarUrl(cached)?.let { normalized ->
+                    if (normalized != cached) {
+                        database.saveCreatorAvatar(creator.id, normalized)
+                    }
+                    return normalized
+                }
+            }
 
+        return resolveFreshCreatorAvatar(creator)?.also { avatar ->
+            database.saveCreatorAvatar(creator.id, avatar)
+        }
+    }
+
+    /** Pomija zapisany URL; używane przez tygodniową kontrolę zawartości. */
+    fun resolveFreshCreatorAvatar(creator: Creator): String? {
         for (source in creator.sources) {
             val pageUrl = when (source.type) {
                 SourceType.CHANNEL -> normalizeChannelPageUrl(source.url)
@@ -83,7 +137,6 @@ class YouTubeSourceResolver(
                 extractAvatarUrl(html)
             }.getOrNull()
             if (!avatar.isNullOrBlank()) {
-                database.saveCreatorAvatar(creator.id, avatar)
                 return avatar
             }
         }
@@ -110,15 +163,17 @@ class YouTubeSourceResolver(
     }
 
     private fun extractAvatarUrl(html: String): String? {
-        val raw = AVATAR_PATTERNS.firstNotNullOfOrNull { pattern ->
-            pattern.find(html)?.groupValues?.getOrNull(1)
-        } ?: return null
-        return raw
-            .replace("\\u0026", "&")
-            .replace("\\/", "/")
-            .replace("&amp;", "&")
-            .take(MAX_IMAGE_URL_CHARS)
-            .takeIf(::isSafeImageUrl)
+        return AVATAR_PATTERNS.firstNotNullOfOrNull { pattern ->
+            pattern.find(html)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.replace("\\u0026", "&")
+                ?.replace("\\u003d", "=", ignoreCase = true)
+                ?.replace("\\/", "/")
+                ?.replace("&amp;", "&")
+                ?.take(MAX_IMAGE_URL_CHARS)
+                ?.let(::normalizeYouTubeAvatarUrl)
+        }
     }
 
     private fun extractChannelId(url: String): String? = CHANNEL_IN_URL
@@ -158,36 +213,27 @@ class YouTubeSourceResolver(
     private fun looksLikePlaylistId(value: String): Boolean =
         PLAYLIST_ID.matches(value)
 
-    private fun isSafeImageUrl(value: String): Boolean = runCatching {
-        val uri = URI(value)
-        val host = uri.host?.lowercase(Locale.ROOT).orEmpty().trimEnd('.')
-        uri.scheme.equals("https", ignoreCase = true) &&
-            uri.userInfo == null &&
-            uri.port in setOf(-1, 443) &&
-            IMAGE_HOST_SUFFIXES.any { suffix ->
-                host == suffix || host.endsWith(".$suffix")
-            }
-    }.getOrDefault(false)
-
     private companion object {
         val CHANNEL_IN_URL = Regex("""youtube\.com/channel/(UC[\w-]{18,})""")
         val CHANNEL_ID = Regex("""UC[A-Za-z0-9_-]{22}""")
         val PLAYLIST_ID = Regex("""[A-Za-z0-9_-]{10,100}""")
         val YOUTUBE_HOSTS = setOf("youtube.com", "www.youtube.com", "m.youtube.com")
-        val IMAGE_HOST_SUFFIXES = setOf(
-            "ytimg.com",
-            "ggpht.com",
-            "googleusercontent.com",
-        )
         const val MAX_YOUTUBE_PATH_CHARS = 500
-        const val MAX_IMAGE_URL_CHARS = 2_048
         val AVATAR_PATTERNS = listOf(
+            Regex("""[\"']avatar[\"']\s*:\s*\{[\s\S]{0,800}?[\"']url[\"']\s*:\s*[\"']([^\"']+)[\"']"""),
             Regex("""<meta[^>]+property=[\"']og:image[\"'][^>]+content=[\"']([^\"']+)[\"']"""),
             Regex("""<meta[^>]+content=[\"']([^\"']+)[\"'][^>]+property=[\"']og:image[\"']"""),
-            Regex("""[\"']avatar[\"']\s*:\s*\{[\s\S]{0,800}?[\"']url[\"']\s*:\s*[\"']([^\"']+)[\"']"""),
         )
     }
 }
+
+private const val MAX_IMAGE_URL_CHARS = 2_048
+private const val AVATAR_176_SUFFIX = "=s176-c-k-c0x00ffffff-no-rj"
+private val AVATAR_SIZE_SUFFIX = Regex("""=s\d{1,4}(?:-[A-Za-z0-9]+)*$""")
+private val YOUTUBE_AVATAR_HOSTS = setOf(
+    "yt3.ggpht.com",
+    "yt3.googleusercontent.com",
+)
 
 private val CANONICAL_CHANNEL_ID_PATTERNS = listOf(
     Regex(""""externalId"\s*:\s*"(UC[A-Za-z0-9_-]{22})""""),

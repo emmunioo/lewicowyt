@@ -1,4 +1,4 @@
-# lewicowYT 1.4-beta
+# lewicowYT 1.5-beta
 
 Natywna aplikacja dla Androida do lokalnego obserwowania wybranych kanałów
 YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.
@@ -6,42 +6,56 @@ YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.
 > To niezależny, nieoficjalny projekt. Nie jest produktem ani oficjalnym klientem
 > Google ani YouTube i nie jest przez nie wspierany.
 
-## Najważniejsze zmiany w 1.4-beta
+## Najważniejsze zmiany w 1.5-beta
 
-- dodano automatyczne aktualizacje z publicznych wydań GitHub. Aplikacja może
-  sprawdzać je razem z synchronizacją YouTube, jednak nie częściej niż raz na
-  2 godziny, a zwykłe automatyczne pobieranie można wyłączyć w ustawieniach;
-- aktualizacja jest pobierana do prywatnej pamięci aplikacji bez otwierania
-  przeglądarki. Przed przekazaniem jej systemowemu instalatorowi sprawdzane są:
-  HTTPS, limit rozmiaru, dostępny SHA-256, identyfikator pakietu, certyfikat
-  podpisujący, `versionName` oraz rosnący `versionCode`;
-- usunięcie bieżącego wydania z GitHuba jest traktowane jako sygnał
-  bezpieczeństwa. Aplikacja wymaga wtedy nowszego wydania zastępczego albo
-  przygotowanego przez autora rollbacku ze starszym kodem i wyższym technicznym
-  `versionCode`. Android nadal zawsze wymaga potwierdzenia instalacji;
-- ręczne sprawdzanie aktualizacji wykorzystuje przez 15 minut zapisany wynik,
-  aby kolejne naciśnięcia nie wykonywały zbędnych żądań sieciowych;
-- przebudowano historię działającą bez klucza API. Po szybkim odczycie RSS
-  aplikacja pobiera od razu żądaną kartę YouTube Web, bez dodatkowego zapytania
-  o pełną listę kart dla każdego kanału;
-- odpowiedź YouTube jest sprawdzana przed przypisaniem typu. Gdy kanał nie ma
-  karty transmisji, strona główna lub karta filmów nie może zostać błędnie
-  zapisana jako lista streamów;
-- dodano obsługę aktualnego formatu kafelków YouTube `lockupViewModel` oraz
-  poprawiono kończenie paginacji, gdy serwer powtarza ostatni kursor;
-- ponowna klasyfikacja zachowuje dotychczasowy rodzaj materiału do czasu
-  uzyskania pewnej odpowiedzi. Nieudana próba nie zamienia już streamów ani
-  Shortów w filmy i nie usuwa ich z aktywnej zakładki;
-- migracja bazy 15 ponawia klasyfikację bez zerowania zapisanego rodzaju.
-  Istniejące błędne wpisy są poprawiane w miejscu podczas synchronizacji;
-- poprawiono rozpoznawanie tożsamości kanału i wpisy w katalogu twórców, aby
-  materiały polecanego albo obcego kanału nie mogły zostać przypisane do
-  obserwowanego twórcy;
-- klucz YouTube Data API nadal jest opcjonalny. Może przyspieszyć dłuższą
-  historię, zapewnia oficjalne stronicowanie i jest mniej podatny na zmiany
-  interfejsu YouTube, ale nie jest wymagany do normalnego działania;
-- po aktualizacji istniejącej instalacji podsumowanie tych zmian jest
-  pokazywane jednorazowo w aplikacji.
+- dodano globalne oraz indywidualne dla każdego twórcy ustawienia historii i
+  powiadomień osobno dla filmów, streamów i Shortów. Wyłączenie historii zawsze
+  wyłącza również powiadomienia danego rodzaju;
+- globalnie wyłączony rodzaj znika z filtrów Historii. Wyłączone karty nie są
+  pobierane z YouTube Web, a ich wpisy nie są zapisywane ani zgłaszane;
+- kliknięcie kafelka twórcy rozwija jego ustawienia, checkbox zmienia stan
+  obserwowania, a długie przytrzymanie kafelka otwiera kanał w YouTube;
+- historia zaczyna od lekkiego RSS, a następnie pobiera pięć kanałów równolegle
+  dwutygodniowymi etapami: najpierw Filmy, potem Shorty i Streamy. Dłuższy zakres
+  nie opóźnia już pierwszych wyników;
+- poprawiono daty publikacji, obsługę aktualnych kafelków YouTube, brakujących
+  kart kanału, kontynuacji oraz powtarzanych kursorów. Częściowy wynik zachowuje
+  możliwość ponowienia zamiast usuwać już widoczne materiały;
+- ujednolicono klasyfikację Data API i YouTube Web. Film, Short oraz transmisja
+  są rozstrzygane na podstawie karty kanału, stanu transmisji, adresu RSS lub
+  metadanych odtwarzacza, a nie samego czasu trwania;
+- powiadomienia bez klucza API wynikają z różnicy kolejnych poprawnych kanałów
+  RSS. Z kluczem uczestniczy w nich Data API; trwałe punkty odniesienia chronią
+  przed ponownym zgłaszaniem starszych publikacji;
+- źródła są sprawdzane równolegle, a lekki lokalny model aktywności ustawia
+  wcześniej twórców publikujących częściej, nie blokując rzadkich kanałów;
+- YouTube Web pobiera wyłącznie ograniczone odpowiedzi tekstowe/metadane. Nie
+  uruchamia przeglądarki i nie pobiera CSS, logo ani obrazów strony;
+- miniatury o identycznej zawartości są współdzielone po SHA-256 przez Historię
+  i Powiadomienia. Aktualizacja aplikacji nie wymusza ponownego pobierania i
+  kompresowania prawidłowych plików JXL;
+- awatary 176×176 wszystkich twórców są dołączone do APK jako JXL. Aplikacja
+  najwyżej raz w tygodniu porównuje SHA-256 i pobiera tylko rzeczywiście
+  zmieniony obraz;
+- rozszerzono zabezpieczenia i testy przepływu historii, powiadomień, obrazów,
+  klasyfikacji, harmonogramu i źródeł danych.
+
+### Uzupełnienie zmian dostarczonych w 1.4-beta
+
+Poprzedni skrót nie wymieniał wszystkich wdrożonych poprawek aktualizatora.
+Wersja 1.5-beta przypomina więc również, że aplikacja:
+
+- sprawdza publiczne wydania GitHub razem z synchronizacją, najwyżej raz na
+  2 godziny, i poprawnie rozpoznaje kolejne wydania beta;
+- pobiera APK do prywatnej pamięci bez otwierania przeglądarki oraz sprawdza
+  HTTPS, limit rozmiaru, SHA-256, pakiet, certyfikat, `versionName` i rosnący
+  `versionCode` przed otwarciem systemowego instalatora;
+- wykrywa wycofanie zainstalowanego wydania i obsługuje obowiązkowe wydanie
+  bezpieczeństwa przygotowane z wyższym technicznym `versionCode`;
+- przechowuje wynik ręcznego sprawdzenia przez 15 minut, aby nie wykonywać
+  kolejnych zbędnych żądań.
+
+Więcej informacji znajduje się na stronie projektu.
 
 ## Co potrafi aplikacja
 
@@ -50,8 +64,9 @@ YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.
 - pozwala wybrać tylko tych twórców, których użytkownik chce obserwować;
 - umożliwia wyszukiwanie na liście twórców oraz zaznaczenie lub odznaczenie
   wszystkich pozycji;
-- kliknięcie kafelka zmienia stan obserwowania, a długie przytrzymanie całego
-  kafelka otwiera kanał twórcy;
+- checkbox zmienia stan obserwowania, zwykłe kliknięcie kafelka rozwija osobne
+  ustawienia filmów, streamów i Shortów, a długie przytrzymanie całego kafelka
+  otwiera kanał twórcy;
 - obsługuje twórców posiadających więcej niż jeden kanał oraz źródła będące
   playlistami.
 
@@ -59,11 +74,16 @@ YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.
 
 - pokazuje filmy, Shorty, transmisje na żywo, zaplanowane transmisje i ich
   archiwalne zapisy;
+- pozwala globalnie i dla każdego twórcy osobno wyłączyć historię albo same
+  powiadomienia wybranego rodzaju. Wyłączenie historii wyłącza też
+  powiadomienia i pomija odpowiednią kartę YouTube Web;
 - filtruje materiały według typu oraz zakresu: 7, 14, 21, 30 albo 60 dni;
+- ukrywa filtr rodzaju wyłączonego globalnie i przywraca go po ponownym
+  włączeniu ustawienia;
 - wyświetla wyłącznie aktualnie zaznaczonych twórców;
 - automatycznie pobiera i pokazuje kolejne pozycje podczas przewijania, również
   wtedy, gdy pierwsza porcja nie wypełnia ekranu;
-- pobiera wiele kanałów równolegle; chronologiczne karty kończy po dojściu do
+- pobiera do pięciu kanałów historii równolegle; chronologiczne karty kończy po dojściu do
   początku wybranego zakresu, a ręcznie sortowane playlisty sprawdza do końca
   (z limitem bezpieczeństwa), aby nie pominąć nowszego wpisu umieszczonego dalej;
 - odczytuje i wyświetla do 10 000 najnowszych rekordów z 60-dniowego okna, zamiast ucinać
@@ -73,9 +93,17 @@ YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.
 - dla każdego źródła najpierw zapisuje lekką odpowiedź RSS — zwykle około
   15 najnowszych pozycji — a następnie uzupełnia starszy zakres przez Data API
   albo YouTube Web;
+- dla zakresów dłuższych niż dwa tygodnie pracuje etapami po 14 dni. W każdym
+  etapie kolejność to Filmy, Shorty i Streamy, dzięki czemu najczęściej używane
+  wyniki pojawiają się wcześniej;
 - w trybie YouTube Web pobiera bezpośrednio właściwą kartę i sprawdza kartę
   faktycznie zaznaczoną przez serwer. Nieistniejąca karta jest bezpiecznie
   pomijana, zamiast zwracać materiały innego rodzaju;
+- rozpoznaje typ według hierarchii dowodów: bieżący stan transmisji, faktyczna
+  karta Filmy/Shorty/Live kanału, kanoniczny adres `/shorts/` z RSS, a dopiero
+  na końcu metadane odtwarzacza. Jeśli mimo tych kontroli rodzaju nie da się
+  ustalić, używany jest odwracalny fallback Film, który silniejszy późniejszy
+  dowód może poprawić;
 - używa miniatur 640×480 i kadruje je do proporcji 16:9 bez czarnych pasów.
 
 ### Powiadomienia
@@ -83,6 +111,9 @@ YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.
 - sprawdza nowe materiały ręcznie albo przez dokładny alarm systemowy;
 - utrzymuje osobny, trwały punkt odniesienia dla każdego źródła, dzięki czemu
   restart lub aktualizacja aplikacji nie zgłasza ponownie całej historii;
+- bez klucza API wykrywa nowe identyfikatory przez porównanie dwóch kolejnych,
+  poprawnie pobranych kanałów RSS. Zmiana tytułu lub kolejności nie tworzy
+  fałszywego powiadomienia;
 - przy maksymalnie 3 nowych materiałach tworzy osobne powiadomienie dla każdego,
   z bezpośrednim odnośnikiem do filmu i najlepszą dostępną miniaturą do 720p;
 - przy większej paczce tworzy jedno powiadomienie zbiorcze prowadzące do sekcji
@@ -104,7 +135,12 @@ YouTube. Nie wymaga konta w aplikacji, Firebase ani własnego serwera.
   nie zależy od utrzymania procesu aplikacji ani okresowego WorkManagera;
 - Android 12 i nowszy wymaga przyznania aplikacji systemowego dostępu
   „Alarmy i przypomnienia”; bez niego automatyczne sprawdzanie jest wyłączone;
-- sprawdzanych jest do 6 źródeł równocześnie;
+- sprawdza do 6 źródeł równocześnie. Adaptacyjna kolejka zaczyna od twórców,
+  u których model przewiduje największą szansę nowej publikacji, dzięki czemu
+  najważniejsze wyniki pojawiają się wcześniej nawet po przerwaniu procesu;
+- dodatkowe kanały tego samego twórcy są rozkładane rundami, zamiast zajmować
+  kilka pierwszych miejsc. Twarda premia za długie oczekiwanie chroni rzadko
+  publikujące kanały przed stałym pomijaniem;
 - ustawienie danych komórkowych obowiązuje każde automatyczne sprawdzenie;
 - przed synchronizacją aplikacja wymaga sieci ze zweryfikowanym przez
   Androida dostępem do internetu;
@@ -123,6 +159,25 @@ Dokładny alarm może obudzić urządzenie także w Doze i przy wygaszonym ekran
 Automatyczne sprawdzanie nie zadziała po użyciu funkcji „Wymuś zatrzymanie”,
 bez specjalnego dostępu do alarmów, bez dozwolonej sieci albo jeśli producent
 telefonu dodatkowo blokuje uruchamianie usług w tle.
+
+### Adaptacyjna kolejność synchronizacji
+
+- aplikacja zawiera gotowy model początkowy przygotowany z publicznych
+  kanałów RSS;
+- aplikacja używa lekkiego, audytowalnego estymatora Gamma–Poisson zamiast
+  sieci neuronowej. Osobno uczy tempo każdego źródła, a następnie sumuje je dla
+  twórcy posiadającego kilka niezależnych kanałów;
+- lokalne obserwacje pochodzą ze zwykłych synchronizacji. Trafienie lub błąd
+  jest zapisywane od razu, a spokojny okres jest utrwalany najwyżej raz na
+  6 godzin, aby ograniczyć zapisy pamięci. Dane tracą wagę z 28-dniowym okresem
+  połowicznego zaniku; nie powstaje dodatkowy alarm ani zapytanie sieciowe;
+- pierwsze wczytanie istniejących materiałów, przewijanie historii, odpowiedź
+  niepełna, anulowanie i błąd sieci nie są próbką „braku publikacji”;
+- powtarzający się identyfikator filmu może zwiększyć model tylko jednego
+  źródła w danym przebiegu;
+- model pozostaje wyłącznie w lokalnej bazie aplikacji. Nie zawiera tytułów,
+  klucza API ani wyborów użytkownika i jest usuwany przez potwierdzone
+  czyszczenie historii.
 
 ### Aktualizacje
 
@@ -160,9 +215,15 @@ samym kluczem.
 - dowolny kolor akcentu RGB; domyślny kolor to czerwony `#FF0000`;
 - miniatury i zdjęcia profilowe są dostępne natychmiast po pobraniu JPG, a
   następnie kompresowane w tle do JPEG XL;
+- APK zawiera startowe awatary twórców w rozdzielczości 176×176 i formacie JXL;
+  kontrola najwyżej raz w tygodniu porównuje SHA-256, więc pobierany jest tylko
+  faktycznie zmieniony awatar;
+- identyczne obrazy są rozpoznawane po SHA-256 zawartości i zapisywane tylko
+  raz; historia oraz wewnętrzna sekcja Powiadomienia współdzielą ten sam plik;
 - kompresja JXL używa jakości `69` i effort `10` (`GLACIER`);
 - JPG jest usuwany dopiero po zapisaniu i zweryfikowaniu pliku JXL;
-- obrazy powiadomień są jednorazowymi JPG, nie trafiają do cache JXL.
+- obrazy systemowych powiadomień Androida są jednorazowymi JPG i nie trafiają
+  do cache JXL.
 
 ## Źródła danych
 
@@ -174,9 +235,11 @@ Uczestniczy również w wykrywaniu powiadomień. RSS YouTube pozostaje szybkim
 źródłem najnowszych publikacji.
 
 API nie jest wymagane do działania aplikacji. Jest opcjonalnym trybem
-zwiększonej stabilności i szybkości przy długiej historii. Rozpoznawanie
-Shortów w ścieżce API wykorzystuje również czas trwania materiału, dlatego
-krótki poziomy film może wymagać późniejszego skorygowania przez dane YouTube.
+zwiększonej stabilności i szybkości przy długiej historii. Publiczne Data API
+nie udostępnia pola `isShort` ani wymiarów obrazu cudzych filmów. Dlatego API
+rozstrzyga bieżące `LIVE`/`UPCOMING` i jednoznaczne długie filmy, a przynależność
+krótkich materiałów oraz zakończonych transmisji potwierdzają właściwe karty
+kanału YouTube. Sam czas trwania nigdy nie zamienia filmu w Shorta.
 
 Klucz można uzyskać bezpłatnie w Google Cloud:
 
@@ -201,7 +264,22 @@ najnowszych materiałów. Następnie YouTube Web uzupełnia starsze strony aż d
 osiągnięcia wybranego zakresu czasu. Aplikacja pobiera bezpośrednio karty
 filmów, transmisji i Shortów, a przed zapisaniem sprawdza, którą kartę YouTube
 rzeczywiście zwrócił. Duplikaty między RSS i Web są scalane lokalnie po
-identyfikatorze filmu.
+identyfikatorze filmu. Jeżeli sam RSS zwróci dla wpisu kanoniczny adres
+`/shorts/ID`, jest on zachowywany jako jednoznaczny sygnał Shorta.
+
+Zakres jest uzupełniany etapami po 14 dni w kolejności Filmy, Shorty, Streamy,
+przy maksymalnie pięciu kanałach historii naraz. Wyłączone globalnie lub dla
+danego twórcy typy nie uruchamiają swoich kart Web. Wspólny plik RSS może nadal
+zawierać ich identyfikatory, lecz aplikacja ich nie zapisuje ani nie zgłasza.
+
+Klient Web pobiera tylko ograniczone odpowiedzi tekstowe HTML/JSON używane do
+metadanych i stronicowania. Nie jest osadzoną przeglądarką, nie wykonuje kodu
+strony oraz nie pobiera jej CSS, logo, miniatur ani pozostałych obrazów.
+
+Wyniki mają przypisany poziom jakości dowodu. Pusta odpowiedź, błąd chwilowy
+albo słabsza heurystyka nie mogą nadpisać typu potwierdzonego przez kartę
+kanału. Po aktualizacji schematu bazy starsze klasyfikacje są sprawdzane
+ponownie bez kasowania zapisanej historii.
 
 Integracja Piped została usunięta. Aplikacja nie łączy się z publicznymi
 instancjami Piped i nie przekazuje im identyfikatorów obserwowanych kanałów.

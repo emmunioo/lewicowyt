@@ -23,6 +23,9 @@ import pl.lewicowyt.notifier.AppGraph
 import pl.lewicowyt.notifier.MainActivity
 import pl.lewicowyt.notifier.R
 import pl.lewicowyt.notifier.data.AppSettings
+import pl.lewicowyt.notifier.data.hasEnabledContentForSelectedCreators
+import pl.lewicowyt.notifier.diagnostics.DiagnosticCategory
+import pl.lewicowyt.notifier.diagnostics.DiagnosticLogStore
 import pl.lewicowyt.notifier.model.SyncOutcome
 
 class ReliableSyncService : Service() {
@@ -75,11 +78,16 @@ class ReliableSyncService : Service() {
             try {
                 val currentSettings = AppGraph.preferences.current()
                 settings = currentSettings
+                val networkAccess = currentSyncNetworkAccess(this@ReliableSyncService)
+                DiagnosticLogStore.info(
+                    DiagnosticCategory.SCHEDULER,
+                    "Alarm uruchomił usługę; próba=$retryAttempt; sieć=${networkAccess.name}; " +
+                        "twórcy=${currentSettings.selectedCreatorIds.size}",
+                )
                 if (
-                    currentSettings.selectedCreatorIds.isNotEmpty() &&
+                    currentSettings.hasEnabledContentForSelectedCreators() &&
                     AppGraph.scheduler.hasExactAlarmAccess() &&
-                    currentSyncNetworkAccess(this@ReliableSyncService)
-                        .allowsSync(currentSettings.allowMobileData)
+                    networkAccess.allowsSync(currentSettings.allowMobileData)
                 ) {
                     val outcome = withTimeoutOrNull(SYNC_TIMEOUT_MILLIS) {
                         AppGraph.syncEngine.sync()
@@ -96,9 +104,14 @@ class ReliableSyncService : Service() {
                     AppGraph.backgroundUpdateCoordinator
                         .checkAfterYouTubeSync(currentSettings)
                 } else if (
-                    currentSettings.selectedCreatorIds.isNotEmpty() &&
+                    currentSettings.hasEnabledContentForSelectedCreators() &&
                     AppGraph.scheduler.hasExactAlarmAccess()
                 ) {
+                    DiagnosticLogStore.info(
+                        DiagnosticCategory.NETWORK,
+                        "Pominięto sprawdzenie: niedozwolona lub niedostępna sieć; " +
+                            "stan=${networkAccess.name}",
+                    )
                     retryNeeded = true
                 }
             } catch (cancelled: CancellationException) {
@@ -113,9 +126,14 @@ class ReliableSyncService : Service() {
                 if (retryNeeded) {
                     try {
                         settings?.let {
-                            AppGraph.scheduler.scheduleRetry(
+                            val scheduled = AppGraph.scheduler.scheduleRetry(
                                 settings = it,
                                 retryAttempt = retryAttempt + 1,
+                            )
+                            DiagnosticLogStore.info(
+                                DiagnosticCategory.SCHEDULER,
+                                "Ponowienie po awarii; numer=${retryAttempt + 1}; " +
+                                    "zaplanowano=$scheduled",
                             )
                         }
                     } catch (_: Exception) {
@@ -140,6 +158,7 @@ class ReliableSyncService : Service() {
     }
 
     private suspend fun recordFailure(message: String) {
+        DiagnosticLogStore.warning("BackgroundSync", message, null)
         try {
             AppGraph.preferences.updateLastSync(
                 timestamp = System.currentTimeMillis(),

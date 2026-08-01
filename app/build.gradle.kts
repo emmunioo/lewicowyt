@@ -5,6 +5,39 @@ plugins {
 }
 
 val updateRepository: String = providers.gradleProperty("UPDATE_REPOSITORY").orElse("").get()
+val isWindowsHost = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
+val avatarScript = rootProject.file("tools/Prepare-BundledAvatars.ps1")
+val ytDlpPath = providers.gradleProperty("LEWICOWYT_YTDLP_PATH").orElse("")
+val cjxlPath = providers.gradleProperty("LEWICOWYT_CJXL_PATH").orElse("")
+val avatarCommand = mutableListOf(
+    "powershell.exe",
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    avatarScript.absolutePath,
+    "-ProjectRoot",
+    rootProject.projectDir.absolutePath,
+    "-AllowExistingOnFailure",
+).apply {
+    ytDlpPath.get().takeIf(String::isNotBlank)?.let {
+        addAll(listOf("-YtDlpPath", it))
+    }
+    cjxlPath.get().takeIf(String::isNotBlank)?.let {
+        addAll(listOf("-CjxlPath", it))
+    }
+}
+
+val prepareBundledAvatars = tasks.register<Exec>("prepareBundledAvatars") {
+    group = "build setup"
+    description = "Pobiera awatary 176x176 i tworzy pakiet JXL 69/10 dla APK"
+    enabled = isWindowsHost
+    commandLine(avatarCommand)
+}
+
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    dependsOn(prepareBundledAvatars)
+}
 
 android {
     namespace = "pl.lewicowyt.notifier"
@@ -19,8 +52,8 @@ android {
         applicationId = "pl.lewicowyt.notifier"
         minSdk = 26
         targetSdk = 36
-        versionCode = 14
-        versionName = "1.4-beta"
+        versionCode = 15
+        versionName = "1.5-beta"
 
         buildConfigField(
             "String",

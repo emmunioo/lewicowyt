@@ -5,6 +5,8 @@ import android.content.Context
 import pl.lewicowyt.notifier.data.CreatorCatalog
 import pl.lewicowyt.notifier.data.LocalDatabase
 import pl.lewicowyt.notifier.data.PreferencesRepository
+import pl.lewicowyt.notifier.images.BundledAvatarStore
+import pl.lewicowyt.notifier.images.CreatorAvatarUpdater
 import pl.lewicowyt.notifier.network.HttpTextClient
 import pl.lewicowyt.notifier.network.PrivacyHttpClient
 import pl.lewicowyt.notifier.network.YouTubeFeedClient
@@ -16,6 +18,7 @@ import pl.lewicowyt.notifier.network.androidApiRequestHeaders
 import pl.lewicowyt.notifier.notifications.NotificationHelper
 import pl.lewicowyt.notifier.sync.SyncEngine
 import pl.lewicowyt.notifier.sync.HistoryBackfillLoader
+import pl.lewicowyt.notifier.sync.SourcePriorityScheduler
 import pl.lewicowyt.notifier.updates.AppUpdateManager
 import pl.lewicowyt.notifier.updates.BackgroundUpdateCoordinator
 import pl.lewicowyt.notifier.updates.GitHubUpdateChecker
@@ -59,6 +62,7 @@ object AppGraph {
             catalog = CreatorCatalog(appContext)
             preferences = PreferencesRepository(appContext)
             database = LocalDatabase(appContext)
+            BundledAvatarStore.seedDatabase(appContext, database)
             notifications = NotificationHelper(appContext, database)
             val okHttp = PrivacyHttpClient.get(appContext)
             val http = HttpTextClient(okHttp)
@@ -67,9 +71,14 @@ object AppGraph {
                 http = http,
                 apiRequestHeaders = androidApiRequestHeaders(appContext),
             )
-            val historyClient = YouTubeHistoryClient(http)
+            val historyClient = YouTubeHistoryClient(http, database)
             val pageClassifier = YouTubePageClassifier(http)
             resolver = YouTubeSourceResolver(http, database)
+            val avatarUpdater = CreatorAvatarUpdater(appContext, database, resolver)
+            val sourcePriorityScheduler = SourcePriorityScheduler(
+                context = appContext,
+                database = database,
+            )
             historyBackfill = HistoryBackfillLoader(
                 catalog = catalog,
                 preferences = preferences,
@@ -79,6 +88,7 @@ object AppGraph {
                 client = historyClient,
                 dataApiClient = dataApiClient,
                 classifier = pageClassifier,
+                sourcePriorityScheduler = sourcePriorityScheduler,
             )
             syncEngine = SyncEngine(
                 catalog = catalog,
@@ -90,6 +100,8 @@ object AppGraph {
                 notifications = notifications,
                 dataApiClient = dataApiClient,
                 historyClient = historyClient,
+                sourcePriorityScheduler = sourcePriorityScheduler,
+                avatarUpdater = avatarUpdater,
             )
             scheduler = SyncScheduler(appContext, preferences)
             updateChecker = GitHubUpdateChecker(http, BuildConfig.UPDATE_REPOSITORY)

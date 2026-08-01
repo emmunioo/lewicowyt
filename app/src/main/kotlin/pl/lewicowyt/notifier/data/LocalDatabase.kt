@@ -1,5 +1,6 @@
 package pl.lewicowyt.notifier.data
 
+import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
 import android.database.Cursor
@@ -7,15 +8,45 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import pl.lewicowyt.notifier.model.Creator
 import pl.lewicowyt.notifier.model.HistoryItem
+import pl.lewicowyt.notifier.model.PublishedAtEvidence
 import pl.lewicowyt.notifier.model.VideoEntry
 import pl.lewicowyt.notifier.model.VideoKind
+import pl.lewicowyt.notifier.model.VideoKindDecision
+import pl.lewicowyt.notifier.model.VideoKindEvidence
 import pl.lewicowyt.notifier.model.VideoOrigin
+import pl.lewicowyt.notifier.model.chooseVideoKindDecision
 import pl.lewicowyt.notifier.network.YouTubeHistoryItem
 
 data class NotificationCursor(
     val videoId: String,
     val publishedAtMillis: Long,
 )
+
+data class RssNotificationSnapshot(
+    val knownVideoIds: List<String>,
+)
+
+data class CreatorAvatarMetadata(
+    val url: String?,
+    val sha256: String?,
+    val checkedAtMillis: Long,
+    val lastAttemptAtMillis: Long,
+)
+
+private data class StoredVideoEvidence(
+    val publishedEvidenceRank: Int,
+    val kindDecision: VideoKindDecision,
+)
+
+internal fun shouldReplacePublishedAt(
+    existingEvidenceRank: Int?,
+    incomingEvidence: PublishedAtEvidence,
+): Boolean = existingEvidenceRank == null ||
+    incomingEvidence.rank > existingEvidenceRank ||
+    (
+        incomingEvidence.rank == existingEvidenceRank &&
+            incomingEvidence.canRefreshAtSameRank
+        )
 
 class LocalDatabase(context: Context) : SQLiteOpenHelper(
     context,
@@ -29,6 +60,8 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         createCreatorMetadataTable(db)
         createNotificationInboxTable(db)
         createNotificationIdsTable(db)
+        createSourcePriorityTable(db)
+        createYouTubeChannelTabsTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -138,6 +171,86 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                 """.trimIndent(),
             )
         }
+        if (oldVersion < 16) {
+            // Starsza ścieżka Data API uznawała każdą zakończoną Premierę za
+            // archiwalny stream, a każdy materiał do 180 sekund za Short.
+            // Zachowujemy widoczny typ do chwili pewnej odpowiedzi, lecz
+            // pozwalamy nowemu klasyfikatorowi poprawić te rekordy w miejscu.
+            db.execSQL(
+                """
+                UPDATE video_history
+                SET classification_version = 0,
+                    classification_attempts = 0,
+                    classification_last_attempt_ms = 0
+                WHERE kind IN (?, ?)
+                """.trimIndent(),
+                arrayOf<Any>(
+                    VideoKind.STREAM_ARCHIVE.name,
+                    VideoKind.SHORT.name,
+                ),
+            )
+        }
+        if (oldVersion < 17) {
+            db.execSQL(
+                "ALTER TABLE video_history ADD COLUMN " +
+                    "kind_evidence INTEGER NOT NULL DEFAULT 0",
+            )
+            // Starsze klasyfikatory mogły pomylić typ w obie strony. Nie
+            // usuwamy widocznej historii, ale kolejkujemy każdy rekord do
+            // ponownego potwierdzenia nowym mechanizmem dowodów.
+            db.execSQL(
+                """
+                UPDATE video_history
+                SET classification_version = 0,
+                    kind_evidence = 0,
+                    classification_attempts = 0,
+                    classification_last_attempt_ms = 0
+                """.trimIndent(),
+            )
+        }
+        if (oldVersion < 18) {
+            createSourcePriorityTable(db)
+        }
+        if (oldVersion < 19) {
+            db.execSQL(
+                "ALTER TABLE video_history ADD COLUMN " +
+                    "published_evidence INTEGER NOT NULL DEFAULT 0",
+            )
+        }
+        if (oldVersion < 20) {
+            createYouTubeChannelTabsTable(db)
+            // Nierozpoznany wpis ma być od razu widoczny jako zwykły film.
+            // Bardziej wiarygodna karta kanału nadal może później zmienić typ.
+            db.execSQL(
+                """
+                UPDATE video_history
+                SET kind = ?,
+                    kind_evidence = ?,
+                    classification_version = ?
+                WHERE kind = ?
+                """.trimIndent(),
+                arrayOf<Any>(
+                    VideoKind.VIDEO.name,
+                    VideoKindEvidence.DEFAULT_VIDEO_FALLBACK.rank,
+                    0,
+                    VideoKind.UNKNOWN.name,
+                ),
+            )
+        }
+        if (oldVersion < 21) {
+            db.execSQL("ALTER TABLE creator_metadata ADD COLUMN avatar_sha256 TEXT")
+            db.execSQL(
+                "ALTER TABLE creator_metadata ADD COLUMN " +
+                    "avatar_checked_ms INTEGER NOT NULL DEFAULT 0",
+            )
+            db.execSQL(
+                "ALTER TABLE creator_metadata ADD COLUMN " +
+                    "avatar_attempt_ms INTEGER NOT NULL DEFAULT 0",
+            )
+        }
+        if (oldVersion < 22) {
+            db.execSQL("ALTER TABLE source_state ADD COLUMN rss_known_video_ids TEXT")
+        }
     }
 
     private fun createSourceStateTable(db: SQLiteDatabase) {
@@ -150,7 +263,8 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                 last_checked_ms INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
                 last_notification_video_id TEXT,
-                last_notification_published_ms INTEGER NOT NULL DEFAULT 0
+                last_notification_published_ms INTEGER NOT NULL DEFAULT 0,
+                rss_known_video_ids TEXT
             )
             """.trimIndent(),
         )
@@ -173,7 +287,9 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                 origin TEXT NOT NULL DEFAULT 'YOUTUBE',
                 notification_checked INTEGER NOT NULL DEFAULT 1,
                 classification_attempts INTEGER NOT NULL DEFAULT 0,
-                classification_last_attempt_ms INTEGER NOT NULL DEFAULT 0
+                classification_last_attempt_ms INTEGER NOT NULL DEFAULT 0,
+                kind_evidence INTEGER NOT NULL DEFAULT 0,
+                published_evidence INTEGER NOT NULL DEFAULT 0
             )
             """.trimIndent(),
         )
@@ -201,6 +317,9 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             CREATE TABLE IF NOT EXISTS creator_metadata (
                 creator_id TEXT PRIMARY KEY,
                 avatar_url TEXT,
+                avatar_sha256 TEXT,
+                avatar_checked_ms INTEGER NOT NULL DEFAULT 0,
+                avatar_attempt_ms INTEGER NOT NULL DEFAULT 0,
                 updated_ms INTEGER NOT NULL DEFAULT 0
             )
             """.trimIndent(),
@@ -230,6 +349,45 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                 video_id TEXT NOT NULL UNIQUE
             )
             """.trimIndent(),
+        )
+    }
+
+    private fun createSourcePriorityTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS source_priority (
+                source_key TEXT PRIMARY KEY,
+                prior_rate_per_day REAL NOT NULL,
+                prior_exposure_days REAL NOT NULL,
+                event_mass REAL NOT NULL DEFAULT 0,
+                exposure_days REAL NOT NULL DEFAULT 0,
+                last_model_update_ms INTEGER NOT NULL DEFAULT 0,
+                last_attempt_ms INTEGER NOT NULL DEFAULT 0,
+                last_hit_ms INTEGER NOT NULL DEFAULT 0,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0
+            )
+            """.trimIndent(),
+        )
+    }
+
+    private fun createYouTubeChannelTabsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS youtube_channel_tabs (
+                source_key TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                tab_name TEXT NOT NULL,
+                state TEXT NOT NULL,
+                params TEXT,
+                checked_ms INTEGER NOT NULL,
+                last_attempt_ms INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (source_key, tab_name)
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS idx_youtube_channel_tabs_checked " +
+                "ON youtube_channel_tabs(state, checked_ms)",
         )
     }
 
@@ -267,6 +425,228 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     @Synchronized
+    fun getYouTubeChannelTabs(
+        sourceKey: String,
+        channelId: String,
+    ): StoredYouTubeChannelTabs? {
+        val rows = readableDatabase.query(
+            "youtube_channel_tabs",
+            arrayOf("tab_name", "state", "params", "checked_ms", "last_attempt_ms"),
+            "source_key = ? AND channel_id = ?",
+            arrayOf(sourceKey, channelId),
+            null,
+            null,
+            null,
+        ).use { cursor ->
+            buildMap {
+                while (cursor.moveToNext()) {
+                    val tabName = cursor.getString(0)
+                    val state = runCatching {
+                        YouTubeChannelTabState.valueOf(cursor.getString(1))
+                    }.getOrDefault(YouTubeChannelTabState.UNKNOWN)
+                    put(
+                        tabName,
+                        StoredYouTubeChannelTab(
+                            tabName = tabName,
+                            state = state,
+                            params = cursor.getString(2)?.takeIf(String::isNotBlank),
+                            checkedAtMillis = cursor.getLong(3),
+                            lastAttemptAtMillis = cursor.getLong(4),
+                        ),
+                    )
+                }
+            }
+        }
+        return rows.takeIf { it.isNotEmpty() }?.let {
+            StoredYouTubeChannelTabs(sourceKey, channelId, it)
+        }
+    }
+
+    /**
+     * Odpowiedź pierwszej strony kanału zawiera kompletną listę dostępnych kart.
+     * Zapisujemy trzy stany atomowo; błąd sieci nie wywołuje tej metody, więc
+     * nigdy nie zmienia poprzedniej wartości na fałszywe ABSENT.
+     */
+    @Synchronized
+    fun saveYouTubeChannelTabs(
+        sourceKey: String,
+        channelId: String,
+        presentParams: Map<String, String>,
+        checkedAtMillis: Long = System.currentTimeMillis(),
+    ) {
+        if (presentParams.isEmpty() || checkedAtMillis <= 0L) return
+        val safePresent = presentParams
+            .filterKeys(REQUIRED_CHANNEL_TABS::contains)
+            .mapValues { (_, params) -> params.take(MAX_CHANNEL_TAB_PARAMS_CHARS) }
+        if (safePresent.isEmpty()) return
+
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            REQUIRED_CHANNEL_TABS.forEach { tabName ->
+                val params = safePresent[tabName]
+                db.insertWithOnConflict(
+                    "youtube_channel_tabs",
+                    null,
+                    ContentValues().apply {
+                        put("source_key", sourceKey)
+                        put("channel_id", channelId)
+                        put("tab_name", tabName)
+                        put(
+                            "state",
+                            if (params == null) {
+                                YouTubeChannelTabState.ABSENT.name
+                            } else {
+                                YouTubeChannelTabState.PRESENT.name
+                            },
+                        )
+                        if (params == null) putNull("params") else put("params", params)
+                        put("checked_ms", checkedAtMillis)
+                        put("last_attempt_ms", checkedAtMillis)
+                    },
+                    SQLiteDatabase.CONFLICT_REPLACE,
+                )
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /**
+     * Zapisuje wyłącznie pozytywnie rozpoznane karty z odpowiedzi częściowej.
+     * Brak karty w takim JSON-ie nie jest dowodem ABSENT.
+     */
+    @Synchronized
+    fun markYouTubeChannelTabsPresent(
+        sourceKey: String,
+        channelId: String,
+        presentParams: Map<String, String>,
+        checkedAtMillis: Long = System.currentTimeMillis(),
+    ) {
+        if (checkedAtMillis <= 0L) return
+        val safePresent = presentParams
+            .filterKeys(REQUIRED_CHANNEL_TABS::contains)
+            .mapValues { (_, params) -> params.take(MAX_CHANNEL_TAB_PARAMS_CHARS) }
+            .filterValues(String::isNotBlank)
+        if (safePresent.isEmpty()) return
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            safePresent.forEach { (tabName, params) ->
+                db.insertWithOnConflict(
+                    "youtube_channel_tabs",
+                    null,
+                    ContentValues().apply {
+                        put("source_key", sourceKey)
+                        put("channel_id", channelId)
+                        put("tab_name", tabName)
+                        put("state", YouTubeChannelTabState.PRESENT.name)
+                        put("params", params)
+                        put("checked_ms", checkedAtMillis)
+                        put("last_attempt_ms", checkedAtMillis)
+                    },
+                    SQLiteDatabase.CONFLICT_REPLACE,
+                )
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /**
+     * Atomowo rezerwuje kontrolę brakujących/nieznanych kart. Próba ma osobny
+     * znacznik od ostatniego udanego rozpoznania, więc awaria nie odświeża
+     * ważności starego ABSENT.
+     */
+    @Synchronized
+    fun claimYouTubeChannelTabsRefresh(
+        sourceKey: String,
+        channelId: String,
+        nowMillis: Long = System.currentTimeMillis(),
+        minAgeMillis: Long = MISSING_TAB_REFRESH_MILLIS,
+    ): Boolean {
+        if (nowMillis <= 0L || minAgeMillis <= 0L) return false
+        val stored = getYouTubeChannelTabs(sourceKey, channelId)
+        val targets = REQUIRED_CHANNEL_TABS.filter { tabName ->
+            stored?.tabs?.get(tabName).needsRefreshAttempt(nowMillis, minAgeMillis)
+        }
+        if (targets.isEmpty()) return false
+
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            targets.forEach { tabName ->
+                val previous = stored?.tabs?.get(tabName)
+                db.insertWithOnConflict(
+                    "youtube_channel_tabs",
+                    null,
+                    ContentValues().apply {
+                        put("source_key", sourceKey)
+                        put("channel_id", channelId)
+                        put("tab_name", tabName)
+                        put("state", previous?.state?.name ?: YouTubeChannelTabState.UNKNOWN.name)
+                        previous?.params?.let { put("params", it) } ?: putNull("params")
+                        put("checked_ms", previous?.checkedAtMillis ?: 0L)
+                        put("last_attempt_ms", nowMillis)
+                    },
+                    SQLiteDatabase.CONFLICT_REPLACE,
+                )
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        return true
+    }
+
+    /** Rezerwuje pierwszą próbę po lokalnej granicy dobowej (domyślnie 02:00). */
+    @Synchronized
+    fun claimYouTubeChannelTabsRefreshAfterBoundary(
+        sourceKey: String,
+        channelId: String,
+        nowMillis: Long,
+        attemptBoundaryMillis: Long,
+    ): Boolean {
+        if (nowMillis <= 0L || attemptBoundaryMillis <= 0L) return false
+        val stored = getYouTubeChannelTabs(sourceKey, channelId)
+        val targets = REQUIRED_CHANNEL_TABS.filter { tabName ->
+            stored?.tabs?.get(tabName).needsRefreshAfterBoundary(
+                nowMillis = nowMillis,
+                attemptBoundaryMillis = attemptBoundaryMillis,
+            )
+        }
+        if (targets.isEmpty()) return false
+
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            targets.forEach { tabName ->
+                val previous = stored?.tabs?.get(tabName)
+                db.insertWithOnConflict(
+                    "youtube_channel_tabs",
+                    null,
+                    ContentValues().apply {
+                        put("source_key", sourceKey)
+                        put("channel_id", channelId)
+                        put("tab_name", tabName)
+                        put("state", previous?.state?.name ?: YouTubeChannelTabState.UNKNOWN.name)
+                        previous?.params?.let { put("params", it) } ?: putNull("params")
+                        put("checked_ms", previous?.checkedAtMillis ?: 0L)
+                        put("last_attempt_ms", nowMillis)
+                    },
+                    SQLiteDatabase.CONFLICT_REPLACE,
+                )
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        return true
+    }
+
+    @Synchronized
     fun getCreatorAvatar(creatorId: String): String? = readableDatabase.query(
         "creator_metadata",
         arrayOf("avatar_url"),
@@ -294,9 +674,16 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
 
     @Synchronized
     fun saveCreatorAvatar(creatorId: String, avatarUrl: String) {
+        val existing = getCreatorAvatarMetadata(creatorId)
+        // Resolver HTML nie może nadpisać zasobu lub URL-u, którego treść
+        // została już zweryfikowana i zapisana wraz z SHA-256.
+        if (!existing?.sha256.isNullOrBlank()) return
         val values = ContentValues().apply {
             put("creator_id", creatorId)
             put("avatar_url", avatarUrl)
+            existing?.sha256?.let { put("avatar_sha256", it) } ?: putNull("avatar_sha256")
+            put("avatar_checked_ms", existing?.checkedAtMillis ?: 0L)
+            put("avatar_attempt_ms", existing?.lastAttemptAtMillis ?: 0L)
             put("updated_ms", System.currentTimeMillis())
         }
         writableDatabase.insertWithOnConflict(
@@ -305,6 +692,131 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             values,
             SQLiteDatabase.CONFLICT_REPLACE,
         )
+    }
+
+    @Synchronized
+    fun getCreatorAvatarMetadata(creatorId: String): CreatorAvatarMetadata? =
+        readableDatabase.query(
+            "creator_metadata",
+            arrayOf(
+                "avatar_url",
+                "avatar_sha256",
+                "avatar_checked_ms",
+                "avatar_attempt_ms",
+            ),
+            "creator_id = ?",
+            arrayOf(creatorId),
+            null,
+            null,
+            null,
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return@use null
+            CreatorAvatarMetadata(
+                url = cursor.getString(0),
+                sha256 = cursor.getString(1),
+                checkedAtMillis = cursor.getLong(2),
+                lastAttemptAtMillis = cursor.getLong(3),
+            )
+        }
+
+    @Synchronized
+    fun seedBundledCreatorAvatar(
+        creatorId: String,
+        assetUrl: String,
+        sha256: String,
+        checkedAtMillis: Long,
+    ) {
+        val existing = getCreatorAvatarMetadata(creatorId)
+        // Nowszy pakiet APK może zawierać świeższy avatar niż lokalny cache.
+        // Lokalnej aktualizacji wykonanej już po zbudowaniu APK nie cofamy.
+        if (existing != null && existing.checkedAtMillis >= checkedAtMillis) return
+        saveVerifiedCreatorAvatar(
+            creatorId = creatorId,
+            avatarUrl = assetUrl,
+            sha256 = sha256,
+            checkedAtMillis = checkedAtMillis,
+        )
+    }
+
+    @Synchronized
+    fun saveVerifiedCreatorAvatar(
+        creatorId: String,
+        avatarUrl: String,
+        sha256: String,
+        checkedAtMillis: Long,
+    ) {
+        require(SHA_256.matches(sha256.lowercase()))
+        val values = ContentValues().apply {
+            put("creator_id", creatorId)
+            put("avatar_url", avatarUrl)
+            put("avatar_sha256", sha256.lowercase())
+            put("avatar_checked_ms", checkedAtMillis)
+            put("avatar_attempt_ms", checkedAtMillis)
+            put("updated_ms", System.currentTimeMillis())
+        }
+        writableDatabase.insertWithOnConflict(
+            "creator_metadata",
+            null,
+            values,
+            SQLiteDatabase.CONFLICT_REPLACE,
+        )
+    }
+
+    @Synchronized
+    fun markCreatorAvatarChecked(creatorId: String, checkedAtMillis: Long) {
+        val values = ContentValues().apply {
+            put("avatar_checked_ms", checkedAtMillis)
+            put("avatar_attempt_ms", checkedAtMillis)
+        }
+        writableDatabase.update(
+            "creator_metadata",
+            values,
+            "creator_id = ?",
+            arrayOf(creatorId),
+        )
+    }
+
+    @Synchronized
+    fun markCreatorAvatarAttempted(creatorId: String, attemptedAtMillis: Long) {
+        val existing = getCreatorAvatarMetadata(creatorId)
+        val values = ContentValues().apply {
+            put("creator_id", creatorId)
+            existing?.url?.let { put("avatar_url", it) } ?: putNull("avatar_url")
+            existing?.sha256?.let { put("avatar_sha256", it) } ?: putNull("avatar_sha256")
+            put("avatar_checked_ms", existing?.checkedAtMillis ?: 0L)
+            put("avatar_attempt_ms", attemptedAtMillis)
+            put("updated_ms", System.currentTimeMillis())
+        }
+        writableDatabase.insertWithOnConflict(
+            "creator_metadata",
+            null,
+            values,
+            SQLiteDatabase.CONFLICT_REPLACE,
+        )
+    }
+
+    @Synchronized
+    fun creatorAvatarIdsDue(
+        creatorIds: List<String>,
+        checkedBeforeMillis: Long,
+        attemptedBeforeMillis: Long,
+    ): Set<String> {
+        if (creatorIds.isEmpty()) return emptySet()
+        val stored = readableDatabase.rawQuery(
+            "SELECT creator_id, avatar_checked_ms, avatar_attempt_ms FROM creator_metadata",
+            null,
+        ).use { cursor ->
+            buildMap {
+                while (cursor.moveToNext()) {
+                    put(cursor.getString(0), cursor.getLong(1) to cursor.getLong(2))
+                }
+            }
+        }
+        return creatorIds.filterTo(mutableSetOf()) { creatorId ->
+            val state = stored[creatorId]
+            state == null ||
+                (state.first <= checkedBeforeMillis && state.second <= attemptedBeforeMillis)
+        }
     }
 
     @Synchronized
@@ -353,27 +865,91 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     @Synchronized
-    fun seedSource(sourceKey: String, creator: Creator, entries: List<VideoEntry>) {
+    fun getRssNotificationSnapshot(sourceKey: String): RssNotificationSnapshot? =
+        readableDatabase.query(
+            "source_state",
+            arrayOf("rss_known_video_ids"),
+            "source_key = ?",
+            arrayOf(sourceKey),
+            null,
+            null,
+            null,
+        ).use { cursor ->
+            if (!cursor.moveToFirst() || cursor.isNull(0)) {
+                null
+            } else {
+                RssNotificationSnapshot(
+                    knownVideoIds = cursor.getString(0)
+                        .orEmpty()
+                        .split(',')
+                        .filter(YOUTUBE_VIDEO_ID::matches)
+                        .distinct()
+                        .take(MAX_RSS_KNOWN_VIDEO_IDS),
+                )
+            }
+        }
+
+    @Synchronized
+    fun saveRssNotificationSnapshot(sourceKey: String, knownVideoIds: Collection<String>) {
+        val encoded = knownVideoIds
+            .filter(YOUTUBE_VIDEO_ID::matches)
+            .distinct()
+            .take(MAX_RSS_KNOWN_VIDEO_IDS)
+            .joinToString(",")
+        writableDatabase.insertWithOnConflict(
+            "source_state",
+            null,
+            ContentValues().apply { put("source_key", sourceKey) },
+            SQLiteDatabase.CONFLICT_IGNORE,
+        )
+        writableDatabase.update(
+            "source_state",
+            ContentValues().apply { put("rss_known_video_ids", encoded) },
+            "source_key = ?",
+            arrayOf(sourceKey),
+        )
+    }
+
+    @Synchronized
+    fun seedSource(
+        sourceKey: String,
+        creator: Creator,
+        items: List<YouTubeHistoryItem>,
+    ) {
         writableDatabase.beginTransaction()
         try {
             val now = System.currentTimeMillis()
-            val newestEntry = entries
+            val newestEntry = items
+                .map(YouTubeHistoryItem::entry)
                 .maxWithOrNull(
                     compareBy<VideoEntry> { it.publishedAtMillis }.thenBy { it.id },
                 )
-            entries.forEach { entry ->
+            items.forEach { item ->
+                val entry = item.entry
                 val rowId = insertVideoInternal(
                     db = writableDatabase,
                     creator = creator,
                     entry = entry,
-                    kind = VideoKind.VIDEO,
+                    kind = item.kind,
                     notified = true,
                     detectedAt = now,
-                    classificationVersion = 0,
+                    classificationVersion =
+                        if (item.evidence.isFinal) CURRENT_CLASSIFIER_VERSION else 0,
+                    kindEvidence = item.evidence,
+                    publishedAtEvidence = item.publishedAtEvidence,
                     notificationChecked = true,
                 )
                 if (rowId == -1L) {
-                    reconcileHistoricalYouTubeEntry(entry, shouldNotify = false)
+                    reconcileHistoricalYouTubeEntry(
+                        entry = entry,
+                        publishedAtEvidence = item.publishedAtEvidence,
+                        shouldNotify = false,
+                    )
+                    applyKindDecisionInternal(
+                        db = writableDatabase,
+                        videoId = entry.id,
+                        incoming = VideoKindDecision(item.kind, item.evidence),
+                    )
                 }
             }
             val sourceValues = ContentValues().apply {
@@ -466,6 +1042,127 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         )
     }
 
+    /**
+     * Seed może zmienić się między wydaniami aplikacji. Aktualizujemy wyłącznie
+     * prior, pozostawiając lokalnie nauczone obserwacje użytkownika.
+     */
+    @Synchronized
+    fun ensureSourcePrioritySeeds(seeds: List<SourcePrioritySeed>) {
+        if (seeds.isEmpty()) return
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            seeds.distinctBy(SourcePrioritySeed::sourceKey).forEach { seed ->
+                db.insertWithOnConflict(
+                    "source_priority",
+                    null,
+                    ContentValues().apply {
+                        put("source_key", seed.sourceKey)
+                        put("prior_rate_per_day", seed.priorRatePerDay)
+                        put("prior_exposure_days", seed.priorExposureDays)
+                    },
+                    SQLiteDatabase.CONFLICT_IGNORE,
+                )
+                db.update(
+                    "source_priority",
+                    ContentValues().apply {
+                        put("prior_rate_per_day", seed.priorRatePerDay)
+                        put("prior_exposure_days", seed.priorExposureDays)
+                    },
+                    """
+                    source_key = ? AND (
+                        prior_rate_per_day <> ? OR prior_exposure_days <> ?
+                    )
+                    """.trimIndent(),
+                    arrayOf(
+                        seed.sourceKey,
+                        seed.priorRatePerDay.toString(),
+                        seed.priorExposureDays.toString(),
+                    ),
+                )
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun sourcePriorityStats(sourceKeys: List<String>): Map<String, SourcePriorityStats> {
+        val uniqueKeys = sourceKeys.distinct()
+        if (uniqueKeys.isEmpty()) return emptyMap()
+        val placeholders = uniqueKeys.joinToString(",") { "?" }
+        return readableDatabase.rawQuery(
+            """
+            SELECT p.source_key,
+                   COALESCE(s.initialized, 0),
+                   p.prior_rate_per_day,
+                   p.prior_exposure_days,
+                   p.event_mass,
+                   p.exposure_days,
+                   p.last_model_update_ms,
+                   MAX(p.last_attempt_ms, COALESCE(s.last_checked_ms, 0)),
+                   COALESCE(s.last_checked_ms, 0),
+                   p.last_hit_ms,
+                   p.consecutive_failures
+            FROM source_priority p
+            LEFT JOIN source_state s ON s.source_key = p.source_key
+            WHERE p.source_key IN ($placeholders)
+            """.trimIndent(),
+            uniqueKeys.toTypedArray(),
+        ).use { cursor ->
+            buildMap {
+                while (cursor.moveToNext()) {
+                    val stats = SourcePriorityStats(
+                        sourceKey = cursor.getString(0),
+                        initialized = cursor.getInt(1) == 1,
+                        priorRatePerDay = cursor.getDouble(2),
+                        priorExposureDays = cursor.getDouble(3),
+                        eventMass = cursor.getDouble(4),
+                        exposureDays = cursor.getDouble(5),
+                        lastModelUpdateMillis = cursor.getLong(6),
+                        lastAttemptMillis = cursor.getLong(7),
+                        lastSuccessfulCheckMillis = cursor.getLong(8),
+                        lastHitMillis = cursor.getLong(9),
+                        consecutiveFailures = cursor.getInt(10),
+                    )
+                    put(stats.sourceKey, stats)
+                }
+            }
+        }
+    }
+
+    /**
+     * Cały przebieg synchronizacji zapisuje model jedną transakcją. Pozwala to
+     * uniknąć dziesiątek niezależnych zapisów wykonywanych przez korutyny.
+     */
+    @Synchronized
+    fun updateSourcePriorities(updates: List<SourcePriorityUpdate>) {
+        if (updates.isEmpty()) return
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            updates.distinctBy(SourcePriorityUpdate::sourceKey).forEach { update ->
+                db.update(
+                    "source_priority",
+                    ContentValues().apply {
+                        put("event_mass", update.eventMass)
+                        put("exposure_days", update.exposureDays)
+                        put("last_model_update_ms", update.lastModelUpdateMillis)
+                        put("last_attempt_ms", update.lastAttemptMillis)
+                        put("last_hit_ms", update.lastHitMillis)
+                        put("consecutive_failures", update.consecutiveFailures)
+                    },
+                    "source_key = ?",
+                    arrayOf(update.sourceKey),
+                )
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     @Synchronized
     fun containsVideo(videoId: String): Boolean = readableDatabase.rawQuery(
         "SELECT 1 FROM video_history WHERE video_id = ? LIMIT 1",
@@ -473,13 +1170,22 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     ).use { cursor -> cursor.moveToFirst() }
 
     @Synchronized
-    fun updateFromVerifiedYouTubeEntry(entry: VideoEntry) {
-        writableDatabase.update(
+    fun updateFromVerifiedYouTubeEntry(
+        entry: VideoEntry,
+        publishedAtEvidence: PublishedAtEvidence,
+    ) {
+        val db = writableDatabase
+        db.update(
             "video_history",
             ContentValues().apply {
                 put("title", entry.title)
                 put("url", entry.url)
-                put("published_ms", entry.publishedAtMillis)
+                putPublishedAtIfTrusted(
+                    db = db,
+                    videoId = entry.id,
+                    publishedAtMillis = entry.publishedAtMillis,
+                    evidence = publishedAtEvidence,
+                )
                 put("origin", VideoOrigin.YOUTUBE.name)
             },
             "video_id = ?",
@@ -498,23 +1204,32 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     @Synchronized
     fun reconcileHistoricalYouTubeEntry(
         entry: VideoEntry,
+        publishedAtEvidence: PublishedAtEvidence,
         shouldNotify: Boolean,
     ): Boolean {
+        val db = writableDatabase
         val values = ContentValues().apply {
             put("title", entry.title)
             put("url", entry.url)
-            put("published_ms", entry.publishedAtMillis)
+            putPublishedAtIfTrusted(
+                db = db,
+                videoId = entry.id,
+                publishedAtMillis = entry.publishedAtMillis,
+                evidence = publishedAtEvidence,
+            )
             put("origin", VideoOrigin.YOUTUBE.name)
             put("notification_checked", 1)
             if (shouldNotify) put("notified", 0)
         }
-        val updated = writableDatabase.update(
+        val updated = db.update(
             "video_history",
             values,
             "video_id = ? AND origin = ? AND notification_checked = 0",
             arrayOf(entry.id, VideoOrigin.YOUTUBE.name),
         )
-        if (updated == 0) updateFromVerifiedYouTubeEntry(entry)
+        if (updated == 0) {
+            updateFromVerifiedYouTubeEntry(entry, publishedAtEvidence)
+        }
         return updated == 1 && shouldNotify
     }
 
@@ -530,9 +1245,10 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     fun upsertVerifiedVideoFromSync(
         creator: Creator,
         entry: VideoEntry,
+        publishedAtEvidence: PublishedAtEvidence,
         kind: VideoKind,
+        evidence: VideoKindEvidence,
         shouldNotify: Boolean,
-        classificationVersion: Int,
     ): Boolean {
         val db = writableDatabase
         db.beginTransaction()
@@ -565,7 +1281,10 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                             kind = kind,
                             notified = false,
                             detectedAt = System.currentTimeMillis(),
-                            classificationVersion = classificationVersion,
+                            classificationVersion =
+                                if (evidence.isFinal) CURRENT_CLASSIFIER_VERSION else 0,
+                            kindEvidence = evidence,
+                            publishedAtEvidence = publishedAtEvidence,
                             notificationChecked = true,
                         ) != -1L
                     }
@@ -574,12 +1293,12 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                 !existing -> {
                     db.update(
                         "video_history",
-                        verifiedSyncValues(
+                        syncMetadataValues(
+                            db = db,
                             creator = creator,
                             entry = entry,
-                            kind = kind,
+                            publishedAtEvidence = publishedAtEvidence,
                             notified = if (shouldNotify) false else null,
-                            classificationVersion = classificationVersion,
                             includeCreator = true,
                         ),
                         "video_id = ? AND origin = ? AND notification_checked = 0",
@@ -591,12 +1310,12 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                 else -> {
                     db.update(
                         "video_history",
-                        verifiedSyncValues(
+                        syncMetadataValues(
+                            db = db,
                             creator = creator,
                             entry = entry,
-                            kind = kind,
+                            publishedAtEvidence = publishedAtEvidence,
                             notified = null,
-                            classificationVersion = classificationVersion,
                             includeCreator = false,
                         ),
                         "video_id = ? AND origin = ?",
@@ -605,6 +1324,13 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                     false
                 }
             }
+            if (existing != null) {
+                applyKindDecisionInternal(
+                    db = db,
+                    videoId = entry.id,
+                    incoming = VideoKindDecision(kind, evidence),
+                )
+            }
             db.setTransactionSuccessful()
             return becamePending
         } finally {
@@ -612,12 +1338,12 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    private fun verifiedSyncValues(
+    private fun syncMetadataValues(
+        db: SQLiteDatabase,
         creator: Creator,
         entry: VideoEntry,
-        kind: VideoKind,
+        publishedAtEvidence: PublishedAtEvidence,
         notified: Boolean?,
-        classificationVersion: Int,
         includeCreator: Boolean,
     ): ContentValues = ContentValues().apply {
         if (includeCreator) {
@@ -626,12 +1352,12 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         }
         put("title", entry.title)
         put("url", entry.url)
-        put("published_ms", entry.publishedAtMillis)
-        put("detected_ms", System.currentTimeMillis())
-        if (kind != VideoKind.UNKNOWN) {
-            put("kind", kind.name)
-            put("classification_version", classificationVersion)
-        }
+        putPublishedAtIfTrusted(
+            db = db,
+            videoId = entry.id,
+            publishedAtMillis = entry.publishedAtMillis,
+            evidence = publishedAtEvidence,
+        )
         notified?.let { put("notified", if (it) 1 else 0) }
         put("origin", VideoOrigin.YOUTUBE.name)
         put("notification_checked", 1)
@@ -643,7 +1369,8 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         entry: VideoEntry,
         kind: VideoKind,
         notified: Boolean,
-        classificationVersion: Int = 1,
+        evidence: VideoKindEvidence = VideoKindEvidence.API_METADATA,
+        publishedAtEvidence: PublishedAtEvidence = PublishedAtEvidence.UNKNOWN,
     ): Boolean = insertVideoInternal(
         db = writableDatabase,
         creator = creator,
@@ -651,7 +1378,10 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         kind = kind,
         notified = notified,
         detectedAt = System.currentTimeMillis(),
-        classificationVersion = classificationVersion,
+        classificationVersion =
+            if (evidence.isFinal) CURRENT_CLASSIFIER_VERSION else 0,
+        kindEvidence = evidence,
+        publishedAtEvidence = publishedAtEvidence,
         notificationChecked = true,
     ) != -1L
 
@@ -669,41 +1399,59 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         items: List<YouTubeHistoryItem>,
     ): Int {
         if (items.isEmpty()) return 0
+        val distinctItems = items.distinctBy { it.entry.id }
         var inserted = 0
         val now = System.currentTimeMillis()
-        writableDatabase.beginTransaction()
+        val db = writableDatabase
+        db.beginTransaction()
         try {
-            items.forEach { item ->
+            // Jeden odczyt strony zastępuje po dwa SELECT-y wykonywane wcześniej
+            // dla każdego istniejącego filmu (data oraz rodzaj).
+            val existingEvidence = storedVideoEvidence(
+                db = db,
+                videoIds = distinctItems.map { it.entry.id },
+            )
+            distinctItems.forEach { item ->
                 val rowId = insertVideoInternal(
-                    db = writableDatabase,
+                    db = db,
                     creator = creator,
                     entry = item.entry,
                     kind = item.kind,
                     notified = true,
                     detectedAt = now,
                     classificationVersion = if (
-                        item.kind == VideoKind.UNKNOWN || !item.kindVerified
+                        item.kind == VideoKind.UNKNOWN || !item.evidence.isFinal
                     ) {
                         0
                     } else {
-                        1
+                        CURRENT_CLASSIFIER_VERSION
                     },
+                    kindEvidence = item.evidence,
+                    publishedAtEvidence = item.publishedAtEvidence,
                     notificationChecked = false,
                 )
                 if (rowId != -1L) {
                     inserted += 1
                 } else {
-                    updateHistoricalItem(creator, item)
+                    updateHistoricalItem(
+                        creator = creator,
+                        item = item,
+                        existing = existingEvidence[item.entry.id],
+                    )
                 }
             }
-            writableDatabase.setTransactionSuccessful()
+            db.setTransactionSuccessful()
         } finally {
-            writableDatabase.endTransaction()
+            db.endTransaction()
         }
         return inserted
     }
 
-    private fun updateHistoricalItem(creator: Creator, item: YouTubeHistoryItem) {
+    private fun updateHistoricalItem(
+        creator: Creator,
+        item: YouTubeHistoryItem,
+        existing: StoredVideoEvidence?,
+    ) {
         val db = writableDatabase
         db.update(
             "video_history",
@@ -712,44 +1460,46 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                 put("creator_name", creator.name)
                 put("title", item.entry.title)
                 put("url", item.entry.url)
-                put("published_ms", item.entry.publishedAtMillis)
+                putPublishedAtIfTrusted(
+                    db = db,
+                    videoId = item.entry.id,
+                    publishedAtMillis = item.entry.publishedAtMillis,
+                    evidence = item.publishedAtEvidence,
+                    knownEvidenceRank = existing?.publishedEvidenceRank,
+                )
                 put("origin", VideoOrigin.YOUTUBE.name)
             },
             "video_id = ?",
             arrayOf(item.entry.id),
         )
-        if (item.kind != VideoKind.UNKNOWN) {
-            // Typ szczegółowy z potwierdzonej karty może poprawić ogólny VIDEO.
-            // Ogólny VIDEO nie może natomiast usunąć zachowanego streama/Shorta
-            // w trakcie ponownej klasyfikacji po migracji.
-            val selection = when {
-                !item.kindVerified ->
-                    "video_id = ? AND classification_version = 0 AND kind IN (?, ?)"
-                item.kind == VideoKind.VIDEO ->
-                    "video_id = ? AND classification_version = 0"
-                else ->
-                    "video_id = ? AND (classification_version = 0 OR kind IN (?, ?))"
-            }
-            val selectionArgs = if (item.kindVerified && item.kind == VideoKind.VIDEO) {
-                arrayOf(item.entry.id)
-            } else {
-                arrayOf(
-                    item.entry.id,
-                    VideoKind.UNKNOWN.name,
-                    VideoKind.VIDEO.name,
-                )
-            }
-            db.update(
-                "video_history",
-                ContentValues().apply {
-                    put("kind", item.kind.name)
-                    put("classification_version", if (item.kindVerified) 1 else 0)
-                    put("classification_attempts", 0)
-                    put("classification_last_attempt_ms", System.currentTimeMillis())
-                },
-                selection,
-                selectionArgs,
-            )
+        applyKindDecisionInternal(
+            db = db,
+            videoId = item.entry.id,
+            incoming = VideoKindDecision(item.kind, item.evidence),
+            knownCurrent = existing?.kindDecision,
+            recordAttemptWhenUnchanged = false,
+        )
+    }
+
+    private fun ContentValues.putPublishedAtIfTrusted(
+        db: SQLiteDatabase,
+        videoId: String,
+        publishedAtMillis: Long,
+        evidence: PublishedAtEvidence,
+        knownEvidenceRank: Int? = null,
+    ) {
+        val existingEvidenceRank = knownEvidenceRank ?: db.query(
+            "video_history",
+            arrayOf("published_evidence"),
+            "video_id = ?",
+            arrayOf(videoId),
+            null,
+            null,
+            null,
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else null }
+        if (shouldReplacePublishedAt(existingEvidenceRank, evidence)) {
+            put("published_ms", publishedAtMillis)
+            put("published_evidence", evidence.rank)
         }
     }
 
@@ -761,6 +1511,8 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         notified: Boolean,
         detectedAt: Long,
         classificationVersion: Int,
+        kindEvidence: VideoKindEvidence = VideoKindEvidence.NONE,
+        publishedAtEvidence: PublishedAtEvidence = PublishedAtEvidence.UNKNOWN,
         notificationChecked: Boolean,
     ): Long = db.insertWithOnConflict(
         "video_history",
@@ -772,10 +1524,12 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             put("title", entry.title)
             put("url", entry.url)
             put("published_ms", entry.publishedAtMillis)
+            put("published_evidence", publishedAtEvidence.rank)
             put("detected_ms", detectedAt)
             put("kind", kind.name)
             put("notified", if (notified) 1 else 0)
             put("classification_version", classificationVersion)
+            put("kind_evidence", kindEvidence.rank)
             put("origin", entry.origin.name)
             put("notification_checked", if (notificationChecked) 1 else 0)
         },
@@ -888,17 +1642,33 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     @Synchronized
-    fun markVideoState(videoId: String, kind: VideoKind, notified: Boolean) {
-        writableDatabase.update(
-            "video_history",
-            ContentValues().apply {
-                put("kind", kind.name)
-                put("notified", if (notified) 1 else 0)
-                put("classification_version", 1)
-            },
-            "video_id = ? AND origin = ?",
-            arrayOf(videoId, VideoOrigin.YOUTUBE.name),
-        )
+    @SuppressLint("UseKtx")
+    fun markVideoState(
+        videoId: String,
+        kind: VideoKind,
+        evidence: VideoKindEvidence,
+        notified: Boolean,
+    ) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            applyKindDecisionInternal(
+                db = db,
+                videoId = videoId,
+                incoming = VideoKindDecision(kind, evidence),
+            )
+            db.update(
+                "video_history",
+                ContentValues().apply {
+                    put("notified", if (notified) 1 else 0)
+                },
+                "video_id = ? AND origin = ?",
+                arrayOf(videoId, VideoOrigin.YOUTUBE.name),
+            )
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
     }
 
     @Synchronized
@@ -961,18 +1731,137 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     fun markVideoClassification(
         videoId: String,
         kind: VideoKind,
+        evidence: VideoKindEvidence,
     ) {
-        writableDatabase.update(
+        applyKindDecisionInternal(
+            db = writableDatabase,
+            videoId = videoId,
+            incoming = VideoKindDecision(kind, evidence),
+        )
+    }
+
+    @Synchronized
+    @SuppressLint("UseKtx")
+    fun markVideoClassifications(decisions: Map<String, VideoKindDecision>) {
+        val applicable = decisions.filterValues { decision ->
+            decision.kind != VideoKind.UNKNOWN &&
+                decision.evidence != VideoKindEvidence.NONE
+        }
+        if (applicable.isEmpty()) return
+
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            applicable.forEach { (videoId, decision) ->
+                applyKindDecisionInternal(db, videoId, decision)
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    private fun applyKindDecisionInternal(
+        db: SQLiteDatabase,
+        videoId: String,
+        incoming: VideoKindDecision,
+        knownCurrent: VideoKindDecision? = null,
+        recordAttemptWhenUnchanged: Boolean = true,
+    ): Boolean {
+        if (
+            incoming.kind == VideoKind.UNKNOWN ||
+            incoming.evidence == VideoKindEvidence.NONE
+        ) {
+            return false
+        }
+        val current = knownCurrent ?: db.query(
+            "video_history",
+            arrayOf("kind", "kind_evidence"),
+            "video_id = ? AND origin = ?",
+            arrayOf(videoId, VideoOrigin.YOUTUBE.name),
+            null,
+            null,
+            null,
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) {
+                return false
+            }
+            VideoKindDecision(
+                kind = runCatching { VideoKind.valueOf(cursor.getString(0)) }
+                    .getOrDefault(VideoKind.UNKNOWN),
+                evidence = evidenceFromRank(cursor.getInt(1)),
+            )
+        }
+        val selected = chooseVideoKindDecision(current, incoming)
+        if (selected == current) {
+            if (recordAttemptWhenUnchanged) {
+                db.update(
+                    "video_history",
+                    ContentValues().apply {
+                        put("classification_last_attempt_ms", System.currentTimeMillis())
+                    },
+                    "video_id = ? AND origin = ?",
+                    arrayOf(videoId, VideoOrigin.YOUTUBE.name),
+                )
+            }
+            return false
+        }
+        db.update(
             "video_history",
             ContentValues().apply {
-                put("kind", kind.name)
-                put("classification_version", 1)
+                put("kind", selected.kind.name)
+                put("kind_evidence", selected.evidence.rank)
+                put(
+                    "classification_version",
+                    if (selected.evidence.isFinal) CURRENT_CLASSIFIER_VERSION else 0,
+                )
+                put("classification_attempts", 0)
                 put("classification_last_attempt_ms", System.currentTimeMillis())
             },
             "video_id = ? AND origin = ?",
             arrayOf(videoId, VideoOrigin.YOUTUBE.name),
         )
+        return true
     }
+
+    private fun storedVideoEvidence(
+        db: SQLiteDatabase,
+        videoIds: List<String>,
+    ): Map<String, StoredVideoEvidence> {
+        val ids = videoIds.distinct().take(MAX_EVIDENCE_QUERY_IDS)
+        if (ids.isEmpty()) return emptyMap()
+        val placeholders = ids.joinToString(",") { "?" }
+        return db.rawQuery(
+            """
+            SELECT video_id, published_evidence, kind, kind_evidence
+            FROM video_history
+            WHERE origin = ? AND video_id IN ($placeholders)
+            """.trimIndent(),
+            arrayOf(VideoOrigin.YOUTUBE.name, *ids.toTypedArray()),
+        ).use { cursor ->
+            buildMap {
+                while (cursor.moveToNext()) {
+                    put(
+                        cursor.getString(0),
+                        StoredVideoEvidence(
+                            publishedEvidenceRank = cursor.getInt(1),
+                            kindDecision = VideoKindDecision(
+                                kind = runCatching { VideoKind.valueOf(cursor.getString(2)) }
+                                    .getOrDefault(VideoKind.UNKNOWN),
+                                evidence = evidenceFromRank(cursor.getInt(3)),
+                            ),
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    private fun evidenceFromRank(rank: Int): VideoKindEvidence =
+        VideoKindEvidence.entries
+            .filter { it.rank <= rank }
+            .maxByOrNull(VideoKindEvidence::rank)
+            ?: VideoKindEvidence.NONE
 
     @Synchronized
     fun recordFailedVideoClassification(videoId: String) {
@@ -980,13 +1869,51 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             """
             UPDATE video_history
             SET classification_attempts = classification_attempts + 1,
-                classification_last_attempt_ms = ?
+                classification_last_attempt_ms = ?,
+                classification_version = CASE
+                    WHEN classification_attempts + 1 >= ? THEN ?
+                    ELSE classification_version
+                END
             WHERE video_id = ? AND origin = ?
             """.trimIndent(),
             arrayOf<Any>(
                 System.currentTimeMillis(),
+                MAX_CLASSIFICATION_ATTEMPTS,
+                CURRENT_CLASSIFIER_VERSION,
                 videoId,
                 VideoOrigin.YOUTUBE.name,
+            ),
+        )
+    }
+
+    @Synchronized
+    fun recordFailedVideoClassifications(videoIds: Collection<String>) {
+        val distinctIds = videoIds
+            .asSequence()
+            .filter(String::isNotBlank)
+            .distinct()
+            .take(MAX_CLASSIFICATION_QUERY_IDS)
+            .toList()
+        if (distinctIds.isEmpty()) return
+
+        val placeholders = distinctIds.joinToString(",") { "?" }
+        writableDatabase.execSQL(
+            """
+            UPDATE video_history
+            SET classification_attempts = classification_attempts + 1,
+                classification_last_attempt_ms = ?,
+                classification_version = CASE
+                    WHEN classification_attempts + 1 >= ? THEN ?
+                    ELSE classification_version
+                END
+            WHERE origin = ? AND video_id IN ($placeholders)
+            """.trimIndent(),
+            arrayOf<Any>(
+                System.currentTimeMillis(),
+                MAX_CLASSIFICATION_ATTEMPTS,
+                CURRENT_CLASSIFIER_VERSION,
+                VideoOrigin.YOUTUBE.name,
+                *distinctIds.toTypedArray(),
             ),
         )
     }
@@ -1127,6 +2054,8 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             writableDatabase.delete("notification_ids", null, null)
             writableDatabase.delete("video_history", null, null)
             writableDatabase.delete("source_state", null, null)
+            writableDatabase.delete("source_priority", null, null)
+            writableDatabase.delete("youtube_channel_tabs", null, null)
             writableDatabase.setTransactionSuccessful()
         } finally {
             writableDatabase.endTransaction()
@@ -1168,10 +2097,16 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
 
     private companion object {
         const val DATABASE_NAME = "lewicowyt_notifier.db"
-        const val DATABASE_VERSION = 15
+        const val DATABASE_VERSION = 22
+        const val CURRENT_CLASSIFIER_VERSION = 1
+        const val MAX_CHANNEL_TAB_PARAMS_CHARS = 2_048
+        const val MAX_EVIDENCE_QUERY_IDS = 900
         const val MAX_CLASSIFICATION_ATTEMPTS = 3
         const val MAX_CLASSIFICATION_QUERY_IDS = 100
+        const val MAX_RSS_KNOWN_VIDEO_IDS = 60
         const val DAY_MILLIS = 24L * 60L * 60L * 1000L
         const val MIN_FREE_PAGES_FOR_VACUUM = 128L
+        val SHA_256 = Regex("[0-9a-f]{64}")
+        val YOUTUBE_VIDEO_ID = Regex("[A-Za-z0-9_-]{11}")
     }
 }

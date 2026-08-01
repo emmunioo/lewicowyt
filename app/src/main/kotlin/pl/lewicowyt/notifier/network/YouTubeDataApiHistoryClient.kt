@@ -8,9 +8,12 @@ import java.time.Duration
 import java.time.Instant
 import java.util.Locale
 import org.json.JSONObject
+import pl.lewicowyt.notifier.model.PublishedAtEvidence
 import pl.lewicowyt.notifier.model.SourceType
 import pl.lewicowyt.notifier.model.VideoEntry
 import pl.lewicowyt.notifier.model.VideoKind
+import pl.lewicowyt.notifier.model.VideoKindDecision
+import pl.lewicowyt.notifier.model.VideoKindEvidence
 
 data class YouTubeDataApiPage(
     val items: List<YouTubeHistoryItem>,
@@ -127,9 +130,16 @@ class YouTubeDataApiHistoryClient(
                         ?.optString("videoId")
                         ?.takeIf(YOUTUBE_VIDEO_ID::matches)
                     ?: continue
-                val published = details?.optString("videoPublishedAt")
+                val exactPublished = details?.optString("videoPublishedAt")
                     ?.takeIf { it.isNotBlank() }
-                    ?: snippet.optString("publishedAt")
+                val published = exactPublished ?: snippet.optString("publishedAt")
+                val publishedAtEvidence = if (exactPublished != null) {
+                    PublishedAtEvidence.DATA_API
+                } else {
+                    // Dla ręcznej playlisty snippet.publishedAt może oznaczać
+                    // dodanie do playlisty, a nie publikację filmu.
+                    PublishedAtEvidence.PLAYLIST_ITEM
+                }
                 val publishedAtMillis = runCatching {
                     Instant.parse(published).toEpochMilli()
                 }.getOrNull()
@@ -147,11 +157,12 @@ class YouTubeDataApiHistoryClient(
                         publishedAtMillis = publishedAtMillis,
                         author = snippet.optString("videoOwnerChannelTitle")
                             .take(MAX_AUTHOR_CHARS),
+                        publishedAtEvidence = publishedAtEvidence,
                     ),
                 )
             }
         }
-        val kinds = fetchVideoKinds(
+        val kinds = fetchVideoKindDecisions(
             rawItems
                 .filter { it.publishedAtMillis >= classifyAfterMillis }
                 .map(RawItem::videoId),
@@ -167,7 +178,9 @@ class YouTubeDataApiHistoryClient(
                         publishedAtMillis = item.publishedAtMillis,
                         author = item.author,
                     ),
-                    kind = kinds[item.videoId] ?: VideoKind.UNKNOWN,
+                    kind = kinds[item.videoId]?.kind ?: VideoKind.UNKNOWN,
+                    evidence = kinds[item.videoId]?.evidence ?: VideoKindEvidence.NONE,
+                    publishedAtEvidence = item.publishedAtEvidence,
                 )
             },
             nextPageToken = playlistJson.optString("nextPageToken")
@@ -176,19 +189,25 @@ class YouTubeDataApiHistoryClient(
     }
 
     fun fetchVideoKinds(videoIds: Collection<String>, apiKey: String): Map<String, VideoKind> =
+        fetchVideoKindDecisions(videoIds, apiKey).mapValues { it.value.kind }
+
+    fun fetchVideoKindDecisions(
+        videoIds: Collection<String>,
+        apiKey: String,
+    ): Map<String, VideoKindDecision> =
         videoIds
             .asSequence()
             .filter(YOUTUBE_VIDEO_ID::matches)
             .distinct()
             .chunked(MAX_VIDEO_IDS_PER_REQUEST)
-            .fold(emptyMap<String, VideoKind>()) { result, chunk ->
+            .fold(emptyMap<String, VideoKindDecision>()) { result, chunk ->
                 result + fetchVideoKindsPage(chunk, apiKey)
             }
 
     private fun fetchVideoKindsPage(
         videoIds: List<String>,
         apiKey: String,
-    ): Map<String, VideoKind> {
+    ): Map<String, VideoKindDecision> {
         if (videoIds.isEmpty()) return emptyMap()
         val url = buildString {
             append("$API_BASE/videos")
@@ -205,25 +224,14 @@ class YouTubeDataApiHistoryClient(
             for (index in 0 until items.length()) {
                 val item = items.optJSONObject(index) ?: continue
                 val id = item.optString("id").takeIf(YOUTUBE_VIDEO_ID::matches) ?: continue
-                val liveDetails = item.optJSONObject("liveStreamingDetails")
-                val broadcastState = item.optJSONObject("snippet")
-                    ?.optString("liveBroadcastContent")
-                    .orEmpty()
-                val kind = when {
-                    broadcastState == "live" -> VideoKind.LIVE
-                    broadcastState == "upcoming" -> VideoKind.UPCOMING
-                    liveDetails?.optString("actualEndTime")?.isNotBlank() == true ->
-                        VideoKind.STREAM_ARCHIVE
-                    liveDetails?.optString("actualStartTime")?.isNotBlank() == true ->
-                        VideoKind.LIVE
-                    liveDetails?.optString("scheduledStartTime")?.isNotBlank() == true ->
-                        VideoKind.UPCOMING
-                    parseDurationSeconds(
-                        item.optJSONObject("contentDetails")?.optString("duration").orEmpty(),
-                    ) in 1..MAX_SHORT_SECONDS -> VideoKind.SHORT
-                    else -> VideoKind.VIDEO
+                val decision = classifyDataApiVideoKindDecision(item)
+                // Data API nie ujawnia przynależności do kart „Shorty” i
+                // „Transmisje”. Niejednoznaczny wynik musi uruchomić
+                // klasyfikator strony/odtwarzacza, a nie blokować go samą
+                // obecnością identyfikatora w mapie.
+                if (decision.kind != VideoKind.UNKNOWN) {
+                    put(id, decision)
                 }
-                put(id, kind)
             }
         }
     }
@@ -246,21 +254,18 @@ class YouTubeDataApiHistoryClient(
     private fun String.urlEncode(): String =
         URLEncoder.encode(this, StandardCharsets.UTF_8.name())
 
-    private fun parseDurationSeconds(value: String): Long =
-        runCatching { Duration.parse(value).seconds }.getOrDefault(0L)
-
     private data class RawItem(
         val videoId: String,
         val title: String,
         val publishedAtMillis: Long,
         val author: String,
+        val publishedAtEvidence: PublishedAtEvidence,
     )
 
     private companion object {
         const val API_BASE = "https://www.googleapis.com/youtube/v3"
         const val VALIDATION_CHANNEL_ID = "UC0000000000000000000000"
         const val MAX_API_KEY_CHARS = 256
-        const val MAX_SHORT_SECONDS = 180L
         const val MAX_VIDEO_IDS_PER_REQUEST = 50
         const val MAX_FUTURE_SKEW_MILLIS = 10L * 60L * 1_000L
         const val MAX_API_ERROR_CHARS = 500
@@ -270,6 +275,48 @@ class YouTubeDataApiHistoryClient(
         val YOUTUBE_VIDEO_ID = Regex("""[A-Za-z0-9_-]{11}""")
     }
 }
+
+/**
+ * Data API podaje bieżący stan transmisji, ale po jej zakończeniu nie
+ * rozróżnia wystarczająco pewnie archiwalnego streamu od filmu opublikowanego
+ * jako Premiera. Nie podaje też orientacji ani przynależności do karty Shorts.
+ * Takie przypadki pozostają UNKNOWN i są sprawdzane publicznym
+ * odtwarzaczem/stroną YouTube.
+ */
+internal fun classifyDataApiVideoKind(item: JSONObject): VideoKind {
+    return classifyDataApiVideoKindDecision(item).kind
+}
+
+internal fun classifyDataApiVideoKindDecision(item: JSONObject): VideoKindDecision {
+    val broadcastState = item.optJSONObject("snippet")
+        ?.optString("liveBroadcastContent")
+        .orEmpty()
+        .lowercase(Locale.ROOT)
+    if (broadcastState == "live") {
+        return VideoKindDecision(VideoKind.LIVE, VideoKindEvidence.API_CURRENT_STATE)
+    }
+    if (broadcastState == "upcoming") {
+        return VideoKindDecision(VideoKind.UPCOMING, VideoKindEvidence.API_CURRENT_STATE)
+    }
+
+    if (item.optJSONObject("liveStreamingDetails") != null) {
+        return VideoKindDecision.Unknown
+    }
+
+    val durationSeconds = parseDataApiDurationSeconds(
+        item.optJSONObject("contentDetails")?.optString("duration").orEmpty(),
+    )
+    return when {
+        durationSeconds > MAX_SHORT_SECONDS ->
+            VideoKindDecision(VideoKind.VIDEO, VideoKindEvidence.API_METADATA)
+        else -> VideoKindDecision.Unknown
+    }
+}
+
+private fun parseDataApiDurationSeconds(value: String): Long =
+    runCatching { Duration.parse(value).seconds }.getOrDefault(0L)
+
+private const val MAX_SHORT_SECONDS = 180L
 
 internal fun interpretApiKeyValidationResponse(
     statusCode: Int,

@@ -17,6 +17,8 @@ app/build
 *.inspect.ndjson
 /tools/input/*.xlsx
 /tmp/
+__pycache__/
+*.py[cod]
 
 # Nigdy nie publikuj kluczy podpisu ani haseł
 *.jks

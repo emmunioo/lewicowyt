@@ -3,12 +3,17 @@ package pl.lewicowyt.notifier.ui
 import android.app.TimePickerDialog
 import android.content.Intent
 import android.graphics.Color as AndroidColor
+import android.os.SystemClock
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -57,9 +62,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -68,6 +75,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -80,11 +88,20 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.net.URI
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import pl.lewicowyt.notifier.BuildConfig
 import pl.lewicowyt.notifier.R
 import pl.lewicowyt.notifier.data.DEFAULT_ACCENT_COLOR_ARGB
+import pl.lewicowyt.notifier.data.AppSettings
 import pl.lewicowyt.notifier.data.MAX_YOUTUBE_API_KEY_CHARS
 import pl.lewicowyt.notifier.data.ThemeMode
+import pl.lewicowyt.notifier.data.isHistoryEnabledFor
+import pl.lewicowyt.notifier.data.isNotificationEnabledFor
+import pl.lewicowyt.notifier.diagnostics.DiagnosticLogState
+import pl.lewicowyt.notifier.diagnostics.DiagnosticLogStore
 import pl.lewicowyt.notifier.model.Creator
 import pl.lewicowyt.notifier.model.HistoryFilter
 import pl.lewicowyt.notifier.model.HistoryItem
@@ -138,7 +155,7 @@ fun LewicowYTApp(
     if (whatsNewVisible) {
         AlertDialog(
             onDismissRequest = acknowledgeWhatsNew,
-            title = { Text("Co nowego w lewicowYT 1.4-beta") },
+            title = { Text("Co nowego w lewicowYT 1.5-beta") },
             text = {
                 Column(
                     modifier = Modifier
@@ -146,34 +163,42 @@ fun LewicowYTApp(
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text("Stabilniejsza historia bez klucza API", fontWeight = FontWeight.Bold)
+                    Text("Pełna kontrola rodzajów", fontWeight = FontWeight.Bold)
                     Text(
-                        "Najnowsze materiały nadal pojawiają się szybko dzięki RSS. " +
-                            "Starsza historia jest teraz pobierana bezpośrednio z właściwej " +
-                            "karty YouTube przy mniejszej liczbie zapytań.",
+                        "Filmy, streamy i Shorty można wyłączać globalnie albo osobno dla " +
+                            "każdego twórcy — niezależnie dla historii i powiadomień. " +
+                            "Wyłączenie historii pomija także pobieranie odpowiedniej karty.",
                     )
                     Spacer(Modifier.height(2.dp))
-                    Text("Poprawny podział materiałów", fontWeight = FontWeight.Bold)
+                    Text("Znacznie szybsza historia", fontWeight = FontWeight.Bold)
                     Text(
-                        "Filmy, Shorty oraz transmisje są rozpoznawane z aktualnych danych " +
-                            "YouTube. Kanał bez karty transmisji nie może już zwrócić " +
-                            "zwykłych filmów jako streamów.",
+                        "RSS pokazuje pierwsze wyniki, a pięć kanałów jest uzupełnianych " +
+                            "równolegle etapami po dwa tygodnie: Filmy, Shorty, Streamy. " +
+                            "Poprawiono daty, karty kanału i stronicowanie YouTube.",
                     )
                     Spacer(Modifier.height(2.dp))
-                    Text("Historia nie znika podczas poprawiania typu", fontWeight = FontWeight.Bold)
+                    Text("Pewniejsze typy i powiadomienia", fontWeight = FontWeight.Bold)
                     Text(
-                        "Ponowna klasyfikacja zachowuje dotychczasowy rodzaj materiału, " +
-                            "dopóki YouTube nie dostarczy pewnej odpowiedzi. Nieudana próba " +
-                            "nie zamienia już streamów ani Shortów w filmy.",
+                        "Ujednolicono rozpoznawanie filmów, Shortów i transmisji dla trybu " +
+                            "API oraz bez API. Powiadomienia bez klucza wykrywają rzeczywistą " +
+                            "zmianę RSS i nie powtarzają starszych materiałów.",
                     )
                     Spacer(Modifier.height(2.dp))
-                    Text("Klucz YouTube API pozostaje opcjonalny", fontWeight = FontWeight.Bold)
+                    Text("Mniej transferu i zajętego miejsca", fontWeight = FontWeight.Bold)
                     Text(
-                        "Aplikacja działa również bez klucza. Data API może nadal szybciej " +
-                            "pobierać długą historię i jest mniej podatne na zmiany strony " +
-                            "YouTube, dlatego pozostaje opcjonalnym trybem zwiększonej " +
-                            "stabilności.",
+                        "Web pobiera tylko potrzebne metadane. Wbudowane awatary 176×176 są " +
+                            "sprawdzane raz w tygodniu, a identyczne miniatury współdzielą " +
+                            "jeden plik dzięki SHA-256.",
                     )
+                    Spacer(Modifier.height(2.dp))
+                    Text("Uzupełnienie zmian z 1.4-beta", fontWeight = FontWeight.Bold)
+                    Text(
+                        "Uwzględniono pominięte wcześniej informacje o poprawionym " +
+                            "wykrywaniu wydań, bezpiecznym pobieraniu aktualizacji i ochronie " +
+                            "przed instalacją niewłaściwego APK.",
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text("Więcej informacji znajduje się na stronie projektu.")
                 }
             },
             confirmButton = {
@@ -329,7 +354,14 @@ private fun CreatorsScreen(state: AppUiState, viewModel: AppViewModel) {
                     creator = creator,
                     avatarUrl = state.creatorAvatars[creator.id],
                     selected = creator.id in state.selectedCreatorIds,
+                    settings = state.settings,
                     onSelectedChange = { viewModel.setCreatorSelected(creator.id, it) },
+                    onHistoryTypeChange = { type, enabled ->
+                        viewModel.setCreatorHistoryType(creator.id, type, enabled)
+                    },
+                    onNotificationTypeChange = { type, enabled ->
+                        viewModel.setCreatorNotificationType(creator.id, type, enabled)
+                    },
                     onOpenChannel = {
                         creatorYouTubeChannelUrl(creator)?.let(uriHandler::openUri)
                     },
@@ -344,43 +376,111 @@ private fun CreatorRow(
     creator: Creator,
     avatarUrl: String?,
     selected: Boolean,
+    settings: AppSettings,
     onSelectedChange: (Boolean) -> Unit,
+    onHistoryTypeChange: (HistoryFilter, Boolean) -> Unit,
+    onNotificationTypeChange: (HistoryFilter, Boolean) -> Unit,
     onOpenChannel: () -> Unit,
 ) {
+    var expanded by rememberSaveable(creator.id) { mutableStateOf(false) }
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(
-                onClick = { onSelectedChange(!selected) },
+                onClick = { expanded = !expanded },
                 onLongClickLabel = "Otwórz kanał w YouTube",
                 onLongClick = onOpenChannel,
             ),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            ProfileImage(
-                url = avatarUrl,
-                creatorName = creator.name,
-                modifier = Modifier.size(48.dp),
-            )
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(start = 12.dp, end = 8.dp),
+        Column {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(creator.name, fontWeight = FontWeight.SemiBold)
-                Text(
-                    text = if (creator.sources.size == 1) {
-                        "1 źródło YouTube"
-                    } else {
-                        "${creator.sources.size} źródła YouTube"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
+                ProfileImage(
+                    url = avatarUrl,
+                    creatorName = creator.name,
+                    modifier = Modifier.size(48.dp),
+                )
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(start = 12.dp, end = 8.dp),
+                ) {
+                    Text(creator.name, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        text = if (expanded) {
+                            "Dotknij kafelka, aby ukryć ustawienia"
+                        } else if (creator.sources.size == 1) {
+                            "1 źródło YouTube"
+                        } else {
+                            "${creator.sources.size} źródła YouTube"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Checkbox(
+                    checked = selected,
+                    onCheckedChange = onSelectedChange,
                 )
             }
-            Checkbox(checked = selected, onCheckedChange = null)
+            AnimatedVisibility(visible = expanded) {
+                Column(
+                    modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    HorizontalDivider()
+                    Text(
+                        "Ustawienia tego twórcy",
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    HistoryFilter.entries.forEach { type ->
+                        CreatorContentTypeSettings(
+                            creatorId = creator.id,
+                            type = type,
+                            settings = settings,
+                            onHistoryChange = { onHistoryTypeChange(type, it) },
+                            onNotificationChange = {
+                                onNotificationTypeChange(type, it)
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CreatorContentTypeSettings(
+    creatorId: String,
+    type: HistoryFilter,
+    settings: AppSettings,
+    onHistoryChange: (Boolean) -> Unit,
+    onNotificationChange: (Boolean) -> Unit,
+) {
+    val globalHistoryEnabled = type in settings.globalHistoryTypes
+    val globalNotificationsEnabled = type in settings.globalNotificationTypes
+    val historyEnabled = settings.isHistoryEnabledFor(creatorId, type)
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(contentTypeLabel(type), style = MaterialTheme.typography.titleSmall)
+        SwitchSetting(
+            title = "Historia",
+            checked = historyEnabled,
+            onCheckedChange = onHistoryChange,
+            enabled = globalHistoryEnabled,
+        )
+        SwitchSetting(
+            title = "Powiadomienia",
+            checked = settings.isNotificationEnabledFor(creatorId, type),
+            onCheckedChange = onNotificationChange,
+            enabled = historyEnabled && globalNotificationsEnabled,
+        )
+        if (!globalHistoryEnabled) {
+            Text(
+                "Wyłączono globalnie w Ustawieniach.",
+                style = MaterialTheme.typography.labelSmall,
+            )
         }
     }
 }
@@ -391,10 +491,19 @@ private fun HistoryScreen(state: AppUiState, viewModel: AppViewModel) {
     val uriHandler = LocalUriHandler.current
     var rangeMenuOpen by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
-    val shouldLoadMore by remember(state.history.size, state.historyHasMore) {
+    val availableHistoryFilters = HistoryFilter.entries.filter {
+        it in state.settings.globalHistoryTypes
+    }
+    val activeHistoryFilters = state.settings.historyFilters
+        .intersect(state.settings.globalHistoryTypes)
+    val shouldLoadMore by remember(
+        state.history.size,
+        state.historyHasMore,
+        activeHistoryFilters,
+    ) {
         derivedStateOf {
             val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-            state.historyHasMore &&
+            activeHistoryFilters.isNotEmpty() && state.historyHasMore &&
                 (state.history.isEmpty() || lastVisible >= state.history.lastIndex - 3)
         }
     }
@@ -434,7 +543,7 @@ private fun HistoryScreen(state: AppUiState, viewModel: AppViewModel) {
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            HistoryFilter.entries.forEach { filter ->
+            availableHistoryFilters.forEach { filter ->
                 FilterChip(
                     selected = filter in state.settings.historyFilters,
                     onClick = {
@@ -470,7 +579,9 @@ private fun HistoryScreen(state: AppUiState, viewModel: AppViewModel) {
                         if (state.selectedCreatorIds.isEmpty()) {
                             "Zaznacz co najmniej jednego twórcę. Historia pokazuje tylko " +
                                 "aktualnie wybrane kanały."
-                        } else if (state.settings.historyFilters.isEmpty()) {
+                        } else if (state.settings.globalHistoryTypes.isEmpty()) {
+                            "Włącz co najmniej jeden rodzaj historii w Ustawieniach."
+                        } else if (activeHistoryFilters.isEmpty()) {
                             "Wybierz co najmniej jeden typ materiału: filmy, streamy lub Shorty."
                         } else {
                             "Brak materiałów z wybranego okresu. " +
@@ -655,10 +766,39 @@ private fun SettingsScreen(
     var intervalMenuOpen by remember { mutableStateOf(false) }
     var clearConfirmationVisible by rememberSaveable { mutableStateOf(false) }
     var thirdPartyNoticesVisible by rememberSaveable { mutableStateOf(false) }
+    var diagnosticState by remember { mutableStateOf(DiagnosticLogStore.state()) }
+    var diagnosticMessage by remember { mutableStateOf<String?>(null) }
+    var dnsTapCount by rememberSaveable { mutableIntStateOf(0) }
+    var lastDnsTapAt by remember { mutableLongStateOf(0L) }
+    val diagnosticScope = rememberCoroutineScope()
+    val diagnosticExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/gzip"),
+    ) { destination ->
+        if (destination != null) {
+            diagnosticScope.launch {
+                val exported = withContext(Dispatchers.IO) {
+                    DiagnosticLogStore.exportTo(destination)
+                }
+                diagnosticMessage = if (exported) {
+                    "Zapisano skompresowany dziennik diagnostyczny."
+                } else {
+                    "Nie udało się zapisać dziennika diagnostycznego."
+                }
+                diagnosticState = DiagnosticLogStore.state()
+            }
+        }
+    }
     val thirdPartyNotices = remember(resources) {
         resources.openRawResource(R.raw.third_party_notices)
             .bufferedReader()
             .use { it.readText() }
+    }
+
+    LaunchedEffect(dnsTapCount, diagnosticState.unlocked) {
+        if (dnsTapCount > 0 && !diagnosticState.unlocked) {
+            delay(DIAGNOSTIC_UNLOCK_SEQUENCE_TIMEOUT_MILLIS)
+            dnsTapCount = 0
+        }
     }
 
     if (clearConfirmationVisible) {
@@ -723,6 +863,9 @@ private fun SettingsScreen(
         }
         item {
             FastHistorySettings(state, viewModel)
+        }
+        item {
+            GlobalContentSettings(state, viewModel)
         }
         item {
             ExactAlarmSettings(
@@ -957,8 +1100,10 @@ private fun SettingsScreen(
                         text = "Automatyczne sprawdzanie używa wyłącznie dokładnego alarmu " +
                             "systemowego i krótkiej usługi pierwszoplanowej. Alarm może " +
                             "obudzić urządzenie w Doze, a następny termin jest zapisywany " +
-                            "zanim rozpocznie się pobieranie. Aplikacja sprawdza do 6 źródeł " +
-                            "równocześnie i ponawia rozległą awarię najwyżej dwa razy. " +
+                            "zanim rozpocznie się pobieranie. Wszystkie wybrane kanały " +
+                            "rozpoczynają sprawdzanie równocześnie, a kosztowna klasyfikacja " +
+                            "pojedynczych filmów ma osobny limit. Rozległa awaria jest " +
+                            "ponawiana najwyżej dwa razy. " +
                             "Minimum harmonogramu to 15 minut.",
                     )
                     TextButton(
@@ -1020,7 +1165,61 @@ private fun SettingsScreen(
             }
         }
         item {
-            PrivacyDnsNote()
+            PrivacyDnsNote(
+                unlockProgress = dnsTapCount,
+                onSecretTap = {
+                    if (!diagnosticState.unlocked) {
+                        val now = SystemClock.elapsedRealtime()
+                        dnsTapCount = if (
+                            lastDnsTapAt > 0L &&
+                            now - lastDnsTapAt <= DIAGNOSTIC_UNLOCK_SEQUENCE_TIMEOUT_MILLIS
+                        ) {
+                            dnsTapCount + 1
+                        } else {
+                            1
+                        }
+                        lastDnsTapAt = now
+                        if (dnsTapCount >= DIAGNOSTIC_UNLOCK_TAPS) {
+                            DiagnosticLogStore.unlock()
+                            diagnosticState = DiagnosticLogStore.state()
+                            diagnosticMessage =
+                                "Odblokowano narzędzia diagnostyczne. Zapis nadal jest wyłączony."
+                            dnsTapCount = 0
+                        }
+                    }
+                },
+            )
+        }
+        if (diagnosticState.unlocked) {
+            item {
+                DiagnosticLogSettings(
+                    state = diagnosticState,
+                    message = diagnosticMessage,
+                    onEnabledChange = { enabled ->
+                        DiagnosticLogStore.setEnabled(enabled)
+                        diagnosticState = DiagnosticLogStore.state()
+                        diagnosticMessage = if (enabled) {
+                            "Rozpoczęto zapisywanie krótkich zdarzeń diagnostycznych."
+                        } else {
+                            "Zatrzymano zapisywanie. Dotychczasowy dziennik zachowano."
+                        }
+                    },
+                    onExport = {
+                        diagnosticExportLauncher.launch(diagnosticExportFileName())
+                    },
+                    onClear = {
+                        DiagnosticLogStore.clear()
+                        diagnosticState = DiagnosticLogStore.state()
+                        diagnosticMessage = "Usunięto zapisany dziennik."
+                    },
+                    onHide = {
+                        DiagnosticLogStore.hide()
+                        diagnosticState = DiagnosticLogStore.state()
+                        diagnosticMessage = null
+                        dnsTapCount = 0
+                    },
+                )
+            }
         }
         item {
             Card(Modifier.fillMaxWidth()) {
@@ -1052,8 +1251,19 @@ private fun SettingsScreen(
 }
 
 @Composable
-private fun PrivacyDnsNote() {
-    Card(Modifier.fillMaxWidth()) {
+private fun PrivacyDnsNote(
+    unlockProgress: Int,
+    onSecretTap: () -> Unit,
+) {
+    Card(
+        Modifier
+            .fillMaxWidth()
+            // Brak clickable/ripple: pierwsze cztery dotknięcia są całkowicie
+            // niewidoczne i karta nie zdradza ukrytej funkcji w semantyce UI.
+            .pointerInput(onSecretTap) {
+                detectTapGestures(onTap = { onSecretTap() })
+            },
+    ) {
         Column(
             modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -1064,6 +1274,126 @@ private fun PrivacyDnsNote() {
                     "94.140.14.14 i 94.140.15.15. Aktywny Prywatny DNS ustawiony w Androidzie " +
                     "ma pierwszeństwo. Przy awarii obu serwerów aplikacja tymczasowo użyje " +
                     "DNS systemowego, aby nie utracić połączenia.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            AnimatedVisibility(
+                visible = unlockProgress in DIAGNOSTIC_VISIBLE_PROGRESS_START until
+                    DIAGNOSTIC_UNLOCK_TAPS,
+            ) {
+                Text(
+                    "Narzędzia diagnostyczne: jeszcze " +
+                        diagnosticRemainingTapsLabel(
+                            DIAGNOSTIC_UNLOCK_TAPS - unlockProgress,
+                        ) + ".",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticLogSettings(
+    state: DiagnosticLogState,
+    message: String?,
+    onEnabledChange: (Boolean) -> Unit,
+    onExport: () -> Unit,
+    onClear: () -> Unit,
+    onHide: () -> Unit,
+) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Diagnostyka", fontWeight = FontWeight.SemiBold)
+            SwitchSetting(
+                title = "Zapisuj dziennik diagnostyczny",
+                checked = state.enabled,
+                onCheckedChange = onEnabledChange,
+            )
+            Text(
+                "Dziennik zapisuje tylko uruchomienia synchronizacji, jej wynik, " +
+                    "problemy harmonogramu, niedostępną sieć oraz krótkie błędy. " +
+                    "Nie zapisuje klucza API, nagłówków autoryzacji, pełnych odpowiedzi " +
+                    "HTTP ani powtarzających się komunikatów HTTP 200.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                "W pamięci telefonu rekordy mają skrócony format binarny i są " +
+                    "kompresowane natywnym DEFLATE na poziomie 9. Eksport jest " +
+                    "czytelnym plikiem tekstowym GZIP.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                "Zapisano: ${formatDiagnosticBytes(state.storedBytes)}; " +
+                    "zdarzenia: ${state.eventCount}",
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Button(
+                onClick = onExport,
+                enabled = state.eventCount > 0,
+            ) {
+                Text("Zapisz skompresowany log")
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = onClear,
+                    enabled = state.eventCount > 0,
+                ) {
+                    Text("Wyczyść")
+                }
+                TextButton(onClick = onHide) {
+                    Text("Wyłącz i ukryj")
+                }
+            }
+            message?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+@Composable
+private fun GlobalContentSettings(state: AppUiState, viewModel: AppViewModel) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("Rodzaje materiałów", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Ustawienia globalne dotyczą wszystkich twórców. Wyłączenie historii " +
+                    "automatycznie wyłącza także powiadomienia danego rodzaju.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            HistoryFilter.entries.forEach { type ->
+                val historyEnabled = type in state.settings.globalHistoryTypes
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(contentTypeLabel(type), fontWeight = FontWeight.SemiBold)
+                    SwitchSetting(
+                        title = "Pokazuj w historii",
+                        checked = historyEnabled,
+                        onCheckedChange = {
+                            viewModel.setGlobalHistoryType(type, it)
+                        },
+                    )
+                    SwitchSetting(
+                        title = "Wysyłaj powiadomienia",
+                        checked = type in state.settings.globalNotificationTypes,
+                        onCheckedChange = {
+                            viewModel.setGlobalNotificationType(type, it)
+                        },
+                        enabled = historyEnabled,
+                    )
+                }
+            }
+            Text(
+                "Wyłączone karty historii nie są pobierane z YouTube Web. RSS jest " +
+                    "wspólnym, małym plikiem kanału, więc może zawierać identyfikatory " +
+                    "różnych rodzajów, ale wyłączone materiały nie są zapisywane ani " +
+                    "zgłaszane.",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -1408,6 +1738,12 @@ private fun historyFilterLabel(filter: HistoryFilter): String = when (filter) {
     HistoryFilter.SHORTS -> "Shorty"
 }
 
+private fun contentTypeLabel(type: HistoryFilter): String = when (type) {
+    HistoryFilter.VIDEOS -> "Filmy"
+    HistoryFilter.STREAMS -> "Streamy"
+    HistoryFilter.SHORTS -> "Shorty"
+}
+
 private fun themeModeLabel(mode: ThemeMode): String = when (mode) {
     ThemeMode.SYSTEM -> "Zgodny z systemem"
     ThemeMode.LIGHT -> "Jasny"
@@ -1438,10 +1774,30 @@ private fun historyRangeLabel(days: Int): String = when (days) {
 private fun formatClock(hour: Int, minute: Int): String =
     String.format(Locale.ROOT, "%02d:%02d", hour, minute)
 
+private fun diagnosticExportFileName(): String =
+    "lewicowYT-diagnostyka-${DIAGNOSTIC_FILE_TIME_FORMAT.format(Instant.now())}.txt.gz"
+
+private fun formatDiagnosticBytes(bytes: Long): String = when {
+    bytes < 1_024L -> "$bytes B"
+    else -> String.format(Locale.ROOT, "%.1f KiB", bytes / 1_024.0)
+}
+
+private fun diagnosticRemainingTapsLabel(remaining: Int): String = when (remaining) {
+    1 -> "1 dotknięcie"
+    else -> "$remaining dotknięcia"
+}
+
 private val HISTORY_RANGES = listOf(7, 14, 21, 30, 60)
 
 private val DATE_FORMATTER = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm")
     .withZone(ZoneId.systemDefault())
+
+private val DIAGNOSTIC_FILE_TIME_FORMAT = DateTimeFormatter.ofPattern("uuuuMMdd-HHmm")
+    .withZone(ZoneId.systemDefault())
+
+private const val DIAGNOSTIC_UNLOCK_TAPS = 9
+private const val DIAGNOSTIC_VISIBLE_PROGRESS_START = 5
+private const val DIAGNOSTIC_UNLOCK_SEQUENCE_TIMEOUT_MILLIS = 3_000L
 
 private fun formatTime(epochMillis: Long): String =
     DATE_FORMATTER.format(Instant.ofEpochMilli(epochMillis))

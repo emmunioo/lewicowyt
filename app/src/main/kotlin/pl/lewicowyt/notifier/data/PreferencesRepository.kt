@@ -32,6 +32,10 @@ data class AppSettings(
     val dailyMinute: Int = 0,
     val historyWindowDays: Int = 14,
     val historyFilters: Set<HistoryFilter> = HistoryFilter.entries.toSet(),
+    val globalHistoryTypes: Set<HistoryFilter> = HistoryFilter.entries.toSet(),
+    val globalNotificationTypes: Set<HistoryFilter> = HistoryFilter.entries.toSet(),
+    val creatorHistoryDisabledTypes: Map<String, Set<HistoryFilter>> = emptyMap(),
+    val creatorNotificationDisabledTypes: Map<String, Set<HistoryFilter>> = emptyMap(),
     val allowMobileData: Boolean = true,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val accentColorArgb: Long = DEFAULT_ACCENT_COLOR_ARGB,
@@ -55,6 +59,12 @@ class PreferencesRepository(private val context: Context) {
         val dailyMinute = intPreferencesKey("daily_minute")
         val historyWindowDays = intPreferencesKey("history_window_days")
         val historyFilters = stringSetPreferencesKey("history_filters")
+        val globalHistoryTypes = stringSetPreferencesKey("global_history_types")
+        val globalNotificationTypes = stringSetPreferencesKey("global_notification_types")
+        val creatorHistoryDisabledTypes =
+            stringSetPreferencesKey("creator_history_disabled_types")
+        val creatorNotificationDisabledTypes =
+            stringSetPreferencesKey("creator_notification_disabled_types")
         val allowMobileData = booleanPreferencesKey("allow_mobile_data")
         val themeMode = stringPreferencesKey("theme_mode")
         val accentColor = longPreferencesKey("accent_color_argb")
@@ -78,6 +88,14 @@ class PreferencesRepository(private val context: Context) {
             val hasStoredApiKey =
                 preferences[Keys.youtubeApiKey].orEmpty().isNotBlank() ||
                     secureApiKeyStore.read().isNotBlank()
+            val globalHistoryTypes = readContentTypes(
+                values = preferences[Keys.globalHistoryTypes],
+                keyExists = preferences.contains(Keys.globalHistoryTypes),
+            )
+            val globalNotificationTypes = readContentTypes(
+                values = preferences[Keys.globalNotificationTypes],
+                keyExists = preferences.contains(Keys.globalNotificationTypes),
+            ).intersect(globalHistoryTypes)
             AppSettings(
                 selectedCreatorIds = preferences[Keys.selectedCreators].orEmpty(),
                 deselectedCreatorAtMillis = decodeDeselectedCreators(
@@ -98,6 +116,14 @@ class PreferencesRepository(private val context: Context) {
                 } else {
                     HistoryFilter.entries.toSet()
                 },
+                globalHistoryTypes = globalHistoryTypes,
+                globalNotificationTypes = globalNotificationTypes,
+                creatorHistoryDisabledTypes = decodeCreatorContentTypes(
+                    preferences[Keys.creatorHistoryDisabledTypes].orEmpty(),
+                ),
+                creatorNotificationDisabledTypes = decodeCreatorContentTypes(
+                    preferences[Keys.creatorNotificationDisabledTypes].orEmpty(),
+                ),
                 allowMobileData = preferences[Keys.allowMobileData] ?: true,
                 themeMode = preferences[Keys.themeMode]
                     ?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() }
@@ -198,6 +224,94 @@ class PreferencesRepository(private val context: Context) {
             }
             if (enabled) updated += filter.name else updated -= filter.name
             preferences[Keys.historyFilters] = updated
+        }
+    }
+
+    suspend fun setGlobalHistoryType(type: HistoryFilter, enabled: Boolean) {
+        context.settingsDataStore.edit { preferences ->
+            val history = storedContentTypes(preferences[Keys.globalHistoryTypes]).toMutableSet()
+            val notifications = storedContentTypes(
+                preferences[Keys.globalNotificationTypes],
+            ).toMutableSet()
+            if (enabled) {
+                history += type
+            } else {
+                history -= type
+                notifications -= type
+            }
+            preferences[Keys.globalHistoryTypes] = history.mapTo(mutableSetOf()) { it.name }
+            preferences[Keys.globalNotificationTypes] =
+                notifications.mapTo(mutableSetOf()) { it.name }
+        }
+    }
+
+    suspend fun setGlobalNotificationType(type: HistoryFilter, enabled: Boolean) {
+        context.settingsDataStore.edit { preferences ->
+            val history = storedContentTypes(preferences[Keys.globalHistoryTypes])
+            val notifications = storedContentTypes(
+                preferences[Keys.globalNotificationTypes],
+            ).toMutableSet()
+            if (enabled && type in history) notifications += type else notifications -= type
+            preferences[Keys.globalNotificationTypes] =
+                notifications.mapTo(mutableSetOf()) { it.name }
+        }
+    }
+
+    suspend fun setCreatorHistoryType(
+        creatorId: String,
+        type: HistoryFilter,
+        enabled: Boolean,
+    ) {
+        context.settingsDataStore.edit { preferences ->
+            val historyDisabled = decodeCreatorContentTypes(
+                preferences[Keys.creatorHistoryDisabledTypes].orEmpty(),
+            ).mapValues { (_, types) -> types.toMutableSet() }.toMutableMap()
+            val notificationsDisabled = decodeCreatorContentTypes(
+                preferences[Keys.creatorNotificationDisabledTypes].orEmpty(),
+            ).mapValues { (_, types) -> types.toMutableSet() }.toMutableMap()
+            updateCreatorDisabledType(historyDisabled, creatorId, type, disabled = !enabled)
+            if (!enabled) {
+                updateCreatorDisabledType(
+                    notificationsDisabled,
+                    creatorId,
+                    type,
+                    disabled = true,
+                )
+            }
+            preferences[Keys.creatorHistoryDisabledTypes] =
+                encodeCreatorContentTypes(historyDisabled)
+            preferences[Keys.creatorNotificationDisabledTypes] =
+                encodeCreatorContentTypes(notificationsDisabled)
+        }
+    }
+
+    suspend fun setCreatorNotificationType(
+        creatorId: String,
+        type: HistoryFilter,
+        enabled: Boolean,
+    ) {
+        context.settingsDataStore.edit { preferences ->
+            val globalHistory = storedContentTypes(preferences[Keys.globalHistoryTypes])
+            val globalNotifications = storedContentTypes(
+                preferences[Keys.globalNotificationTypes],
+            )
+            val historyDisabled = decodeCreatorContentTypes(
+                preferences[Keys.creatorHistoryDisabledTypes].orEmpty(),
+            )
+            val notificationsDisabled = decodeCreatorContentTypes(
+                preferences[Keys.creatorNotificationDisabledTypes].orEmpty(),
+            ).mapValues { (_, types) -> types.toMutableSet() }.toMutableMap()
+            val historyEnabled = type in globalHistory &&
+                type !in historyDisabled[creatorId].orEmpty()
+            val notificationCanBeEnabled = historyEnabled && type in globalNotifications
+            updateCreatorDisabledType(
+                notificationsDisabled,
+                creatorId,
+                type,
+                disabled = !enabled || !notificationCanBeEnabled,
+            )
+            preferences[Keys.creatorNotificationDisabledTypes] =
+                encodeCreatorContentTypes(notificationsDisabled)
         }
     }
 
@@ -312,7 +426,31 @@ class PreferencesRepository(private val context: Context) {
         const val MAX_SYNC_SUMMARY_CHARS = 1_000
 
         fun normalizeHistoryDays(value: Int): Int =
-            if (value in HISTORY_WINDOWS) value else 14
+        if (value in HISTORY_WINDOWS) value else 14
+
+        fun storedContentTypes(values: Set<String>?): Set<HistoryFilter> =
+            if (values == null) {
+                ALL_CONTENT_TYPES
+            } else {
+                values.mapNotNullTo(mutableSetOf()) { value ->
+                    runCatching { HistoryFilter.valueOf(value) }.getOrNull()
+                }
+            }
+
+        fun readContentTypes(values: Set<String>?, keyExists: Boolean): Set<HistoryFilter> =
+            if (keyExists) storedContentTypes(values.orEmpty()) else ALL_CONTENT_TYPES
+
+        fun updateCreatorDisabledType(
+            values: MutableMap<String, MutableSet<HistoryFilter>>,
+            creatorId: String,
+            type: HistoryFilter,
+            disabled: Boolean,
+        ) {
+            if (creatorId.isBlank()) return
+            val types = values.getOrPut(creatorId) { mutableSetOf() }
+            if (disabled) types += type else types -= type
+            if (types.isEmpty()) values -= creatorId
+        }
 
         fun decodeDeselectedCreators(values: Set<String>): Map<String, Long> =
             values.mapNotNull { encoded ->

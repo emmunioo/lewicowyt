@@ -25,15 +25,20 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import pl.lewicowyt.notifier.AppGraph
+import pl.lewicowyt.notifier.AppLog
 import pl.lewicowyt.notifier.BuildConfig
 import pl.lewicowyt.notifier.data.AppSettings
 import pl.lewicowyt.notifier.data.ThemeMode
+import pl.lewicowyt.notifier.data.isHistoryEnabledFor
+import pl.lewicowyt.notifier.data.isNotificationEnabledFor
 import pl.lewicowyt.notifier.images.JxlImageCache
 import pl.lewicowyt.notifier.model.Creator
 import pl.lewicowyt.notifier.model.HistoryFilter
 import pl.lewicowyt.notifier.model.HistoryItem
 import pl.lewicowyt.notifier.model.VideoKind
 import pl.lewicowyt.notifier.network.YouTubeApiKeyValidation
+import pl.lewicowyt.notifier.network.normalizeYouTubeAvatarUrl
+import pl.lewicowyt.notifier.images.BundledAvatarStore
 import pl.lewicowyt.notifier.updates.AvailableUpdate
 import pl.lewicowyt.notifier.updates.UpdateCheckResult
 
@@ -107,7 +112,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val query = MutableStateFlow("")
     private val history = MutableStateFlow<List<HistoryItem>>(emptyList())
     private val notificationInbox = MutableStateFlow<List<HistoryItem>>(emptyList())
-    private val avatars = MutableStateFlow(graph.database.getCreatorAvatars())
+    private val storedAvatarSnapshot = graph.database.getCreatorAvatars()
+    private val avatars = MutableStateFlow(
+        storedAvatarSnapshot.normalizedAvatarUrls(),
+    )
+    private val legacyAvatarIdsToRefresh =
+        storedAvatarSnapshot.keys - avatars.value.keys
     private val refreshing = MutableStateFlow(false)
     private val actionMessage = MutableStateFlow<String?>(null)
     private val apiKeyStatus = MutableStateFlow<ApiKeyUiState>(ApiKeyUiState.Idle)
@@ -188,11 +198,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val normalized = contentState.query.trim().lowercase(POLISH_LOCALE)
         val cutoff = System.currentTimeMillis() -
             contentState.settings.historyWindowDays.toLong() * DAY_MILLIS
+        val activeHistoryFilters = contentState.settings.historyFilters
+            .intersect(contentState.settings.globalHistoryTypes)
         val filteredHistory = contentState.history
             .asSequence()
             .filter { it.publishedAtMillis >= cutoff }
             .filter { it.creatorId in contentState.settings.selectedCreatorIds }
-            .filter { it.matches(contentState.settings.historyFilters) }
+            .filter {
+                contentState.settings.isHistoryEnabledFor(it.creatorId, it.kind)
+            }
+            .filter { it.matches(activeHistoryFilters) }
             .sortedWith(
                 compareByDescending<HistoryItem> { it.publishedAtMillis }
                     .thenByDescending { it.detectedAtMillis },
@@ -207,15 +222,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             creatorAvatars = contentState.avatars,
             settings = contentState.settings,
             history = filteredHistory.take(contentState.historyLimit),
-            notifications = contentState.notifications,
+            notifications = contentState.notifications.filter {
+                it.creatorId in contentState.settings.selectedCreatorIds &&
+                    contentState.settings.isNotificationEnabledFor(it.creatorId, it.kind)
+            },
             query = contentState.query,
             isRefreshing = isRefreshing,
             actionMessage = message,
             apiKeyState = contentState.apiKeyState,
             updateState = currentUpdateState,
             historyHasMore =
-                filteredHistory.size > contentState.historyLimit ||
-                    (!loadState.endReached && loadState.error == null),
+                activeHistoryFilters.isNotEmpty() &&
+                    (filteredHistory.size > contentState.historyLimit ||
+                        (!loadState.endReached && loadState.error == null)),
             isLoadingHistory = loadState.isLoading,
             historyLoadError = loadState.error,
             notificationNavigationRequest = contentState.notificationNavigationRequest,
@@ -232,6 +251,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         refreshHistory()
+        if (legacyAvatarIdsToRefresh.isNotEmpty()) {
+            viewModelScope.launch {
+                refreshMissingAvatars(legacyAvatarIdsToRefresh)
+            }
+        }
     }
 
     fun setQuery(value: String) {
@@ -282,7 +306,42 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun setHistoryFilter(filter: HistoryFilter, enabled: Boolean) {
         viewModelScope.launch {
             graph.preferences.setHistoryFilter(filter, enabled)
+            // Wszystkie trzy karty kanału są pobierane niezależnie od filtra,
+            // więc zmiana widoku nie może kasować postępu sieciowego. Zerujemy
+            // tylko stronicowanie ekranu; rozpoczęty backfill zostanie wznowiony.
+            resetHistoryPaging(resetBackfill = false)
+        }
+    }
+
+    fun setGlobalHistoryType(type: HistoryFilter, enabled: Boolean) {
+        viewModelScope.launch {
+            graph.preferences.setGlobalHistoryType(type, enabled)
+            graph.scheduler.schedule(graph.preferences.current())
             resetHistoryPaging()
+        }
+    }
+
+    fun setGlobalNotificationType(type: HistoryFilter, enabled: Boolean) {
+        viewModelScope.launch {
+            graph.preferences.setGlobalNotificationType(type, enabled)
+        }
+    }
+
+    fun setCreatorHistoryType(creatorId: String, type: HistoryFilter, enabled: Boolean) {
+        viewModelScope.launch {
+            graph.preferences.setCreatorHistoryType(creatorId, type, enabled)
+            graph.scheduler.schedule(graph.preferences.current())
+            resetHistoryPaging()
+        }
+    }
+
+    fun setCreatorNotificationType(
+        creatorId: String,
+        type: HistoryFilter,
+        enabled: Boolean,
+    ) {
+        viewModelScope.launch {
+            graph.preferences.setCreatorNotificationType(creatorId, type, enabled)
         }
     }
 
@@ -385,8 +444,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }.trimEnd()
                 refreshHistoryNow()
-                avatars.value = graph.database.getCreatorAvatars()
+                avatars.value = graph.database.getCreatorAvatars().normalizedAvatarUrls()
             } catch (error: Exception) {
+                AppLog.error(
+                    "ManualSync",
+                    "Ręcznie uruchomiona synchronizacja nie została ukończona",
+                    error,
+                )
                 actionMessage.value =
                     "Synchronizacja nie powiodła się: " +
                         error.displayMessage()
@@ -461,10 +525,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 historyLimit.value += HISTORY_PAGE_SIZE
                 val settings = graph.preferences.current()
+                val activeHistoryFilters = settings.historyFilters
+                    .intersect(settings.globalHistoryTypes)
+                if (activeHistoryFilters.isEmpty()) {
+                    historyEndReached.value = true
+                    return@launch
+                }
                 val availableCount = history.value.count {
                     it.isInWindow(settings.historyWindowDays) &&
                         it.creatorId in settings.selectedCreatorIds &&
-                        it.matches(settings.historyFilters)
+                        settings.isHistoryEnabledFor(it.creatorId, it.kind) &&
+                        it.matches(activeHistoryFilters)
                 }
                 if (
                     availableCount <= historyLimit.value + HISTORY_PREFETCH_DISTANCE &&
@@ -481,7 +552,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             "Nie udało się pobrać dalszej historii: ${result.error}"
                     }
                     refreshHistoryNow()
-                    avatars.value = graph.database.getCreatorAvatars()
+                    avatars.value = graph.database.getCreatorAvatars().normalizedAvatarUrls()
                 }
             } finally {
                 loadingHistory.value = false
@@ -552,7 +623,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         graph.preferences.removeDeselectionRecords(expiredCreatorIds)
     }
 
-    private suspend fun resetHistoryPaging() {
+    private suspend fun resetHistoryPaging(resetBackfill: Boolean = true) {
         historyLoadJob?.cancelAndJoin()
         historyLoadJob = null
         loadingHistory.value = true
@@ -560,7 +631,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         historyEndReached.value = false
         historyLoadError.value = null
         try {
-            graph.historyBackfill.reset()
+            if (resetBackfill) graph.historyBackfill.reset()
         } finally {
             loadingHistory.value = false
         }
@@ -592,11 +663,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun HistoryItem.matches(filters: Set<HistoryFilter>): Boolean = when (kind) {
-        VideoKind.VIDEO, VideoKind.UNKNOWN -> HistoryFilter.VIDEOS in filters
+        VideoKind.VIDEO -> HistoryFilter.VIDEOS in filters
         VideoKind.LIVE,
         VideoKind.UPCOMING,
         VideoKind.STREAM_ARCHIVE -> HistoryFilter.STREAMS in filters
         VideoKind.SHORT -> HistoryFilter.SHORTS in filters
+        // Brak rozstrzygającego dowodu oznacza dalszą klasyfikację w tle,
+        // a nie domyślne wrzucenie materiału do zakładki Filmy.
+        VideoKind.UNKNOWN -> false
     }
 
     private fun HistoryItem.isInWindow(days: Int): Boolean =
@@ -611,6 +685,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
 private fun Throwable.displayMessage(): String =
     (message ?: javaClass.simpleName).take(MAX_VISIBLE_ERROR_CHARS)
+
+private fun Map<String, String>.normalizedAvatarUrls(): Map<String, String> =
+    mapNotNull { (creatorId, url) ->
+        when {
+            BundledAvatarStore.isBundledAvatarUrl(url) -> creatorId to url
+            else -> normalizeYouTubeAvatarUrl(url)?.let { creatorId to it }
+        }
+    }.toMap()
 
 private val MANUAL_UPDATE_CHECK_INTERVAL_MILLIS = TimeUnit.MINUTES.toMillis(15)
 private const val CACHED_CHECK_INDICATOR_MILLIS = 550L

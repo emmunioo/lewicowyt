@@ -1,0 +1,255 @@
+{
+    "schemaVersion":  1,
+    "generatedAtMillis":  1785599123730,
+    "imageWidth":  176,
+    "imageHeight":  176,
+    "jxlQuality":  69,
+    "jxlEffort":  10,
+    "avatars":  [
+                    {
+                        "creatorId":  "co-to-bedzie",
+                        "fileName":  "co-to-bedzie.jxl",
+                        "sha256":  "6dba2de812b4df403816d03ebde664c8fdc52e1ccb3be8c8c0c96bd9479df500"
+                    },
+                    {
+                        "creatorId":  "ralindel",
+                        "fileName":  "ralindel.jxl",
+                        "sha256":  "bf12a3633af3732c114de94230b0c843d30486c51a52b1f38b2064d5cc6722ec"
+                    },
+                    {
+                        "creatorId":  "myslec-glebiej",
+                        "fileName":  "myslec-glebiej.jxl",
+                        "sha256":  "77117116d1a8a1676163f173d28578d05b694122b281a9aace4d0390bbcd41e9"
+                    },
+                    {
+                        "creatorId":  "synmojegotaty",
+                        "fileName":  "synmojegotaty.jxl",
+                        "sha256":  "e3c1991aa954b61bc1e692e0c2ffe2f4fc17be26d3ed47f520a0392451704b4d"
+                    },
+                    {
+                        "creatorId":  "gilotyna-tv",
+                        "fileName":  "gilotyna-tv.jxl",
+                        "sha256":  "af0e1308f87de8cbded2ee14b4a51cd4c2a1568985b6ceb220c8c69b778660bb"
+                    },
+                    {
+                        "creatorId":  "nazwex",
+                        "fileName":  "nazwex.jxl",
+                        "sha256":  "a2e8523a9c7d663683ef8a9caec403f08360567f698dabeb0263d6316aa4d979"
+                    },
+                    {
+                        "creatorId":  "podami",
+                        "fileName":  "podami.jxl",
+                        "sha256":  "bd097c38a54e3b4c0c55bef4b77a2b7eb00906bd5b80eda824bf463f714a4c41"
+                    },
+                    {
+                        "creatorId":  "kemporium",
+                        "fileName":  "kemporium.jxl",
+                        "sha256":  "723532a61f91168ecc06f4dd0f1ae3eddb26a337360cccc2141de609969116e2"
+                    },
+                    {
+                        "creatorId":  "krytyka-polityczna",
+                        "fileName":  "krytyka-polityczna.jxl",
+                        "sha256":  "d535ddd56ef10e7d2740871f291c33f20014fc28474ac3ac7dd5117c99d2f259"
+                    },
+                    {
+                        "creatorId":  "holizm-jakub-zynis",
+                        "fileName":  "holizm-jakub-zynis.jxl",
+                        "sha256":  "fbac236ee094abef28ed8e93dba7aeb61f3b9af4b4f11294fafa186ef66f7158"
+                    },
+                    {
+                        "creatorId":  "lukasz-stelmach",
+                        "fileName":  "lukasz-stelmach.jxl",
+                        "sha256":  "51adacb0701623569d65dd2b2675c6ed8efb4ad0526c95dd442b5f82fe7fc6ad"
+                    },
+                    {
+                        "creatorId":  "kasia-babis-babis-media-live",
+                        "fileName":  "kasia-babis-babis-media-live.jxl",
+                        "sha256":  "85314b5d3ab75f377ea8aa710ba26ae40f7a6ebd17764fb2028e1147b1cee6d5"
+                    },
+                    {
+                        "creatorId":  "doma-gorajek",
+                        "fileName":  "doma-gorajek.jxl",
+                        "sha256":  "5c2d6462fc754f7f6b631dee41dc42fe8b20098403e9f6ad8ab5bfe72c5fda02"
+                    },
+                    {
+                        "creatorId":  "romb",
+                        "fileName":  "romb.jxl",
+                        "sha256":  "8f188c2338a965970aeda3cac1c503d4b29f7e14433314733e72960e4794ac83"
+                    },
+                    {
+                        "creatorId":  "lewy-interes",
+                        "fileName":  "lewy-interes.jxl",
+                        "sha256":  "a66709386d907a143c2e65f268d9d4ea16e15bf93fe34e7242b317be963ade4c"
+                    },
+                    {
+                        "creatorId":  "czytu-czytu",
+                        "fileName":  "czytu-czytu.jxl",
+                        "sha256":  "1bc7c777c42bde428633fcabae56a646b67ba6b0ed3146c42dea650e34668d20"
+                    },
+                    {
+                        "creatorId":  "michalina-kobla",
+                        "fileName":  "michalina-kobla.jxl",
+                        "sha256":  "5fa828ac123b796f31ca049d9928a7ae5071834f6b3c128603598732db544c29"
+                    },
+                    {
+                        "creatorId":  "ania-gemma",
+                        "fileName":  "ania-gemma.jxl",
+                        "sha256":  "1e156dc5327c97e99cbd933b54c2123b09f6edf957c48c31722dcd3a46dc02c3"
+                    },
+                    {
+                        "creatorId":  "pojecia-przy-pracy",
+                        "fileName":  "pojecia-przy-pracy.jxl",
+                        "sha256":  "7eadaa6a8342c3f688152efe3c4f413d987a40191cd1bde908720f5f83187f27"
+                    },
+                    {
+                        "creatorId":  "mistycyzm-popkulturowy",
+                        "fileName":  "mistycyzm-popkulturowy.jxl",
+                        "sha256":  "c3319b42fe51d5c5a918af0a7b07a1613aac23261a9e19e1dfbf07df7d2de6f7"
+                    },
+                    {
+                        "creatorId":  "orestes-kowalski",
+                        "fileName":  "orestes-kowalski.jxl",
+                        "sha256":  "b4f460eb3c703c3c78cbd9bb0710d937d72ba95bc391681fd07084d191143d6d"
+                    },
+                    {
+                        "creatorId":  "domowy-survival",
+                        "fileName":  "domowy-survival.jxl",
+                        "sha256":  "fc3471ef1a7ee3b7bd75926e42bb80e227e87984bc9a53d1e3be4801adb2d963"
+                    },
+                    {
+                        "creatorId":  "jak-dziala-system",
+                        "fileName":  "jak-dziala-system.jxl",
+                        "sha256":  "0d8aa0596f43e0150f4b1522a41db06a745dfaa08ca10cb1063b462518dd6f7d"
+                    },
+                    {
+                        "creatorId":  "stronnictwo-popularow",
+                        "fileName":  "stronnictwo-popularow.jxl",
+                        "sha256":  "8be16e14bb1c13238ee321b90c34595fcc209993887e7653cc1d13bb2b7ed523"
+                    },
+                    {
+                        "creatorId":  "michal-idasiak",
+                        "fileName":  "michal-idasiak.jxl",
+                        "sha256":  "e019dd786cab654ac92e544910ad98453a42f258ccb7664d395d9ab3c6f1e4a1"
+                    },
+                    {
+                        "creatorId":  "kolektyw-filmowy",
+                        "fileName":  "kolektyw-filmowy.jxl",
+                        "sha256":  "a364afe5f53741bf353668cadd90b5d6b354f09a72829b2849854f256ef68d93"
+                    },
+                    {
+                        "creatorId":  "kawka-z-kaffka",
+                        "fileName":  "kawka-z-kaffka.jxl",
+                        "sha256":  "ac73410fa1bfdd11969df9fdbb6d1f029fb8507a8006b030a052fb95f177d37a"
+                    },
+                    {
+                        "creatorId":  "pro-publico-bono",
+                        "fileName":  "pro-publico-bono.jxl",
+                        "sha256":  "0366cc677877e19cfe0275a80215e2b7f8d7be6f7be8cb39d922206471e15836"
+                    },
+                    {
+                        "creatorId":  "transgrysy",
+                        "fileName":  "transgrysy.jxl",
+                        "sha256":  "ec158602db9d7ffcb95442db9eaffc5b0feca49499252329696a2ba4e3f52c1d"
+                    },
+                    {
+                        "creatorId":  "kryspin-sobczak",
+                        "fileName":  "kryspin-sobczak.jxl",
+                        "sha256":  "9c3ec9b7b6fdc0bd1aa28a1c69f6467d1eed80818d1e1fe49e702217ad5c15cd"
+                    },
+                    {
+                        "creatorId":  "czaban-robi-raban",
+                        "fileName":  "czaban-robi-raban.jxl",
+                        "sha256":  "29e77cdcb475cb4bb150e3aa06bf3eac31990997150e95095169adaa08cf3529"
+                    },
+                    {
+                        "creatorId":  "podcastex",
+                        "fileName":  "podcastex.jxl",
+                        "sha256":  "bed38f8fdaf19ddb529f604d010929572d41c992c2664b11cfedb86129426063"
+                    },
+                    {
+                        "creatorId":  "program-polityczny",
+                        "fileName":  "program-polityczny.jxl",
+                        "sha256":  "f70aabca90755eb06c83fa80d9ebf3fbd95bb721e91830e5117de4371610e396"
+                    },
+                    {
+                        "creatorId":  "dem3000",
+                        "fileName":  "dem3000.jxl",
+                        "sha256":  "df14a8c433248c1f17d35c60127bdbf157afd17fee2dd15f0cb1e51097da92d2"
+                    },
+                    {
+                        "creatorId":  "lekcjareligii-pl-janusz-omylinski",
+                        "fileName":  "lekcjareligii-pl-janusz-omylinski.jxl",
+                        "sha256":  "607fd0c1431de92c2bb81b7b629671f6fe9f49f371d5e1789700594fe69aeb98"
+                    },
+                    {
+                        "creatorId":  "pitau",
+                        "fileName":  "pitau.jxl",
+                        "sha256":  "1021e192526957376189c29721cd44515a459aebc86784a046e145e886b56a5c"
+                    },
+                    {
+                        "creatorId":  "emilia-kordas",
+                        "fileName":  "emilia-kordas.jxl",
+                        "sha256":  "725352fc47ce86369a5504f05c7cc1c600463e1350b8afb11946a64c45ec5e1c"
+                    },
+                    {
+                        "creatorId":  "kinocentryk",
+                        "fileName":  "kinocentryk.jxl",
+                        "sha256":  "977f9a30fda7c29524e7b8b1019909c82d35092e598e6207ecd652cb7683cb83"
+                    },
+                    {
+                        "creatorId":  "lukasz-malinowski",
+                        "fileName":  "lukasz-malinowski.jxl",
+                        "sha256":  "f9055dc62eccde483bd09f81a6859cd9fed9c781b3fc372aec934330408d8be2"
+                    },
+                    {
+                        "creatorId":  "pan-od-filozofii",
+                        "fileName":  "pan-od-filozofii.jxl",
+                        "sha256":  "20cae23041ba4b9bdce4974de991a6ac607fbf3002db23a9060e5073306fc830"
+                    },
+                    {
+                        "creatorId":  "mao-powiedziane",
+                        "fileName":  "mao-powiedziane.jxl",
+                        "sha256":  "bb45f8e8a9e3423579cfe708902795f25d2570513dd20c9251ae9e668f09ce4b"
+                    },
+                    {
+                        "creatorId":  "farma-rzepy",
+                        "fileName":  "farma-rzepy.jxl",
+                        "sha256":  "2fe474e4d285f21e85a7485453379ca08bfc1a80fdde6077361796924c3bbc1e"
+                    },
+                    {
+                        "creatorId":  "neomysliciele",
+                        "fileName":  "neomysliciele.jxl",
+                        "sha256":  "095ea4a15c07f3572be333ca2dcb3d9e561c78ec632ce332be4c2b56944e49fb"
+                    },
+                    {
+                        "creatorId":  "czerwony-front",
+                        "fileName":  "czerwony-front.jxl",
+                        "sha256":  "24d4c78aa4875740c3f882d9bcaf996b3af16a71a8e84020828ebad40b5e7125"
+                    },
+                    {
+                        "creatorId":  "pozjadane",
+                        "fileName":  "pozjadane.jxl",
+                        "sha256":  "7223fd17db8cb11527f9daab67d1f57bfc71644c33be6292a10944f5e8752e0c"
+                    },
+                    {
+                        "creatorId":  "ezekiel",
+                        "fileName":  "ezekiel.jxl",
+                        "sha256":  "796ceb26aa8b6ddf689a8b0fb2afaf7c9be392c8053ce6bc3d846036006ba716"
+                    },
+                    {
+                        "creatorId":  "fiat-money",
+                        "fileName":  "fiat-money.jxl",
+                        "sha256":  "0ff15759363965bc5087a84d9b4bfb8020c9ddd42d60e6572a4c5f3268fb23b7"
+                    },
+                    {
+                        "creatorId":  "transmisje-krytyczne",
+                        "fileName":  "transmisje-krytyczne.jxl",
+                        "sha256":  "0e89d3215a5dc5ce613ad7d2a56269eda7cdb9bc940a12d0ef7dd4c8f362a156"
+                    },
+                    {
+                        "creatorId":  "remigiusz-cetnar",
+                        "fileName":  "remigiusz-cetnar.jxl",
+                        "sha256":  "75a3781fcfb7d843e11ff000663e9eabe0d0e64d633ce8211e7872b176da2810"
+                    }
+                ]
+}

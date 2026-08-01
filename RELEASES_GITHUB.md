@@ -15,7 +15,7 @@ https://api.github.com/repos/emmunioo/lewicowyt/releases?per_page=100
 ```
 
 Pomija szkice, używa porównania wersji zbliżonego do SemVer i obsługuje wersje
-wstępne, np. `1.4-beta`, `1.4-beta.2` oraz `1.4-rc.1`. Dzięki temu wydanie beta
+wstępne, np. `1.5-beta`, `1.5-beta.2` oraz `1.5-rc.1`. Dzięki temu wydanie beta
 może wykryć kolejną betę, a później wydanie stabilne.
 
 Automatyczna kontrola odbywa się razem ze sprawdzaniem YouTube, najwyżej raz na
@@ -47,16 +47,16 @@ zainstalowanemu `versionName`, aplikacja uznaje wersję za wycofaną. Wtedy:
    w systemie.
 
 Nie wolno po prostu wskazać dawnego APK z niższym `versionCode`, ponieważ Android
-zablokuje downgrade. Aby wycofać przykładową wersję `1.4-beta` z
-`versionCode = 14`:
+zablokuje downgrade. Aby wycofać przykładową wersję `1.5-beta` z
+`versionCode = 15`:
 
 1. przywróć kod ostatniej bezpiecznej wersji;
-2. ustaw nowy `versionName`, np. `1.3-security-rollback.1`;
-3. ustaw `versionCode` większy od 14, np. `15`;
+2. ustaw nowy `versionName`, np. `1.4-security-rollback.1`;
+3. ustaw `versionCode` większy od 15, np. `16`;
 4. podpisz APK tym samym kluczem;
 5. opublikuj go jako osobne wydanie z identycznym tagiem
-   `v1.3-security-rollback.1`;
-6. dopiero po sprawdzeniu awaryjnego APK usuń wydanie `v1.4-beta`.
+   `v1.4-security-rollback.1`;
+6. dopiero po sprawdzeniu awaryjnego APK usuń wydanie `v1.5-beta`.
 
 Usunięcie wydania jest zdalnym sygnałem bezpieczeństwa, dlatego nie należy robić
 tego tylko w celu porządkowania listy Releases.
@@ -70,7 +70,7 @@ Przed pierwszym wysłaniem wykonaj w głównym folderze projektu:
 git init
 git add .
 git status
-git commit -m "Wydanie 1.4-beta"
+git commit -m "Wydanie 1.5-beta"
 git branch -M main
 git remote add origin https://github.com/emmunioo/lewicowyt.git
 git push -u origin main
@@ -132,8 +132,8 @@ oraz w osobnej, zaszyfrowanej kopii awaryjnej.
 Plik `app/build.gradle.kts` powinien zawierać:
 
 ```kotlin
-versionCode = 14
-versionName = "1.4-beta"
+versionCode = 15
+versionName = "1.5-beta"
 ```
 
 Każda kolejna publikacja musi zwiększyć `versionCode`, nawet jeśli zmienia się
@@ -161,8 +161,8 @@ nie plikiem przeznaczonym do publikacji.
 W Android Studio użyj `Build → Analyze APK` i sprawdź:
 
 - nazwę pakietu `pl.lewicowyt.notifier`;
-- `versionName` równe `1.4-beta`;
-- `versionCode` równe `14`;
+- `versionName` równe `1.5-beta`;
+- `versionCode` równe `15`;
 - brak klucza YouTube API, haseł i pliku klucza podpisu.
 
 Jeżeli przekazujesz APK do MobSF lub innego skanera, wybierz podpisany wariant
@@ -174,58 +174,59 @@ problemy wysokiego poziomu.
 Podpis można zweryfikować narzędziem z Android SDK:
 
 ```powershell
-apksigner verify --verbose --print-certs .\lewicowYT-1.4-beta.apk
+apksigner verify --verbose --print-certs .\lewicowYT-1.5-beta.apk
 ```
 
 Zapisz również sumę kontrolną:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\lewicowYT-1.4-beta.apk
+Get-FileHash -Algorithm SHA256 .\lewicowYT-1.5-beta.apk
 ```
 
-## Publikowanie wersji 1.4-beta
+## Publikowanie wersji 1.5-beta
 
 1. Poczekaj, aż kontrole GitHub Actions zakończą się powodzeniem.
 2. W repozytorium otwórz `Releases → Draft a new release`.
 3. Utwórz tag:
 
 ```text
-v1.4-beta
+v1.5-beta
 ```
 
 4. Zaznacz wydanie jako **pre-release**.
 5. Dołącz dokładnie jeden podpisany APK, np.:
 
 ```text
-lewicowYT-1.4-beta.apk
+lewicowYT-1.5-beta.apk
 ```
 
 6. W opisie podaj SHA-256 APK oraz najważniejsze znane ograniczenia.
 7. Opublikuj wydanie i sprawdź w aplikacji przycisk `Sprawdź aktualizacje`.
 
-### Zakres zmian 1.4-beta
+### Zakres zmian 1.5-beta
 
-Opis istniejącego wydania GitHub można edytować również po opublikowaniu APK.
-W informacji o wersji 1.4-beta należy uwzględnić:
+W informacji o wersji 1.5-beta należy uwzględnić:
 
-- automatyczne sprawdzanie aktualizacji wraz z synchronizacją YouTube, nie
-  częściej niż raz na 2 godziny, oraz przełącznik zwykłych automatycznych
-  aktualizacji w ustawieniach;
-- pobieranie APK do prywatnej pamięci aplikacji bez przechodzenia do
-  przeglądarki oraz przekazanie go systemowemu instalatorowi Androida;
-- weryfikację HTTPS, rozmiaru, SHA-256, pakietu, certyfikatu podpisującego,
-  `versionName` i rosnącego `versionCode`;
-- wykrywanie usunięcia bieżącego wydania i obsługę obowiązkowej aktualizacji
-  bezpieczeństwa albo przygotowanego rollbacku;
-- poprawki przypisania identyfikatorów kanałów i ochronę przed przypisaniem
-  materiału obcego kanału do obserwowanego twórcy;
-- stabilniejsze doczytywanie historii YouTube Web, obsługę aktualnych kafelków,
-  poprawne zakończenie powtarzającego się kursora oraz weryfikację wybranej
-  karty kanału;
-- poprawiony podział filmów, Shortów i transmisji oraz zachowanie istniejącego
-  typu wpisu, gdy ponowna klasyfikacja chwilowo się nie powiedzie;
-- pozostawienie YouTube Data API jako opcjonalnego trybu zwiększonej
-  stabilności i szybkości długiej historii.
+- globalne i indywidualne ustawienia historii oraz powiadomień osobno dla
+  filmów, streamów i Shortów;
+- ukrywanie globalnie wyłączonych filtrów i pomijanie wyłączonych kart Web;
+- nową obsługę kafelka twórcy: checkbox wyboru, rozwijane ustawienia i długie
+  przytrzymanie otwierające kanał;
+- RSS-first, pięć równoległych kanałów historii i etapy po 14 dni w kolejności
+  Filmy, Shorty, Streamy;
+- poprawione daty, kursory, rozpoznawanie kart i klasyfikację zgodną między
+  Data API oraz YouTube Web;
+- wykrywanie powiadomień bez API przez różnicę stabilnych identyfikatorów RSS;
+- sześć równoległych źródeł synchronizacji i lokalną adaptacyjną kolejność;
+- tekstowy, ograniczony klient YouTube Web bez pobierania obrazów i zasobów
+  strony;
+- współdzielenie identycznych miniatur po SHA-256 oraz zachowanie JXL przy
+  aktualizacji;
+- dołączone awatary 176×176 JXL i cotygodniową kontrolę ich SHA-256;
+- rozszerzone zabezpieczenia, migracje bazy i testy regresji;
+- pominięte w poprzednim skrócie 1.4-beta poprawki aktualizatora: kontrolę
+  wydań co 2 godziny, prywatne pobieranie APK, pełną walidację pliku,
+  obowiązkowe wydanie bezpieczeństwa i 15-minutowy cache ręcznego sprawdzenia.
 
 Android nie pozwala zwykłej aplikacji zatwierdzić instalacji bez działania
 użytkownika. „Automatyczna aktualizacja” oznacza automatyczne wykrycie,
@@ -236,10 +237,10 @@ pobranie i sprawdzenie APK; końcową instalację zatwierdza użytkownik.
 Przykładowa kolejność:
 
 ```text
-1.4-beta
-1.4-beta.2
-1.4-rc.1
-1.4
+1.5-beta
+1.5-beta.2
+1.5-rc.1
+1.5
 ```
 
 Dla każdego wydania zwiększ `versionCode`, podpisz APK tym samym kluczem i użyj

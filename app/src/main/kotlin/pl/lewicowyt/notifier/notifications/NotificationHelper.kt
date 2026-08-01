@@ -136,7 +136,8 @@ class NotificationHelper(
             VideoKind.UPCOMING -> "Zaplanowana transmisja: ${candidate.creator.name}"
             VideoKind.STREAM_ARCHIVE -> "Nowy zapis transmisji: ${candidate.creator.name}"
             VideoKind.SHORT -> "Nowy Short: ${candidate.creator.name}"
-            VideoKind.VIDEO, VideoKind.UNKNOWN -> "Nowy film: ${candidate.creator.name}"
+            VideoKind.VIDEO -> "Nowy film: ${candidate.creator.name}"
+            VideoKind.UNKNOWN -> "Nowy materiał: ${candidate.creator.name}"
         }
         val thumbnail = try {
             loadThumbnail(candidate.entry.id)

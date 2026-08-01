@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import pl.lewicowyt.notifier.AppGraph
+import pl.lewicowyt.notifier.data.hasEnabledContentForSelectedCreators
 
 class ReliableSyncAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -25,7 +26,7 @@ class ReliableSyncAlarmReceiver : BroadcastReceiver() {
                 retrySettings = settings
 
                 if (
-                    settings.selectedCreatorIds.isEmpty() ||
+                    !settings.hasEnabledContentForSelectedCreators() ||
                     !AppGraph.scheduler.hasExactAlarmAccess()
                 ) {
                     return@launch

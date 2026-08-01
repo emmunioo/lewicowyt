@@ -46,6 +46,7 @@ class HttpTextClient(
                     safeUrl = targetUrl.safeDescription(),
                 )
             }
+            rejectBinaryResponse(response.body.contentType()?.toString())
             readLimited(response.body.charStream(), maxChars)
         }
     }
@@ -58,6 +59,7 @@ class HttpTextClient(
     ): String {
         val targetUrl = requireHttpsUrl(url)
         val request = commonRequestBuilder(targetUrl, headers)
+            .header("Accept", JSON_RESPONSE_ACCEPT)
             .post(json.toRequestBody(JSON_MEDIA_TYPE))
             .build()
         val client = baseClient.newBuilder()
@@ -73,12 +75,19 @@ class HttpTextClient(
                     safeUrl = targetUrl.safeDescription(),
                 )
             }
+            rejectBinaryResponse(response.body.contentType()?.toString())
             readLimited(response.body.charStream(), maxChars)
         }
     }
 
     private fun readErrorBody(reader: Reader): String =
         runCatching { readLimited(reader, MAX_ERROR_BODY_CHARS) }.getOrDefault("")
+
+    private fun rejectBinaryResponse(contentType: String?) {
+        if (!isAllowedTextResponseMime(contentType)) {
+            throw IOException("Serwer zwrócił dane binarne zamiast metadanych tekstowych")
+        }
+    }
 
     private fun commonRequestBuilder(
         targetUrl: HttpUrl,
@@ -91,6 +100,7 @@ class HttpTextClient(
                 "Chrome/136 Safari/537.36 lewicowYT/${BuildConfig.VERSION_NAME}",
         )
         .header("Accept-Language", "pl-PL,pl;q=0.9,en;q=0.5")
+        .header("Accept", TEXT_RESPONSE_ACCEPT)
         .apply {
             if (targetUrl.host.isYouTubeHost()) {
                 header("Cookie", YOUTUBE_PRIVACY_COOKIE)
@@ -137,10 +147,26 @@ class HttpTextClient(
     private companion object {
         const val MAX_ERROR_BODY_CHARS = 64_000
         val JSON_MEDIA_TYPE = "application/json; charset=UTF-8".toMediaType()
+        const val JSON_RESPONSE_ACCEPT = "application/json"
+        const val TEXT_RESPONSE_ACCEPT =
+            "application/json,text/html,application/xhtml+xml," +
+                "application/xml,text/xml,application/atom+xml,application/rss+xml;q=0.9"
 
         // Stan zgody bez personalizacji. Zapobiega zwracaniu strony consent.youtube.com
         // zamiast publicznej strony kanału w krajach EOG.
         const val YOUTUBE_PRIVACY_COOKIE =
             "SOCS=CAESEwgDEgk0ODE3Nzk3MjQaAmVuIAEaBgiA_LyaBg"
     }
+}
+
+internal fun isAllowedTextResponseMime(contentType: String?): Boolean {
+    if (contentType.isNullOrBlank()) return true
+    val mime = contentType.substringBefore(';').trim().lowercase()
+    return mime.startsWith("text/") ||
+        mime == "application/json" ||
+        mime == "application/xml" ||
+        mime == "application/atom+xml" ||
+        mime == "application/rss+xml" ||
+        mime.endsWith("+json") ||
+        mime.endsWith("+xml")
 }

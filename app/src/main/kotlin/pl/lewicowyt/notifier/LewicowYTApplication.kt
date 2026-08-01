@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import pl.lewicowyt.notifier.diagnostics.DiagnosticLogStore
 import pl.lewicowyt.notifier.images.JxlImageCache
 
 class LewicowYTApplication : Application() {
@@ -12,6 +13,7 @@ class LewicowYTApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        DiagnosticLogStore.initialize(this)
         AppGraph.initialize(this)
         AppGraph.notifications.createChannel()
         applicationScope.launch {

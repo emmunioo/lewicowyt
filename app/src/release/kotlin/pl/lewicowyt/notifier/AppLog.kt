@@ -1,12 +1,18 @@
 package pl.lewicowyt.notifier
 
-/**
- * Publiczne wydanie nie zapisuje szczegółów błędów sieciowych do systemowego
- * logcat. Stan synchronizacji pozostaje dostępny użytkownikowi w interfejsie.
- */
-@Suppress("UNUSED_PARAMETER")
-internal object AppLog {
-    fun warning(tag: String, message: String, error: Throwable) = Unit
+import pl.lewicowyt.notifier.diagnostics.DiagnosticLogStore
 
-    fun error(tag: String, message: String, error: Throwable) = Unit
+/**
+ * Publiczne wydanie nadal nie zapisuje szczegółów do systemowego logcat.
+ * Po świadomym włączeniu ukrytej diagnostyki zapisuje jedynie zredagowane,
+ * krótkie zdarzenia wewnątrz prywatnego katalogu aplikacji.
+ */
+internal object AppLog {
+    fun warning(tag: String, message: String, error: Throwable) {
+        DiagnosticLogStore.warning(tag, message, error)
+    }
+
+    fun error(tag: String, message: String, error: Throwable) {
+        DiagnosticLogStore.error(tag, message, error)
+    }
 }

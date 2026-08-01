@@ -13,16 +13,27 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import pl.lewicowyt.notifier.AppLog
 import pl.lewicowyt.notifier.data.AppSettings
 import pl.lewicowyt.notifier.data.CreatorCatalog
 import pl.lewicowyt.notifier.data.LocalDatabase
 import pl.lewicowyt.notifier.data.PreferencesRepository
+import pl.lewicowyt.notifier.data.contentSettingsSignature
+import pl.lewicowyt.notifier.data.contentType
+import pl.lewicowyt.notifier.data.historyTypesFor
+import pl.lewicowyt.notifier.diagnostics.DiagnosticDownloadArea
+import pl.lewicowyt.notifier.diagnostics.DiagnosticDownloadRole
+import pl.lewicowyt.notifier.diagnostics.DiagnosticYouTubeSource
+import pl.lewicowyt.notifier.diagnostics.logYouTubeDownload
 import pl.lewicowyt.notifier.model.Creator
 import pl.lewicowyt.notifier.model.CreatorSource
 import pl.lewicowyt.notifier.model.HistoryFilter
+import pl.lewicowyt.notifier.model.PublishedAtEvidence
 import pl.lewicowyt.notifier.model.SourceType
 import pl.lewicowyt.notifier.model.VideoEntry
 import pl.lewicowyt.notifier.model.VideoKind
+import pl.lewicowyt.notifier.model.VideoKindDecision
+import pl.lewicowyt.notifier.model.VideoKindEvidence
 import pl.lewicowyt.notifier.model.VideoOrigin
 import pl.lewicowyt.notifier.network.ResolvedSource
 import pl.lewicowyt.notifier.network.YouTubeDataApiHistoryClient
@@ -33,6 +44,7 @@ import pl.lewicowyt.notifier.network.YouTubeHistoryItem
 import pl.lewicowyt.notifier.network.YouTubeHistoryTab
 import pl.lewicowyt.notifier.network.YouTubePageClassifier
 import pl.lewicowyt.notifier.network.YouTubeSourceResolver
+import pl.lewicowyt.notifier.network.rssVideoKindDecision
 
 data class BackfillResult(
     val insertedCount: Int,
@@ -41,9 +53,10 @@ data class BackfillResult(
 )
 
 /**
- * Każdy kanał ma własne zadanie pobierania. Zadania pracują równolegle, ale wspólny
- * semafor ogranicza liczbę aktywnych połączeń, żeby nie przeciążyć telefonu ani YouTube.
- * Kanał kończy pracę natychmiast po dojściu do granicy czasu wybranej w ustawieniach.
+ * Kanały są pobierane współbieżnie w małych grupach. Ograniczenie chroni
+ * pamięć telefonu, ponieważ pojedyncza strona kanału YouTube może zawierać
+ * kilka megabajtów JSON. Kanał kończy pracę natychmiast po dojściu do granicy
+ * czasu wybranej w ustawieniach.
  */
 class HistoryBackfillLoader(
     private val catalog: CreatorCatalog,
@@ -54,6 +67,7 @@ class HistoryBackfillLoader(
     private val client: YouTubeHistoryClient,
     private val dataApiClient: YouTubeDataApiHistoryClient,
     private val classifier: YouTubePageClassifier,
+    private val sourcePriorityScheduler: SourcePriorityScheduler,
 ) {
     private data class Target(
         val creator: Creator,
@@ -67,15 +81,31 @@ class HistoryBackfillLoader(
     private data class ChannelResult(
         val insertedCount: Int,
         val errors: List<String>,
+        val unresolvedVideoIds: Set<String> = emptySet(),
     )
 
     private data class TargetLoadResult(
         val insertedCount: Int,
         val complete: Boolean,
+        val unresolvedVideoIds: Set<String> = emptySet(),
+    )
+
+    private data class WebTargetPagingState(
+        var cursor: YouTubeHistoryCursor? = null,
+        var started: Boolean = false,
+        var loadedPageCount: Int = 0,
+        var networkComplete: Boolean = false,
+        val seenCursorTokens: MutableSet<String> = mutableSetOf(),
+        val deferredItems: MutableMap<String, YouTubeHistoryItem> = linkedMapOf(),
+    )
+
+    private data class WebStageLoadResult(
+        val insertedCount: Int,
+        val stageComplete: Boolean,
+        val targetComplete: Boolean,
     )
 
     private val loadMutex = Mutex()
-    private val channelSemaphore = Semaphore(MAX_PARALLEL_CHANNELS)
     private val classificationSemaphore = Semaphore(MAX_PARALLEL_CLASSIFICATIONS)
     private var completedSignature: String? = null
     private var activeSignature: String? = null
@@ -112,14 +142,25 @@ class HistoryBackfillLoader(
         val cutoff = System.currentTimeMillis() -
             settings.historyWindowDays.toLong() * DAY_MILLIS
         val reporter = ProgressReporter(onProgress)
-        val results = coroutineScope {
-            targetsByChannel.values.map { channelTargets ->
-                async(Dispatchers.IO) {
-                    channelSemaphore.withPermit {
-                        loadChannel(channelTargets, cutoff, settings, apiKey, reporter)
-                    }
-                }
-            }.awaitAll()
+        val channelGroups = targetsByChannel.values.toList()
+        val prioritizedChannelGroups = runCatching {
+            sourcePriorityScheduler.prioritizeSourceGroups(
+                groups = channelGroups,
+                intervalMinutes = settings.intervalMinutes,
+                creator = { it.first().creator },
+                source = { it.first().source },
+            )
+        }.onFailure { error ->
+            AppLog.warning(
+                "SourcePriority",
+                "Nie udało się ustalić kolejności historii; używam katalogu",
+                error,
+            )
+        }.getOrDefault(channelGroups)
+        val results = prioritizedChannelGroups.mapConcurrently(
+            maxConcurrency = HISTORY_CHANNEL_CONCURRENCY,
+        ) { channelTargets ->
+            loadChannel(channelTargets, cutoff, settings, apiKey, reporter)
         }
         reporter.report(force = true)
 
@@ -140,6 +181,8 @@ class HistoryBackfillLoader(
         reporter: ProgressReporter,
     ): ChannelResult {
         val firstTarget = targets.first()
+        val enabledHistoryTypes = settings.historyTypesFor(firstTarget.creator.id)
+        if (enabledHistoryTypes.isEmpty()) return ChannelResult(0, emptyList())
         val sourceKey = resolver.sourceKey(firstTarget.creator, firstTarget.source)
         val resolved = try {
             if (firstTarget.tab == null) {
@@ -163,47 +206,63 @@ class HistoryBackfillLoader(
         // RSS jest najmniejszą i najszybszą odpowiedzią YouTube. Zapisujemy ją
         // przed uruchomieniem cięższego stronicowania, aby około 15 najnowszych
         // pozycji mogło pojawić się na ekranie od razu.
+        val rssCutoff = if (
+            apiKey.isBlank() && settings.historyWindowDays > HISTORY_STAGE_DAYS
+        ) {
+            val rangeNowMillis = cutoff + settings.historyWindowDays.toLong() * DAY_MILLIS
+            maxOf(cutoff, rangeNowMillis - HISTORY_STAGE_DAYS.toLong() * DAY_MILLIS)
+        } else {
+            cutoff
+        }
         val rssResult = runSuspendCatching {
             loadRssSource(
                 creator = firstTarget.creator,
                 resolved = resolved,
-                cutoff = cutoff,
+                cutoff = rssCutoff,
                 reporter = reporter,
-                classifyEntries = apiKey.isBlank(),
+                classifyEntries =
+                    apiKey.isBlank() && resolved.type == SourceType.PLAYLIST,
+                enabledHistoryTypes = enabledHistoryTypes,
             )
         }
 
         if (apiKey.isNotBlank()) {
-            val apiResult = loadYouTubeTargets(
+            val apiResult = loadDataApiTargets(
                 targets,
                 resolved,
                 cutoff,
-                settings,
                 apiKey,
                 reporter,
+                enabledHistoryTypes,
             )
-            if (apiResult.errors.isEmpty()) {
-                return mergeRssAndYouTubeResults(
-                    rssResult = rssResult,
-                    youtubeResult = apiResult,
-                    creatorName = firstTarget.creator.name,
+            // Data API zapewnia szybkie ID i dokładne daty, natomiast karta
+            // wybrana przez użytkownika jest wiarygodnym dowodem rodzaju.
+            // To jest zwykłe pobieranie historii do granicy czasu, a nie
+            // osobny skan każdej karty w poszukiwaniu wszystkich kandydatów.
+            val webTargets = if (apiResult.errors.isEmpty()) {
+                buildApiKindVerificationTargets(
+                    creator = firstTarget.creator,
+                    source = firstTarget.source,
+                    enabledHistoryTypes = enabledHistoryTypes,
+                )
+            } else {
+                // Gdy API zawiedzie, publiczne karty nadal muszą dostarczyć
+                // cały zakres aktualnie wybrany przez użytkownika.
+                buildWebTargets(
+                    creator = firstTarget.creator,
+                    source = firstTarget.source,
+                    settings = settings,
                 )
             }
-
-            val fallbackTargets = buildWebTargets(
-                creator = firstTarget.creator,
-                source = firstTarget.source,
-                settings = settings,
-            )
-            val fallbackResult = loadYouTubeTargets(
-                targets = fallbackTargets,
+            val webResult = loadWebTargetsProgressively(
+                targets = webTargets,
                 resolved = resolved,
-                cutoff = cutoff,
-                settings = settings,
-                apiKey = "",
+                overallCutoff = cutoff,
+                historyWindowDays = settings.historyWindowDays,
                 reporter = reporter,
+                enabledHistoryTypes = enabledHistoryTypes,
             )
-            if (fallbackResult.errors.isEmpty()) {
+            if (webResult.errors.isEmpty()) {
                 // Pełny zakres został dostarczony przez YouTube Web.
                 // Wadliwy lub wyczerpany klucz nie może wymuszać kolejnych prób.
                 targets.forEach { completedTargets += it.key }
@@ -211,7 +270,7 @@ class HistoryBackfillLoader(
                     rssResult = rssResult,
                     youtubeResult = ChannelResult(
                         insertedCount =
-                            apiResult.insertedCount + fallbackResult.insertedCount,
+                            apiResult.insertedCount + webResult.insertedCount,
                         errors = emptyList(),
                     ),
                     creatorName = firstTarget.creator.name,
@@ -220,8 +279,8 @@ class HistoryBackfillLoader(
             return mergeRssAndYouTubeResults(
                 rssResult = rssResult,
                 youtubeResult = ChannelResult(
-                    insertedCount = apiResult.insertedCount + fallbackResult.insertedCount,
-                    errors = (apiResult.errors + fallbackResult.errors).distinct(),
+                    insertedCount = apiResult.insertedCount + webResult.insertedCount,
+                    errors = (apiResult.errors + webResult.errors).distinct(),
                 ),
                 creatorName = firstTarget.creator.name,
             )
@@ -229,13 +288,13 @@ class HistoryBackfillLoader(
 
         return mergeRssAndYouTubeResults(
             rssResult = rssResult,
-            youtubeResult = loadYouTubeTargets(
+            youtubeResult = loadWebTargetsProgressively(
                 targets = targets,
                 resolved = resolved,
-                cutoff = cutoff,
-                settings = settings,
-                apiKey = "",
+                overallCutoff = cutoff,
+                historyWindowDays = settings.historyWindowDays,
                 reporter = reporter,
+                enabledHistoryTypes = enabledHistoryTypes,
             ),
             creatorName = firstTarget.creator.name,
         )
@@ -247,11 +306,18 @@ class HistoryBackfillLoader(
         cutoff: Long,
         reporter: ProgressReporter,
         classifyEntries: Boolean,
+        enabledHistoryTypes: Set<HistoryFilter>,
     ): Int {
-        val items = rssHistoryItems(
-            entries = feedClient.fetch(resolved),
-            cutoff = cutoff,
+        val entries = feedClient.fetch(resolved)
+        logYouTubeDownload(
+            area = DiagnosticDownloadArea.HISTORY,
+            source = DiagnosticYouTubeSource.RSS,
+            videoIds = entries.map(VideoEntry::id),
         )
+        val items = rssHistoryItems(
+            entries = entries,
+            cutoff = cutoff,
+        ).filter { it.isSafeForEnabledContentTypes(enabledHistoryTypes) }
         val insertedCount = database.insertHistoricalVideos(creator, items)
         reporter.report()
         if (classifyEntries) classifyRssItems(items, reporter)
@@ -267,13 +333,15 @@ class HistoryBackfillLoader(
         items: List<YouTubeHistoryItem>,
         reporter: ProgressReporter,
     ) {
-        val unclassifiedIds = database.unclassifiedVideoIds(
-            items.map { it.entry.id },
-        )
-        if (unclassifiedIds.isEmpty()) return
+        // Wpis RSS ma już słaby fallback VIDEO, ale playlista nie ujawnia
+        // rodzaju materiału kartą kanału. Sprawdzamy więc bieżący pakiet RSS
+        // niezależnie od wersji zapisanego fallbacku; silniejszy dowód PLAYER
+        // może go bezpiecznie zastąpić.
+        val candidateIds = items.map { it.entry.id }.distinct()
+        if (candidateIds.isEmpty()) return
 
         val results = coroutineScope {
-            unclassifiedIds.map { videoId ->
+            candidateIds.map { videoId ->
                 async(Dispatchers.IO) {
                     videoId to classificationSemaphore.withPermit {
                         classifier.classify(videoId)
@@ -281,13 +349,27 @@ class HistoryBackfillLoader(
                 }
             }.awaitAll()
         }
-        results.forEach { (videoId, kind) ->
-            if (kind == VideoKind.UNKNOWN) {
-                database.recordFailedVideoClassification(videoId)
-            } else {
-                database.markVideoClassification(videoId, kind)
-            }
-        }
+        logYouTubeDownload(
+            area = DiagnosticDownloadArea.HISTORY,
+            source = DiagnosticYouTubeSource.WEB,
+            videoIds = results.map { (videoId) -> videoId },
+            role = DiagnosticDownloadRole.CLASSIFICATION,
+        )
+        database.markVideoClassifications(
+            results
+                .filter { (_, kind) -> kind != VideoKind.UNKNOWN }
+                .associate { (videoId, kind) ->
+                    videoId to VideoKindDecision(
+                        kind = kind,
+                        evidence = VideoKindEvidence.PLAYER_METADATA,
+                    )
+                },
+        )
+        database.recordFailedVideoClassifications(
+            results
+                .filter { (_, kind) -> kind == VideoKind.UNKNOWN }
+                .map { (videoId) -> videoId },
+        )
         reporter.report()
     }
 
@@ -310,28 +392,35 @@ class HistoryBackfillLoader(
             } else {
                 (listOfNotNull(rssError) + youtubeResult.errors).distinct()
             },
+            unresolvedVideoIds = youtubeResult.unresolvedVideoIds,
         )
     }
 
-    private suspend fun loadYouTubeTargets(
+    private suspend fun loadDataApiTargets(
         targets: List<Target>,
         resolved: ResolvedSource,
         cutoff: Long,
-        settings: AppSettings,
         apiKey: String,
         reporter: ProgressReporter,
+        enabledHistoryTypes: Set<HistoryFilter>,
     ): ChannelResult {
         var insertedCount = 0
         val errors = mutableListOf<String>()
+        val unresolvedVideoIds = mutableSetOf<String>()
         for (target in targets) {
             currentCoroutineContext().ensureActive()
             try {
-                val result = if (target.tab == null) {
-                    loadDataApiTarget(target, resolved, cutoff, settings, apiKey, reporter)
-                } else {
-                    loadWebTarget(target, resolved, cutoff, reporter)
-                }
+                check(target.tab == null) { "Cel Data API nie może wskazywać karty Web" }
+                val result = loadDataApiTarget(
+                    target,
+                    resolved,
+                    cutoff,
+                    apiKey,
+                    reporter,
+                    enabledHistoryTypes,
+                )
                 insertedCount += result.insertedCount
+                unresolvedVideoIds += result.unresolvedVideoIds
                 if (result.complete) {
                     completedTargets += target.key
                 } else {
@@ -348,7 +437,7 @@ class HistoryBackfillLoader(
                     ).take(MAX_ERROR_LINE_CHARS)
             }
         }
-        return ChannelResult(insertedCount, errors)
+        return ChannelResult(insertedCount, errors, unresolvedVideoIds)
     }
 
     private fun resolveForDataApi(
@@ -377,56 +466,228 @@ class HistoryBackfillLoader(
         )
     }
 
-    private suspend fun loadWebTarget(
-        target: Target,
+    /**
+     * Karty jednego kanału są przeplatane co 14 dni: najpierw Filmy, potem
+     * Shorty i Streamy. Kursor każdej karty pozostaje w pamięci, więc następny
+     * etap nie zaczyna ponownie od najnowszej strony. Pięć kanałów nadal może
+     * wykonywać ten sam algorytm równolegle.
+     */
+    private suspend fun loadWebTargetsProgressively(
+        targets: List<Target>,
         resolved: ResolvedSource,
-        cutoff: Long,
+        overallCutoff: Long,
+        historyWindowDays: Int,
         reporter: ProgressReporter,
-    ): TargetLoadResult {
-        var cursor: YouTubeHistoryCursor? = null
+        enabledHistoryTypes: Set<HistoryFilter>,
+    ): ChannelResult {
+        val states = targets.associateWith { WebTargetPagingState() }
+        val failedTargets = mutableSetOf<Target>()
+        val errors = mutableListOf<String>()
         var insertedCount = 0
-        var pageNumber = 0
-        var complete = false
-        val seenCursorTokens = mutableSetOf<String>()
+        // Odtwarzamy dokładnie tę samą chwilę, z której wyliczono końcową
+        // granicę. Dzięki temu ostatni etap zawsze kończy się na overallCutoff.
+        val rangeNowMillis = overallCutoff + historyWindowDays.toLong() * DAY_MILLIS
 
-        while (pageNumber < MAX_PAGES_PER_TARGET) {
-            currentCoroutineContext().ensureActive()
-            val page = if (cursor == null) {
-                client.firstPage(resolved, requireNotNull(target.tab))
-            } else {
-                client.nextPage(cursor, requireNotNull(target.tab))
-            }
-            pageNumber += 1
-
-            val relevant = page.items.filter { it.entry.publishedAtMillis >= cutoff }
-            insertedCount += database.insertHistoricalVideos(target.creator, relevant)
-            reporter.report()
-
-            cursor = page.nextCursor
-            complete = isHistoryTargetComplete(
-                publishedTimes = page.items.map { it.entry.publishedAtMillis },
-                cutoff = cutoff,
-                hasNextPage = cursor != null,
-                chronological = target.source.type != SourceType.PLAYLIST,
+        for (stageDepthDays in historyStageDepths(historyWindowDays)) {
+            val stageCutoff = maxOf(
+                overallCutoff,
+                rangeNowMillis - stageDepthDays.toLong() * DAY_MILLIS,
             )
-            if (complete) {
-                break
+            for (target in targets) {
+                currentCoroutineContext().ensureActive()
+                if (target in failedTargets) continue
+                val state = states.getValue(target)
+                if (state.networkComplete && state.deferredItems.isEmpty()) continue
+                try {
+                    val result = loadWebTargetStage(
+                        target = target,
+                        resolved = resolved,
+                        overallCutoff = overallCutoff,
+                        stageCutoff = stageCutoff,
+                        reporter = reporter,
+                        state = state,
+                        enabledHistoryTypes = enabledHistoryTypes,
+                    )
+                    insertedCount += result.insertedCount
+                    if (result.targetComplete) {
+                        completedTargets += target.key
+                    } else if (!result.stageComplete) {
+                        failedTargets += target
+                        errors +=
+                            "${target.creator.name}: osiągnięto limit stron przed objęciem całego zakresu"
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    failedTargets += target
+                    errors += (
+                        "${target.creator.name}: " +
+                            (error.message ?: error.javaClass.simpleName)
+                                .take(MAX_ERROR_DETAIL_CHARS)
+                        ).take(MAX_ERROR_LINE_CHARS)
+                }
             }
-            val nextCursor = requireNotNull(cursor)
-            if (!seenCursorTokens.add(nextCursor.token)) {
-                throw IOException("YouTube powtórzył kursor historii")
+            // Po każdym dwutygodniowym etapie odświeżamy ekran nawet wtedy,
+            // gdy mała liczba pozycji nie uruchomiła ogranicznika czasowego.
+            reporter.report(force = true)
+        }
+        states.forEach { (target, state) ->
+            if (
+                (!state.networkComplete || state.deferredItems.isNotEmpty()) &&
+                target !in failedTargets
+            ) {
+                errors +=
+                    "${target.creator.name}: nie ukończono dwutygodniowych etapów historii"
             }
         }
-        return TargetLoadResult(insertedCount = insertedCount, complete = complete)
+        return ChannelResult(insertedCount, errors.distinct())
+    }
+
+    private suspend fun loadWebTargetStage(
+        target: Target,
+        resolved: ResolvedSource,
+        overallCutoff: Long,
+        stageCutoff: Long,
+        reporter: ProgressReporter,
+        state: WebTargetPagingState,
+        enabledHistoryTypes: Set<HistoryFilter>,
+    ): WebStageLoadResult {
+        var insertedCount = 0
+        val readyDeferred = state.deferredItems.values.filter {
+            it.entry.publishedAtMillis >= stageCutoff &&
+                it.isSafeForEnabledContentTypes(enabledHistoryTypes)
+        }
+        if (readyDeferred.isNotEmpty()) {
+            insertedCount += database.insertHistoricalVideos(target.creator, readyDeferred)
+            readyDeferred.forEach { state.deferredItems.remove(it.entry.id) }
+            reporter.report()
+        }
+        var stageComplete = state.networkComplete
+        val tab = requireNotNull(target.tab)
+        val chronological = target.source.type != SourceType.PLAYLIST
+
+        while (
+            !state.networkComplete &&
+            !stageComplete &&
+            state.loadedPageCount < MAX_PAGES_PER_TARGET
+        ) {
+            currentCoroutineContext().ensureActive()
+            val page = if (!state.started) {
+                state.started = true
+                client.firstPage(resolved, tab)
+            } else {
+                val cursor = state.cursor
+                if (cursor == null) {
+                    state.networkComplete = true
+                    break
+                }
+                client.nextPage(cursor, tab)
+            }
+            state.loadedPageCount += 1
+            val datedIds = page.items.mapTo(linkedSetOf()) { it.entry.id }
+            logYouTubeDownload(
+                area = DiagnosticDownloadArea.HISTORY,
+                source = DiagnosticYouTubeSource.WEB,
+                videoIds = datedIds,
+            )
+            val classificationOnlyIds = page.membershipKinds.keys - datedIds
+            if (classificationOnlyIds.isNotEmpty()) {
+                logYouTubeDownload(
+                    area = DiagnosticDownloadArea.HISTORY,
+                    source = DiagnosticYouTubeSource.WEB,
+                    videoIds = classificationOnlyIds,
+                    role = DiagnosticDownloadRole.CLASSIFICATION,
+                )
+            }
+            val pageItems = if (
+                target.source.type == SourceType.PLAYLIST &&
+                enabledHistoryTypes != HistoryFilter.entries.toSet()
+            ) {
+                resolveAmbiguousDataApiKinds(page.items) { videoId ->
+                    classificationSemaphore.withPermit { classifier.classify(videoId) }
+                }.also { classified ->
+                    logYouTubeDownload(
+                        area = DiagnosticDownloadArea.HISTORY,
+                        source = DiagnosticYouTubeSource.WEB,
+                        videoIds = classified
+                            .filter { it.evidence == VideoKindEvidence.PLAYER_METADATA }
+                            .map { it.entry.id },
+                        role = DiagnosticDownloadRole.CLASSIFICATION,
+                    )
+                }
+            } else {
+                page.items
+            }
+
+            // Jedna strona YouTube może przeciąć granicę 14 dni. Jej starszą
+            // część zachowujemy w pamięci i zapisujemy dopiero w kolejnym
+            // etapie, bez ponownego pobierania strony.
+            val (readyNow, deferred) = splitHistoryStageItems(
+                items = pageItems.filter {
+                    it.isSafeForEnabledContentTypes(enabledHistoryTypes)
+                },
+                overallCutoff = overallCutoff,
+                stageCutoff = stageCutoff,
+            )
+            deferred
+                .forEach { state.deferredItems.putIfAbsent(it.entry.id, it) }
+            insertedCount += database.insertHistoricalVideos(target.creator, readyNow)
+            database.markVideoClassifications(
+                page.membershipKinds
+                    .filterKeys { it !in datedIds }
+                    .mapValues { (_, kind) ->
+                        VideoKindDecision(kind, VideoKindEvidence.CHANNEL_TAB)
+                    },
+            )
+            reporter.report()
+
+            state.cursor = page.nextCursor
+            if (
+                tab != YouTubeHistoryTab.PLAYLIST &&
+                page.items.isEmpty() &&
+                page.membershipKinds.isNotEmpty()
+            ) {
+                // Karta bez dat nadal klasyfikuje bieżące wpisy RSS, lecz nie
+                // nadaje się do bezpiecznego przewijania historii.
+                state.networkComplete = true
+                stageComplete = true
+                break
+            }
+
+            val publishedTimes = page.items.map { it.entry.publishedAtMillis }
+            state.networkComplete = isHistoryTargetComplete(
+                publishedTimes = publishedTimes,
+                cutoff = overallCutoff,
+                hasNextPage = state.cursor != null,
+                chronological = chronological,
+            )
+            stageComplete = state.networkComplete || isHistoryTargetComplete(
+                publishedTimes = publishedTimes,
+                cutoff = stageCutoff,
+                hasNextPage = state.cursor != null,
+                chronological = chronological,
+            )
+
+            state.cursor?.let { nextCursor ->
+                if (!state.seenCursorTokens.add(nextCursor.token)) {
+                    throw IOException("YouTube powtórzył kursor historii")
+                }
+            }
+        }
+        return WebStageLoadResult(
+            insertedCount = insertedCount,
+            stageComplete = stageComplete || state.networkComplete,
+            targetComplete = state.networkComplete && state.deferredItems.isEmpty(),
+        )
     }
 
     private suspend fun loadDataApiTarget(
         target: Target,
         resolved: ResolvedSource,
         cutoff: Long,
-        settings: AppSettings,
         apiKey: String,
         reporter: ProgressReporter,
+        enabledHistoryTypes: Set<HistoryFilter>,
     ): TargetLoadResult {
         var pageToken: String? = null
         var insertedCount = 0
@@ -443,10 +704,23 @@ class HistoryBackfillLoader(
                 classifyAfterMillis = cutoff,
             )
             pageNumber += 1
-            val relevant = page.items.filter {
-                it.entry.publishedAtMillis >= cutoff && it.kind.matches(settings.historyFilters)
-            }
-            insertedCount += database.insertHistoricalVideos(target.creator, relevant)
+            logYouTubeDownload(
+                area = DiagnosticDownloadArea.HISTORY,
+                source = DiagnosticYouTubeSource.DATA_API,
+                videoIds = page.items.map { it.entry.id },
+            )
+            val withinRange = page.items.filter { it.entry.publishedAtMillis >= cutoff }
+            val classified = if (target.source.type == SourceType.PLAYLIST) {
+                resolveAmbiguousDataApiKinds(withinRange) { videoId ->
+                    classificationSemaphore.withPermit {
+                        classifier.classify(videoId)
+                    }
+                }
+            } else {
+                withinRange
+            }.map(YouTubeHistoryItem::withDefaultVideoFallback)
+                .filter { it.isSafeForEnabledContentTypes(enabledHistoryTypes) }
+            insertedCount += database.insertHistoricalVideos(target.creator, classified)
             reporter.report()
 
             pageToken = page.nextPageToken
@@ -464,15 +738,23 @@ class HistoryBackfillLoader(
                 throw IOException("YouTube Data API powtórzył token strony")
             }
         }
-        return TargetLoadResult(insertedCount = insertedCount, complete = complete)
+        return TargetLoadResult(
+            insertedCount = insertedCount,
+            complete = complete,
+        )
     }
 
     private fun buildTargets(settings: AppSettings, useDataApi: Boolean): List<Target> {
-        if (settings.historyFilters.isEmpty()) return emptyList()
+        if (settings.historyFilters.intersect(settings.globalHistoryTypes).isEmpty()) {
+            return emptyList()
+        }
         if (useDataApi) {
             return buildList {
                 catalog.creators
-                    .filter { it.id in settings.selectedCreatorIds }
+                    .filter {
+                        it.id in settings.selectedCreatorIds &&
+                            settings.historyTypesFor(it.id).isNotEmpty()
+                    }
                     .forEach { creator ->
                         creator.sources.forEach { source ->
                             add(Target(creator, source, tab = null))
@@ -482,7 +764,10 @@ class HistoryBackfillLoader(
         }
         return buildList {
             catalog.creators
-                .filter { it.id in settings.selectedCreatorIds }
+                .filter {
+                    it.id in settings.selectedCreatorIds &&
+                        settings.historyTypesFor(it.id).isNotEmpty()
+                }
                 .forEach { creator ->
                     creator.sources.forEach { source ->
                         addAll(buildWebTargets(creator, source, settings))
@@ -496,29 +781,42 @@ class HistoryBackfillLoader(
         source: CreatorSource,
         settings: AppSettings,
     ): List<Target> {
-        if (settings.historyFilters.isEmpty()) return emptyList()
-        if (source.type == SourceType.PLAYLIST) {
-            // Typ materiału z playlisty jest klasyfikowany po pobraniu; sama
-            // playlista nie znika już przy wyłączeniu filtra „Filmy”.
-            return listOf(Target(creator, source, YouTubeHistoryTab.PLAYLIST))
+        if (settings.historyFilters.intersect(settings.globalHistoryTypes).isEmpty()) {
+            return emptyList()
         }
-        return buildList {
-            if (HistoryFilter.VIDEOS in settings.historyFilters) {
-                add(Target(creator, source, YouTubeHistoryTab.VIDEOS))
-            }
-            if (HistoryFilter.STREAMS in settings.historyFilters) {
-                add(Target(creator, source, YouTubeHistoryTab.STREAMS))
-            }
-            if (HistoryFilter.SHORTS in settings.historyFilters) {
-                add(Target(creator, source, YouTubeHistoryTab.SHORTS))
-            }
+        val enabledHistoryTypes = settings.historyTypesFor(creator.id)
+        // RSS miesza rodzaje materiałów. Pobranie wszystkich istniejących kart
+        // daje poprawną klasyfikację niezależnie od aktualnie otwartego filtra;
+        // SQL sprawia, że potwierdzonego braku karty już nie odpytujemy.
+        return webHistoryTabsForSource(source.type, enabledHistoryTypes).map { tab ->
+            Target(creator, source, tab)
         }
     }
+
+    private fun buildApiKindVerificationTargets(
+        creator: Creator,
+        source: CreatorSource,
+        enabledHistoryTypes: Set<HistoryFilter>,
+    ): List<Target> = (
+        if (enabledHistoryTypes == HistoryFilter.entries.toSet()) {
+            apiKindVerificationTabs(source.type)
+        } else {
+            webHistoryTabsForSource(source.type, enabledHistoryTypes)
+        }
+        )
+        .map { tab ->
+            Target(creator, source, tab)
+        }
 
     private fun buildSignature(settings: AppSettings, apiKey: String): String = buildString {
         append(settings.selectedCreatorIds.sorted().joinToString(","))
         append('|')
-        append(settings.historyFilters.map { it.name }.sorted().joinToString(","))
+        // Konkretny filtr zmienia wyłącznie widok. Zestaw celów sieciowych jest
+        // zawsze taki sam (Shorty, Streamy i Filmy), więc nie wolno przez jego
+        // przełączenie kasować zakończonych celów i ponownie pobierać kanałów.
+        append(historyFilterTargetSignature(settings.historyFilters))
+        append('|')
+        append(contentSettingsSignature(settings))
         append('|')
         append(settings.historyWindowDays)
         append('|')
@@ -552,19 +850,7 @@ class HistoryBackfillLoader(
         return if (remaining > 0) "$visible\n…i jeszcze $remaining" else visible
     }
 
-    private fun pl.lewicowyt.notifier.model.VideoKind.matches(
-        filters: Set<HistoryFilter>,
-    ): Boolean = when (this) {
-        pl.lewicowyt.notifier.model.VideoKind.VIDEO,
-        pl.lewicowyt.notifier.model.VideoKind.UNKNOWN -> HistoryFilter.VIDEOS in filters
-        pl.lewicowyt.notifier.model.VideoKind.LIVE,
-        pl.lewicowyt.notifier.model.VideoKind.UPCOMING,
-        pl.lewicowyt.notifier.model.VideoKind.STREAM_ARCHIVE -> HistoryFilter.STREAMS in filters
-        pl.lewicowyt.notifier.model.VideoKind.SHORT -> HistoryFilter.SHORTS in filters
-    }
-
     private companion object {
-        const val MAX_PARALLEL_CHANNELS = 8
         const val MAX_PARALLEL_CLASSIFICATIONS = 6
         const val MAX_PAGES_PER_TARGET = 120
         const val MAX_ERROR_DETAIL_CHARS = 400
@@ -572,6 +858,140 @@ class HistoryBackfillLoader(
         const val PROGRESS_INTERVAL_MILLIS = 400L
         const val DAY_MILLIS = 24L * 60L * 60L * 1_000L
     }
+}
+
+/**
+ * API zachowuje przewagę szybkiego stronicowania, a dodatkowe żądanie strony
+ * filmu wykonujemy wyłącznie wtedy, gdy metadane API nie dowodzą rodzaju
+ * materiału. Kolejność wejścia zostaje zachowana.
+ */
+internal suspend fun resolveAmbiguousDataApiKinds(
+    items: List<YouTubeHistoryItem>,
+    classify: suspend (String) -> VideoKind,
+): List<YouTubeHistoryItem> = coroutineScope {
+    items.map { item ->
+        async {
+            if (item.kind != VideoKind.UNKNOWN) {
+                item
+            } else {
+                val resolvedKind = classify(item.entry.id)
+                item.copy(
+                    kind = resolvedKind,
+                    evidence = if (resolvedKind == VideoKind.UNKNOWN) {
+                        VideoKindEvidence.NONE
+                    } else {
+                        VideoKindEvidence.PLAYER_METADATA
+                    },
+                )
+            }
+        }
+    }.awaitAll()
+}
+
+internal const val HISTORY_CHANNEL_CONCURRENCY = 5
+
+internal fun historyFilterTargetSignature(filters: Set<HistoryFilter>): String =
+    if (filters.isEmpty()) "HISTORY_DISABLED" else "ALL_KINDS"
+
+internal const val HISTORY_STAGE_DAYS = 14
+
+internal fun historyStageDepths(historyWindowDays: Int): List<Int> {
+    require(historyWindowDays > 0)
+    val result = mutableListOf<Int>()
+    var depth = minOf(HISTORY_STAGE_DAYS, historyWindowDays)
+    while (true) {
+        result += depth
+        if (depth == historyWindowDays) return result
+        depth = minOf(depth + HISTORY_STAGE_DAYS, historyWindowDays)
+    }
+}
+
+internal fun splitHistoryStageItems(
+    items: List<YouTubeHistoryItem>,
+    overallCutoff: Long,
+    stageCutoff: Long,
+): Pair<List<YouTubeHistoryItem>, List<YouTubeHistoryItem>> {
+    require(stageCutoff >= overallCutoff)
+    val withinOverallRange = items.filter {
+        it.entry.publishedAtMillis >= overallCutoff
+    }
+    return withinOverallRange.partition {
+        it.entry.publishedAtMillis >= stageCutoff
+    }
+}
+
+internal fun webHistoryTabsForSource(
+    sourceType: SourceType,
+    enabledTypes: Set<HistoryFilter> = HistoryFilter.entries.toSet(),
+): List<YouTubeHistoryTab> =
+    if (sourceType == SourceType.CHANNEL) {
+        // W każdym dwutygodniowym etapie zwykłe filmy są dostarczane jako
+        // pierwsze, następnie Shorty, a na końcu transmisje.
+        listOf(
+            YouTubeHistoryTab.VIDEOS,
+            YouTubeHistoryTab.SHORTS,
+            YouTubeHistoryTab.STREAMS,
+        ).filter { it.contentType() in enabledTypes }
+    } else {
+        if (enabledTypes.isEmpty()) emptyList() else listOf(YouTubeHistoryTab.PLAYLIST)
+    }
+
+/**
+ * API rozpoznaje bieżące LIVE/UPCOMING i długie filmy, ale nie potwierdza
+ * archiwalnych transmisji ani Shorts. Tylko te dwie karty są więc potrzebne
+ * jako zwykły backfill klasyfikacyjny; nie wykonujemy drugiego skanu VIDEOS.
+ */
+internal fun apiKindVerificationTabs(sourceType: SourceType): List<YouTubeHistoryTab> =
+    if (sourceType == SourceType.CHANNEL) {
+        listOf(YouTubeHistoryTab.SHORTS, YouTubeHistoryTab.STREAMS)
+    } else {
+        listOf(YouTubeHistoryTab.PLAYLIST)
+    }
+
+internal fun YouTubeHistoryItem.withDefaultVideoFallback(): YouTubeHistoryItem =
+    if (kind == VideoKind.UNKNOWN || evidence == VideoKindEvidence.NONE) {
+        copy(
+            kind = VideoKind.VIDEO,
+            evidence = VideoKindEvidence.DEFAULT_VIDEO_FALLBACK,
+        )
+    } else {
+        this
+    }
+
+/**
+ * RSS nie rozróżnia zwykłego filmu od archiwum transmisji, a Data API oznacza
+ * archiwalne transmisje tak samo jak filmy. Gdy użytkownik wyłączył choć jeden
+ * rodzaj, takie niejednoznaczne rekordy czekają na potwierdzenie odpowiednią
+ * kartą YouTube Web zamiast chwilowo trafiać do złej sekcji.
+ */
+internal fun YouTubeHistoryItem.isSafeForEnabledContentTypes(
+    enabledTypes: Set<HistoryFilter>,
+): Boolean {
+    val allTypesEnabled = enabledTypes.containsAll(HistoryFilter.entries)
+    if (
+        evidence == VideoKindEvidence.NONE ||
+        evidence == VideoKindEvidence.DEFAULT_VIDEO_FALLBACK ||
+        (evidence == VideoKindEvidence.API_METADATA && kind == VideoKind.VIDEO)
+    ) {
+        return allTypesEnabled
+    }
+    return kind.contentType() in enabledTypes
+}
+
+internal fun YouTubeHistoryTab.contentType(): HistoryFilter? = when (this) {
+    YouTubeHistoryTab.VIDEOS -> HistoryFilter.VIDEOS
+    YouTubeHistoryTab.STREAMS -> HistoryFilter.STREAMS
+    YouTubeHistoryTab.SHORTS -> HistoryFilter.SHORTS
+    YouTubeHistoryTab.PLAYLIST -> null
+}
+
+internal fun VideoKind.matchesHistoryFilters(filters: Set<HistoryFilter>): Boolean = when (this) {
+    VideoKind.VIDEO -> HistoryFilter.VIDEOS in filters
+    VideoKind.LIVE,
+    VideoKind.UPCOMING,
+    VideoKind.STREAM_ARCHIVE -> HistoryFilter.STREAMS in filters
+    VideoKind.SHORT -> HistoryFilter.SHORTS in filters
+    VideoKind.UNKNOWN -> false
 }
 
 private suspend inline fun <T> runSuspendCatching(
@@ -622,12 +1042,14 @@ internal fun rssHistoryItems(
     .filter { it.publishedAtMillis >= cutoff }
     .distinctBy { it.id }
     .map { entry ->
+        val decision = rssVideoKindDecision(entry)
         YouTubeHistoryItem(
             entry = entry.copy(origin = VideoOrigin.YOUTUBE),
-            // RSS nie rozróżnia niezawodnie filmu, Shorta i transmisji.
-            // Następna odpowiedź API/Web uzupełni dokładny typ.
-            kind = VideoKind.UNKNOWN,
-            kindVerified = false,
+            // Kanoniczny `/shorts/ID` jest mocnym dowodem; zwykły watch
+            // dostaje słaby fallback VIDEO, który karta kanału może poprawić.
+            kind = decision.kind,
+            evidence = decision.evidence,
+            publishedAtEvidence = PublishedAtEvidence.RSS,
         )
     }
     .toList()

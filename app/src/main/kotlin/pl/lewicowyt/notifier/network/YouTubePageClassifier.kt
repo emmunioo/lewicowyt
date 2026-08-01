@@ -1,6 +1,5 @@
 package pl.lewicowyt.notifier.network
 
-import org.json.JSONArray
 import org.json.JSONObject
 import pl.lewicowyt.notifier.model.VideoKind
 
@@ -60,40 +59,53 @@ class YouTubePageClassifier(private val http: HttpTextClient) {
         val status = playability?.optString("status").orEmpty()
         val isUpcoming =
             details.optBoolean("isUpcoming", false) ||
-                status == "LIVE_STREAM_OFFLINE"
+                response.optJSONObject("microformat")
+                    ?.optJSONObject("playerMicroformatRenderer")
+                    ?.optJSONObject("liveBroadcastDetails")
+                    ?.optBoolean("isUpcoming", false) == true
         val isLive =
             details.optBoolean("isLive", false) ||
                 details.optBoolean("isLiveNow", false)
+        val durationSeconds = details.optString("lengthSeconds").toLongOrNull()
+            ?: details.optLong("lengthSeconds", -1L)
+        val shape = videoShape(response)
         return when {
             isUpcoming -> VideoKind.UPCOMING
             isLive -> VideoKind.LIVE
-            details.optBoolean("isLiveContent", false) -> VideoKind.STREAM_ARCHIVE
-            isPortraitShort(response, details) -> VideoKind.SHORT
-            status == "OK" -> VideoKind.VIDEO
+            status != "OK" -> VideoKind.UNKNOWN
+            // To pole obejmuje również zakończone Premiery. Bez karty kanału
+            // nie jest dowodem, że materiał należy do sekcji „Streamy”.
+            details.optBoolean("isLiveContent", false) -> VideoKind.UNKNOWN
+            durationSeconds !in 1L..MAX_SHORT_SECONDS ->
+                if (durationSeconds > MAX_SHORT_SECONDS) {
+                    VideoKind.VIDEO
+                } else {
+                    VideoKind.UNKNOWN
+                }
+            shape == VideoShape.PORTRAIT_OR_SQUARE -> VideoKind.SHORT
+            shape == VideoShape.LANDSCAPE -> VideoKind.VIDEO
             else -> VideoKind.UNKNOWN
         }
     }
 
-    private fun isPortraitShort(response: JSONObject, details: JSONObject): Boolean {
-        val durationSeconds = details.optString("lengthSeconds").toLongOrNull()
-            ?: details.optLong("lengthSeconds", -1L)
-        if (durationSeconds !in 1L..MAX_SHORT_SECONDS) return false
-
-        val streamingData = response.optJSONObject("streamingData") ?: return false
-        return sequenceOf(
+    private fun videoShape(response: JSONObject): VideoShape {
+        val streamingData = response.optJSONObject("streamingData")
+            ?: return VideoShape.MISSING
+        var foundDimensions = false
+        sequenceOf(
             streamingData.optJSONArray("formats"),
             streamingData.optJSONArray("adaptiveFormats"),
-        ).filterNotNull().any(::containsPortraitVideoFormat)
-    }
-
-    private fun containsPortraitVideoFormat(formats: JSONArray): Boolean {
-        for (index in 0 until formats.length()) {
-            val format = formats.optJSONObject(index) ?: continue
-            val width = format.optInt("width", 0)
-            val height = format.optInt("height", 0)
-            if (width > 0 && height > width) return true
+        ).filterNotNull().forEach { formats ->
+            for (index in 0 until formats.length()) {
+                val format = formats.optJSONObject(index) ?: continue
+                val width = format.optInt("width", 0)
+                val height = format.optInt("height", 0)
+                if (width <= 0 || height <= 0) continue
+                foundDimensions = true
+                if (height >= width) return VideoShape.PORTRAIT_OR_SQUARE
+            }
         }
-        return false
+        return if (foundDimensions) VideoShape.LANDSCAPE else VideoShape.MISSING
     }
 
     internal fun classifyHtml(html: String, videoId: String): VideoKind {
@@ -101,13 +113,10 @@ class YouTubePageClassifier(private val http: HttpTextClient) {
         if (!currentVideoIdPattern(videoId).containsMatchIn(playerData)) {
             return VideoKind.UNKNOWN
         }
-        return when {
-            isShort(playerData, videoId) -> VideoKind.SHORT
-            LIVE_NOW.containsMatchIn(playerData) -> VideoKind.LIVE
-            UPCOMING.containsMatchIn(playerData) -> VideoKind.UPCOMING
-            isStreamArchive(playerData) -> VideoKind.STREAM_ARCHIVE
-            else -> VideoKind.VIDEO
+        if (isShort(html, videoId) || isShort(playerData, videoId)) {
+            return VideoKind.SHORT
         }
+        return classifyPlayerResponse(playerData, videoId)
     }
 
     private fun extractCurrentPlayerData(html: String): String? {
@@ -174,12 +183,6 @@ class YouTubePageClassifier(private val http: HttpTextClient) {
         ).containsMatchIn(html)
     }
 
-    private fun isStreamArchive(html: String): Boolean =
-        LIVE_CONTENT.containsMatchIn(html) ||
-            POST_LIVE_DVR.containsMatchIn(html) ||
-            ACTUAL_START_TIME.containsMatchIn(html) ||
-            LIVE_BROADCAST_DETAILS.containsMatchIn(html)
-
     private companion object {
         const val PLAYER_ENDPOINT =
             "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
@@ -201,14 +204,11 @@ class YouTubePageClassifier(private val http: HttpTextClient) {
             "\"ytInitialPlayerResponse\":",
         )
         val SHORT_FLAG = Regex("""[\"']isShort[\"']\s*:\s*true""")
-        val LIVE_NOW = Regex("""[\"']isLiveNow[\"']\s*:\s*true""")
-        val UPCOMING = Regex("""[\"']isUpcoming[\"']\s*:\s*true""")
+    }
 
-        // Po zakończeniu transmisji isLiveNow/isUpcoming są fałszywe, ale strona
-        // nadal zawiera informację, że materiał pochodził z transmisji na żywo.
-        val LIVE_CONTENT = Regex("""[\"']isLiveContent[\"']\s*:\s*true""")
-        val POST_LIVE_DVR = Regex("""[\"']isPostLiveDvr[\"']\s*:\s*true""")
-        val ACTUAL_START_TIME = Regex("""[\"']actualStartTime[\"']\s*:""")
-        val LIVE_BROADCAST_DETAILS = Regex("""[\"']liveBroadcastDetails[\"']\s*:""")
+    private enum class VideoShape {
+        PORTRAIT_OR_SQUARE,
+        LANDSCAPE,
+        MISSING,
     }
 }

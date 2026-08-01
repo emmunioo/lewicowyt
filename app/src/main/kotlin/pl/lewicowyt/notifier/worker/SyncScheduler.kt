@@ -8,6 +8,7 @@ import android.os.Build
 import java.time.ZonedDateTime
 import pl.lewicowyt.notifier.data.AppSettings
 import pl.lewicowyt.notifier.data.PreferencesRepository
+import pl.lewicowyt.notifier.data.hasEnabledContentForSelectedCreators
 
 /**
  * Jedyny harmonogram automatycznej synchronizacji.
@@ -31,7 +32,7 @@ class SyncScheduler(
     }
 
     fun schedule(settings: AppSettings) {
-        if (settings.selectedCreatorIds.isEmpty() || !hasExactAlarmAccess()) {
+        if (!settings.hasEnabledContentForSelectedCreators() || !hasExactAlarmAccess()) {
             cancelAlarm()
             return
         }
@@ -66,7 +67,7 @@ class SyncScheduler(
     ): Boolean {
         if (
             retryAttempt !in 1..MAX_RETRY_ATTEMPTS ||
-            settings.selectedCreatorIds.isEmpty() ||
+            !settings.hasEnabledContentForSelectedCreators() ||
             !hasExactAlarmAccess()
         ) {
             return false

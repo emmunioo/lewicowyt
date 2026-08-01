@@ -1,8 +1,12 @@
 # Audyt bezpieczeństwa
 
-Data przeglądu: 28 lipca 2026 r.
+Data przeglądu kodu: 1 sierpnia 2026 r.
 
-Wersja kodu: `1.4-beta` (`versionCode 14`).
+Wersja kodu: `1.5-beta` (`versionCode 15`).
+
+Podpisany APK 1.5-beta, jego SHA-256, VirusTotal i ponowny raport MobSF nie są
+jeszcze dostępne. Poniższe dane konkretnego APK 1.4-beta pozostają historycznym
+punktem odniesienia i nie są dowodem właściwości przyszłego artefaktu 1.5-beta.
 
 ## Zakres
 
@@ -93,6 +97,9 @@ certyfikat Android Debug i narzędziowy kod debug).
 - odpowiedzi YouTube Web, RSS i Data API mają limity rozmiaru, a tytuły,
   autorzy, klucze klienta oraz tokeny kontynuacji są ograniczane i walidowane
   przed dalszym użyciem;
+- tekstowy klient odrzuca odpowiedzi binarne dla ścieżek metadanych. Integracja
+  YouTube Web nie uruchamia WebView ani nie pobiera CSS, skryptów lub obrazów
+  strony;
 - historia każdego źródła zapisuje najpierw małą odpowiedź RSS, a dopiero potem
   uruchamia stronicowanie Data API albo YouTube Web. Duplikaty są scalane po
   identyfikatorze filmu;
@@ -106,6 +113,10 @@ certyfikat Android Debug i narzędziowy kod debug).
 - migracja bazy do wersji 15 ponawia klasyfikację bez zerowania `kind`.
   Nieudana klasyfikacja zachowuje dotychczasowy rodzaj, a potwierdzona karta lub
   odtwarzacz poprawia rekord w miejscu;
+- bieżący schemat bazy ma wersję 22 i przechowuje m.in. stan kart kanału,
+  model kolejności, metadane awatarów oraz stabilny snapshot RSS dla
+  powiadomień. Migracje są wykonywane sekwencyjnie także przy aktualizacji
+  bezpośrednio ze starszej instalacji;
 - migracja bazy do wersji 10 usuwa niepotwierdzone rekordy pozostawione przez
   dawną integrację zewnętrzną; zostają ponownie pobrane wyłącznie z YouTube;
 - nieprawidłowe i skrajnie przyszłe daty z RSS, Data API lub YouTube Web
@@ -125,6 +136,15 @@ certyfikat Android Debug i narzędziowy kod debug).
 - miniatury powiadomień są pobierane z ustalonej domeny YouTube, mają limit 5 MiB
   i 4096 px na wymiar, są skalowane do 512×288 przed przekazaniem do Androida
   oraz nie są zapisywane w cache aplikacji;
+- cache Historii i wewnętrznych Powiadomień jest adresowany SHA-256 treści.
+  Identyczne obrazy współdzielą jeden plik, a usuwanie uwzględnia wszystkie
+  aktualne odwołania;
+- startowe awatary 176×176 są dołączone jako JXL z manifestem SHA-256. Kontrola
+  sieciowa odbywa się najwyżej raz w tygodniu i zastępuje plik wyłącznie po
+  stwierdzeniu zmiany;
+- globalne i indywidualne reguły rodzajów są sprawdzane przed zapisem oraz
+  ponownie przed dostarczeniem powiadomienia. Wyłączenie historii ma
+  pierwszeństwo nad ustawieniem powiadomień i pomija odpowiednią kartę Web;
 - aplikacja nie ma WebView, dynamicznego wykonywania kodu, dostępu do plików
   użytkownika, lokalizacji, kontaktów, mikrofonu ani kamery;
 - Gradle pobiera zależności wyłącznie z Google Maven, Maven Central i
@@ -141,10 +161,17 @@ certyfikat Android Debug i narzędziowy kod debug).
   przyszłej wersji stabilnej.
 - szczegółowe logi wyjątków sieciowych są kompilowane wyłącznie w wariancie
   debug. Wariant release nie zapisuje do `logcat` nazw wybranych twórców,
-  adresów ich kanałów ani stosów wyjątków;
+  adresów ich kanałów ani stosów wyjątków. Opcjonalny lokalny dziennik
+  diagnostyczny jest domyślnie wyłączony, ograniczony rozmiarem, redaguje dane
+  i eksportuje standardowy tekst GZIP bez klucza API ani tokenów;
 - pojedynczy niedostępny kanał nie ponawia całej synchronizacji dziesiątek
   poprawnie sprawdzonych źródeł. Dokładny alarm ponawia awarię całkowitą albo
   obejmującą co najmniej połowę prób najwyżej dwa razy, co 15 minut.
+- adaptacyjny model kolejności jest przechowywany wyłącznie w lokalnej bazie.
+  Nie zawiera tytułów, klucza API ani wyborów użytkownika, nie wysyła
+  telemetrii i nie wykonuje własnych połączeń. Błędy oraz pierwsza inicjalizacja
+  nie są traktowane jak okres bez publikacji. Rutynowy stan bez trafienia jest
+  utrwalany nie częściej niż raz na 6 godzin, aby ograniczyć zapisy SQLite;
 
 ## Ryzyka pozostające z założenia
 
@@ -178,19 +205,20 @@ certyfikat Android Debug i narzędziowy kod debug).
 
 ## Wynik automatycznej walidacji
 
-Końcowy przebieg lokalny z 28 lipca 2026 r. dla kodu `1.4-beta`, po
-przebudowaniu głębszej historii YouTube Web i klasyfikacji rodzajów materiałów,
-zakończył się powodzeniem:
+Końcowy przebieg lokalny dla kodu `1.5-beta` obejmuje przebudowaną historię,
+selektywne ustawienia rodzajów, klasyfikację, lokalny model kolejności,
+współdzielenie obrazów i wbudowane awatary. Ostatni przebieg wykonano
+1 sierpnia 2026 r. przed podpisaniem APK:
 
-- 91 testów jednostkowych wariantu debug i 91 tych samych testów wariantu
-  release: 0 niepowodzeń, 0 błędów i 0 pominięć;
-- kompilacja Kotlin oraz kontrolne złożenie wariantów debug i release:
-  powodzenie;
-- Android Lint dla debug i release: 0 błędów. Pozostały 34 ostrzeżenia
-  informacyjnych: dostępność nowszych, celowo jeszcze niewprowadzonych wersji
-  zależności, sugestie zamiany jawnych transakcji na skróty KTX, kontrola
-  najnowszego API, kształt pomocniczych ikon rastrowych oraz jawne ostrzeżenie
-  polityki Google Play dla `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`;
+- 182 testy jednostkowe wariantu debug i 182 wariantu release: 0 niepowodzeń,
+  0 błędów i 0 pominiętych testów;
+- zgodność wszystkich 52 kluczy gotowego modelu początkowego z katalogiem
+  źródeł;
+- kompilacja Kotlin, testy oraz Android Lint debug/release zakończone
+  powodzeniem; oba raporty lint mają 0 błędów krytycznych i 0 błędów
+  (po 43 ostrzeżenia niewstrzymujące wydania);
+- zadanie przygotowania 49 awatarów JXL zakończone powodzeniem, a jego
+  konfiguracja została sprawdzona z włączonym Gradle Configuration Cache;
 - katalog 49 twórców i 52 źródeł: brak pustych pozycji, zduplikowanych kluczy
   źródeł i adresów spoza dozwolonych hostów YouTube;
 - ponownie scalone i przetworzone biblioteki natywne debug i release zawierają
@@ -203,9 +231,10 @@ zakończył się powodzeniem:
 - skan plików publikowanych: brak kluczy podpisu, APK/AAB, zrzutów pamięci,
   raportów awarii, osadzonych kluczy API oraz danych osobowych z certyfikatu.
 
-Przebieg Gradle tworzył wyłącznie niepodpisany APK release do kontroli
-kompilacji. Oddzielnie wygenerowany w Android Studio podpisany artefakt
-`lewicowYT-1.4-beta.apk` został następnie sprawdzony narzędziami Android SDK:
+### Historyczny artefakt 1.4-beta
+
+Poprzednio wygenerowany w Android Studio podpisany artefakt
+`lewicowYT-1.4-beta.apk` został sprawdzony narzędziami Android SDK:
 
 - SHA-256 APK:
   `ea534b9b2307c1d4f7dbdd079e4162479a72ec8f7ca480eed7c2806ac12a6938`;
@@ -215,13 +244,19 @@ kompilacji. Oddzielnie wygenerowany w Android Studio podpisany artefakt
   `2d242f3390a37913459085f86edf96484f2ccc3866e327325d2915c74a8e980a`;
 - minimalny Android API 26, docelowy API 36 oraz cztery deklarowane ABI.
 
-Skrót APK jest zgodny z identyfikatorem opublikowanego raportu VirusTotal.
+Skrót tego APK jest zgodny z identyfikatorem raportu VirusTotal 1.4-beta. Nie
+wolno używać go jako skrótu ani raportu dla 1.5-beta.
 
 ## Niezawodność danych i harmonogramu
 
 - odpowiedź RSS jest traktowana jako szybki początek, a nie dowód kompletności
   zakresu. Historia jest oznaczana jako ukończona dopiero po dojściu Data API
   albo YouTube Web do granicy czasu lub końca źródła;
+- bez Data API nowe powiadomienia wynikają z różnicy stabilnych identyfikatorów
+  pomiędzy kolejnymi poprawnymi odpowiedziami RSS. Zmiana tytułu, kolejności
+  albo wypadnięcie najstarszego wpisu nie tworzy powiadomienia;
+- dłuższa historia jest pobierana etapami po 14 dni, w kolejności Filmy,
+  Shorty, Streamy, przy maksymalnie pięciu kanałach historii równolegle;
 - paginacja YouTube traktuje samo echo ostatniego kursora jako wyczerpanie
   odpowiedzi, a cykle obejmujące różne wcześniejsze tokeny nadal zatrzymuje
   ochroną przed pętlą. Nie oznacza zakresu jako ukończonego po osiągnięciu
@@ -233,9 +268,17 @@ Skrót APK jest zgodny z identyfikatorem opublikowanego raportu VirusTotal.
 - zapis wpisu historii, jego pochodzenia, stanu sprawdzenia dla powiadomień oraz
   decyzji o kolejce jest atomowy, więc równoległy backfill nie może zgubić
   powiadomienia;
-- rekord o niepewnym typie pozostaje dostępny pod dotychczasowym rodzajem i jest
-  ponawiany w kolejności uwzględniającej czas ostatniej próby. Błąd klasyfikacji
-  nie wymusza już ogólnego typu `VIDEO`;
+- źródła są porządkowane przez lokalny estymator aktywności przed wejściem do
+  ograniczonej kolejki. Model ma 28-dniowe zapominanie, ograniczone wartości,
+  stabilne rozstrzyganie remisów i osobny poziom `overdue`, który zapobiega
+  zagłodzeniu rzadko publikujących kanałów. Historia korzysta z wyniku, ale nie
+  uczy modelu na ponownie pobieranych starych stronach;
+- rekord o niepewnym typie zachowuje silniejszą wcześniejszą klasyfikację.
+  Dopiero brak rozstrzygającego dowodu używa odwracalnego fallbacku `VIDEO`,
+  który późniejsza karta kanału lub stan transmisji może poprawić;
+- wyłączone globalnie lub dla twórcy typy są filtrowane przed zapisem. Przy
+  selektywnych ustawieniach niejednoznaczny wpis RSS/API czeka na potwierdzenie
+  właściwą kartą, zamiast przedostać się do włączonej kategorii;
 - harmonogram używa jednego jednorazowego alarmu `RTC_WAKEUP` o stałej
   tożsamości `PendingIntent`. Odbiornik zapisuje następny zwykły termin przed
   uruchomieniem sieci; ewentualne ponowienie zastępuje go tym samym alarmem,

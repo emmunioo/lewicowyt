@@ -1,0 +1,219 @@
+{
+  "asOf": "2026-07-29T19:42:08Z",
+  "model": {
+    "globalRatePerDay": 0.03333333,
+    "smoothingExposureDays": 7.0,
+    "windowDays": 60.0
+  },
+  "schemaVersion": 1,
+  "sources": {
+    "CHANNEL:UC1DbpEM6ve_ugCGwRVRmAMA": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.01840796
+    },
+    "CHANNEL:UC2Eox_aifU57gIF3tkN0IbA": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.78266408
+    },
+    "CHANNEL:UC30KgD9SvJSO6wgNKIup_bA": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.13781095
+    },
+    "CHANNEL:UC36Ob-zs0N_HXAVq558uXVA": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.47374389
+    },
+    "CHANNEL:UC3Jy_t3QVX5ZbD8oWiATXsw": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UC5Lci23YNxCCudOZmunmriw": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.07810945
+    },
+    "CHANNEL:UC7N4N58I5bw6PK222hxgOdw": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.1079602
+    },
+    "CHANNEL:UC90p6cQ80QXI1UuO7smoE5w": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.04825871
+    },
+    "CHANNEL:UC9ARVGd2W8sLehmmAsLQEdg": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCA6V5LhnFt5gOHg2IGvOVVw": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCAPX55k_DK-mjhCY-zQ-klw": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.19751244
+    },
+    "CHANNEL:UCG0NdlO9xadSCCtkcAlyWxw": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.01840796
+    },
+    "CHANNEL:UCGrWrLwjWPBuGeL4Ul-nvAg": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCHRbFrIkAqRebQ1KPB0GAZg": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCHWB1dvebBlXIHUSuUQSrxQ": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.43202534
+    },
+    "CHANNEL:UCJ-4xz1nMPtduM9wxNIO9Tg": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCM0XopUZWDFr44S7-Yh2z0g": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.9518926
+    },
+    "CHANNEL:UCMKZyjmnJ4neLD1uu1bb3Gw": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.01840796
+    },
+    "CHANNEL:UCN1VFXguj4CqJTjY3wS5NsA": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCNGLrRG1Rnzz7GrCcMNNuyA": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.04825871
+    },
+    "CHANNEL:UCNv4cxY-YSQlvrmsDE2mLdQ": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCOMc9Krrp4QPNkG70XN1YjQ": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.03333333
+    },
+    "CHANNEL:UCP_vrLsdZN4XNgoxgCxPzhg": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.09303483
+    },
+    "CHANNEL:UCPgCzvrInvJpw-3j1S3HNZg": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCQoWwO8XEA6B1ROmuaZ-iRw": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCScI9-djrBPkIZ5UyUzaQwQ": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.16766169
+    },
+    "CHANNEL:UCW20bou5g3q9XbiBbI8BQpA": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCXDlRb5RjgkoHN3E1Ilf0vA": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCaF0AjKWa7fUX7f5aycIlXg": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.03333333
+    },
+    "CHANNEL:UCetxq4gJcqEwKbH_t5E7bNg": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCfileU36Qdn2Ane5Wod7mqQ": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCgo8qyeSzKFlcUWY-noDXlg": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.24508991
+    },
+    "CHANNEL:UChSAxjMi_i04_mcYFMbWYwA": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.06318408
+    },
+    "CHANNEL:UCiB1NgAw-H7DNo-lgGsezCw": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.03333333
+    },
+    "CHANNEL:UCih65M0vAt17MJru6bsOtRQ": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UClQMYA_aCD0pU519LY_hT4w": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UClqAzUH189WCxw34M4Y1-eA": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.09303483
+    },
+    "CHANNEL:UCm6aYLFyvSstBYNup2N1GXg": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCmboZKq8UHo3i5HZGtLx_eQ": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.38537081
+    },
+    "CHANNEL:UCnVVulmnlME8AFCbTddjZ1A": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.03333333
+    },
+    "CHANNEL:UCoaIm7ATrK4ItBA-yRCHDzw": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.07810945
+    },
+    "CHANNEL:UCof4jJ9hM9RLsBII8laZI5A": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.03333333
+    },
+    "CHANNEL:UCpCj2CFfVsnICeMaLAXl9uw": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCsBqlC1W2sQqypjgytnWdMw": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCtWuuyXHgANtM-V0mpddkUQ": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.50571414
+    },
+    "CHANNEL:UCtgwI4OVMGw_deAYE7pqcww": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.28976867
+    },
+    "CHANNEL:UCvX5pUki31Bs3y28bvPY6Jg": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCwberQU7c-3pb1jarmb6PNw": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.18258706
+    },
+    "CHANNEL:UCwqTxnEV44Z3rQVyQqWVRwg": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.06318408
+    },
+    "CHANNEL:UCwv5NcIaTTXcxiEsFprm4Kg": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.00348259
+    },
+    "CHANNEL:UCyUo1cc5_Oq8ZpfudF3ZkNg": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.19751244
+    },
+    "PLAYLIST:PLtvjdkxi9_FFKd_k5GZwzNLREdxwPC4LN": {
+      "priorExposureDays": 14.0,
+      "priorRatePerDay": 0.1079602
+    }
+  }
+}
