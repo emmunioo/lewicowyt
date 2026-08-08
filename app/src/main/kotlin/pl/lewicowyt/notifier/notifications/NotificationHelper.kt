@@ -13,7 +13,6 @@ import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import androidx.core.net.toUri
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.util.concurrent.TimeUnit
@@ -27,6 +26,7 @@ import pl.lewicowyt.notifier.MainActivity
 import pl.lewicowyt.notifier.R
 import pl.lewicowyt.notifier.data.DataRetentionPolicy
 import pl.lewicowyt.notifier.data.LocalDatabase
+import pl.lewicowyt.notifier.links.YouTubeLinkLauncher
 import pl.lewicowyt.notifier.model.Creator
 import pl.lewicowyt.notifier.model.HistoryItem
 import pl.lewicowyt.notifier.model.VideoEntry
@@ -42,11 +42,15 @@ data class NotificationCandidate(
 data class NotificationDeliveryResult(
     val systemNotificationsSent: Int = 0,
     val deliveredVideoIds: Set<String> = emptySet(),
+    val permissionMissingVideoIds: Set<String> = emptySet(),
+    val revalidationRejectedVideoIds: Set<String> = emptySet(),
+    val failedVideoIds: Set<String> = emptySet(),
 )
 
 class NotificationHelper(
     private val context: Context,
     private val database: LocalDatabase,
+    private val youtubeLinks: YouTubeLinkLauncher,
 ) {
     private val thumbnailClient by lazy {
         PrivacyHttpClient.get(context).newBuilder()
@@ -73,17 +77,29 @@ class NotificationHelper(
         candidates: List<NotificationCandidate>,
         canDeliver: suspend (NotificationCandidate) -> Boolean = { true },
     ): NotificationDeliveryResult {
-        if (candidates.isEmpty() || !hasNotificationPermission()) {
+        if (candidates.isEmpty()) {
             return NotificationDeliveryResult()
         }
         val unique = candidates.distinctBy { it.entry.id }
             .sortedByDescending { it.entry.publishedAtMillis }
-            .filter { canDeliver(it) }
+        if (!hasNotificationPermission()) {
+            return NotificationDeliveryResult(
+                permissionMissingVideoIds = unique.mapTo(mutableSetOf()) { it.entry.id },
+            )
+        }
+        val initiallyAllowed = unique.filter { canDeliver(it) }
+        val rejected = unique.mapTo(mutableSetOf()) { it.entry.id }.apply {
+            removeAll(initiallyAllowed.map { it.entry.id }.toSet())
+        }
         // Wybór kanałów może zmienić się podczas przygotowywania paczki.
         // Ponowny odczyt tuż przed wyborem typu powiadomienia zapobiega
         // zbiorczemu oznaczeniu odznaczonych twórców jako dostarczonych.
-        val deliverable = unique.filter { canDeliver(it) }
-        if (deliverable.isEmpty()) return NotificationDeliveryResult()
+        val deliverable = initiallyAllowed.filter { canDeliver(it) }
+        rejected += initiallyAllowed.map { it.entry.id }
+            .filterNot(deliverable.map { it.entry.id }.toSet()::contains)
+        if (deliverable.isEmpty()) {
+            return NotificationDeliveryResult(revalidationRejectedVideoIds = rejected)
+        }
         return if (!usesSummaryNotification(deliverable.size)) {
             val deliveredIds = coroutineScope {
                 deliverable.map { candidate ->
@@ -103,15 +119,23 @@ class NotificationHelper(
             NotificationDeliveryResult(
                 systemNotificationsSent = deliveredIds.size,
                 deliveredVideoIds = deliveredIds,
+                revalidationRejectedVideoIds = rejected,
+                failedVideoIds = deliverable.mapTo(mutableSetOf()) { it.entry.id }.apply {
+                    removeAll(deliveredIds)
+                },
             )
         } else {
             if (notifySummary(deliverable.size)) {
                 NotificationDeliveryResult(
                     systemNotificationsSent = 1,
                     deliveredVideoIds = deliverable.mapTo(mutableSetOf()) { it.entry.id },
+                    revalidationRejectedVideoIds = rejected,
                 )
             } else {
-                NotificationDeliveryResult()
+                NotificationDeliveryResult(
+                    revalidationRejectedVideoIds = rejected,
+                    failedVideoIds = deliverable.mapTo(mutableSetOf()) { it.entry.id },
+                )
             }
         }
     }
@@ -122,15 +146,10 @@ class NotificationHelper(
     ): Boolean {
         if (!YOUTUBE_VIDEO_ID.matches(candidate.entry.id)) return false
         val notificationId = database.getOrCreateNotificationId(candidate.entry.id)
-        val pendingIntent = PendingIntent.getActivity(
-            context,
-            notificationId,
-            Intent(
-                Intent.ACTION_VIEW,
-                "https://www.youtube.com/watch?v=${candidate.entry.id}".toUri(),
-            ),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
+        val pendingIntent = youtubeLinks.notificationPendingIntent(
+            url = "https://www.youtube.com/watch?v=${candidate.entry.id}",
+            requestCode = notificationId,
+        ) ?: return false
         val title = when (candidate.kind) {
             VideoKind.LIVE -> "Transmisja na żywo: ${candidate.creator.name}"
             VideoKind.UPCOMING -> "Zaplanowana transmisja: ${candidate.creator.name}"

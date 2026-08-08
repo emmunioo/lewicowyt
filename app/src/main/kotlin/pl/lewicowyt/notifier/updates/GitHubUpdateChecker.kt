@@ -5,6 +5,9 @@ import java.math.BigInteger
 import java.net.URI
 import org.json.JSONArray
 import pl.lewicowyt.notifier.network.HttpTextClient
+import pl.lewicowyt.notifier.diagnostics.DiagnosticCategory
+import pl.lewicowyt.notifier.diagnostics.DiagnosticLevel
+import pl.lewicowyt.notifier.diagnostics.DiagnosticLogStore
 
 sealed interface UpdateCheckResult {
     data object NotConfigured : UpdateCheckResult
@@ -23,6 +26,7 @@ data class AvailableUpdate(
     val releasePageUrl: String,
     val apkDownloadUrl: String,
     val apkName: String,
+    val apkSizeBytes: Long?,
     val sha256Digest: String?,
     val releaseNotes: String,
     val policy: UpdatePolicy = UpdatePolicy.OPTIONAL,
@@ -33,6 +37,12 @@ class GitHubUpdateChecker(
     private val repository: String,
 ) {
     fun check(currentVersion: String): UpdateCheckResult {
+        DiagnosticLogStore.event(
+            DiagnosticCategory.UPDATE,
+            DiagnosticLevel.INFO,
+            "UPDATE_CHECK_START",
+            fields = mapOf("currentVersion" to currentVersion),
+        )
         val normalizedRepository = repository.trim().trim('/')
         if (!REPOSITORY_PATTERN.matches(normalizedRepository)) {
             return UpdateCheckResult.NotConfigured
@@ -56,11 +66,30 @@ class GitHubUpdateChecker(
             throw error
         }
         val releases = JSONArray(json)
-        return selectUpdateResultFromReleases(
+        val result = selectUpdateResultFromReleases(
             releases = releases,
             currentVersion = currentVersion,
             repository = normalizedRepository,
         )
+        when (result) {
+            is UpdateCheckResult.Available -> DiagnosticLogStore.event(
+                DiagnosticCategory.UPDATE,
+                DiagnosticLevel.INFO,
+                "UPDATE_FOUND",
+                fields = mapOf(
+                    "version" to result.update.version,
+                    "policy" to result.update.policy.name,
+                ),
+            )
+            is UpdateCheckResult.UpToDate -> DiagnosticLogStore.event(
+                DiagnosticCategory.UPDATE,
+                DiagnosticLevel.INFO,
+                "UPDATE_UP_TO_DATE",
+                fields = mapOf("version" to result.latestVersion),
+            )
+            UpdateCheckResult.NotConfigured -> Unit
+        }
+        return result
     }
 
     private companion object {
@@ -263,6 +292,8 @@ private fun installableReleaseCandidates(
                         releasePageUrl = releasePageUrl,
                         apkDownloadUrl = apkDownloadUrl,
                         apkName = apkName,
+                        apkSizeBytes = apk.optLong("size")
+                            .takeIf { it in 1..MAX_APK_SIZE_BYTES },
                         sha256Digest = apk.optString("digest")
                             .takeIf { it.startsWith("sha256:") }
                             ?.removePrefix("sha256:")
@@ -284,6 +315,7 @@ private val SHA256 = Regex("""[a-fA-F0-9]{64}""")
 private const val MAX_VERSION_CHARS = 100
 private const val MAX_ASSET_NAME_CHARS = 200
 private const val MAX_RELEASE_NOTES_CHARS = 20_000
+private const val MAX_APK_SIZE_BYTES = 200L * 1024L * 1024L
 
 internal fun requireSafeGitHubReleaseUrl(value: String, repository: String): String {
     val uri = runCatching { URI(value) }.getOrNull()

@@ -29,9 +29,13 @@ import pl.lewicowyt.notifier.AppLog
 import pl.lewicowyt.notifier.BuildConfig
 import pl.lewicowyt.notifier.data.AppSettings
 import pl.lewicowyt.notifier.data.ThemeMode
+import pl.lewicowyt.notifier.data.YouTubeLinkTarget
+import pl.lewicowyt.notifier.data.hasEnabledContentForSelectedCreators
 import pl.lewicowyt.notifier.data.isHistoryEnabledFor
 import pl.lewicowyt.notifier.data.isNotificationEnabledFor
 import pl.lewicowyt.notifier.images.JxlImageCache
+import pl.lewicowyt.notifier.diagnostics.DiagnosticSyncRun
+import pl.lewicowyt.notifier.diagnostics.DiagnosticSyncTrigger
 import pl.lewicowyt.notifier.model.Creator
 import pl.lewicowyt.notifier.model.HistoryFilter
 import pl.lewicowyt.notifier.model.HistoryItem
@@ -41,6 +45,7 @@ import pl.lewicowyt.notifier.network.normalizeYouTubeAvatarUrl
 import pl.lewicowyt.notifier.images.BundledAvatarStore
 import pl.lewicowyt.notifier.updates.AvailableUpdate
 import pl.lewicowyt.notifier.updates.UpdateCheckResult
+import pl.lewicowyt.notifier.worker.isNotificationInterruptionSuppressed
 
 private val POLISH_LOCALE: Locale = Locale.forLanguageTag("pl")
 private const val MAX_HISTORY_DAYS = 60
@@ -61,7 +66,10 @@ sealed interface UpdateUiState {
     data class Available(val update: AvailableUpdate) : UpdateUiState
     data class Downloading(val update: AvailableUpdate) : UpdateUiState
     data class ReadyToInstall(val update: AvailableUpdate) : UpdateUiState
-    data class Error(val message: String) : UpdateUiState
+    data class Error(
+        val message: String,
+        val update: AvailableUpdate? = null,
+    ) : UpdateUiState
 }
 
 sealed interface ApiKeyUiState {
@@ -84,6 +92,7 @@ data class AppUiState(
     val actionMessage: String? = null,
     val apiKeyState: ApiKeyUiState = ApiKeyUiState.Idle,
     val updateState: UpdateUiState = UpdateUiState.Idle,
+    val favoritesOnly: Boolean = false,
     val historyHasMore: Boolean = true,
     val isLoadingHistory: Boolean = false,
     val historyLoadError: String? = null,
@@ -99,6 +108,7 @@ private data class UiContent(
     val historyLimit: Int,
     val notificationNavigationRequest: Long,
     val apiKeyState: ApiKeyUiState,
+    val favoritesOnly: Boolean,
 )
 
 private data class HistoryLoadState(
@@ -127,8 +137,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val historyEndReached = MutableStateFlow(false)
     private val historyLoadError = MutableStateFlow<String?>(null)
     private val notificationNavigationRequest = MutableStateFlow(0L)
+    private val favoritesOnly = MutableStateFlow(false)
     private var historyLoadJob: Job? = null
     private var syncJob: Job? = null
+    private var initialSyncCheckRunning = false
     private var lastManualUpdateCheckAtMillis = 0L
 
     private data class StoredItems(
@@ -140,6 +152,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val historyLimit: Int,
         val notificationNavigationRequest: Long,
         val apiKeyState: ApiKeyUiState,
+        val favoritesOnly: Boolean,
     )
 
     private val storedItems = combine(history, notificationInbox) {
@@ -151,8 +164,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         historyLimit,
         notificationNavigationRequest,
         apiKeyStatus,
-    ) { currentHistoryLimit, navigationRequest, currentApiKeyState ->
-        ViewControls(currentHistoryLimit, navigationRequest, currentApiKeyState)
+        favoritesOnly,
+    ) { currentHistoryLimit, navigationRequest, currentApiKeyState, currentFavoritesOnly ->
+        ViewControls(
+            currentHistoryLimit,
+            navigationRequest,
+            currentApiKeyState,
+            currentFavoritesOnly,
+        )
     }
 
     private val content = combine(
@@ -177,6 +196,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             controls.historyLimit,
             controls.notificationNavigationRequest,
             controls.apiKeyState,
+            controls.favoritesOnly,
         )
     }
 
@@ -202,7 +222,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             .intersect(contentState.settings.globalHistoryTypes)
         val filteredHistory = contentState.history
             .asSequence()
-            .filter { it.publishedAtMillis >= cutoff }
+            .filter {
+                if (contentState.favoritesOnly) it.isFavorite
+                else it.publishedAtMillis >= cutoff
+            }
             .filter { it.creatorId in contentState.settings.selectedCreatorIds }
             .filter {
                 contentState.settings.isHistoryEnabledFor(it.creatorId, it.kind)
@@ -231,10 +254,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             actionMessage = message,
             apiKeyState = contentState.apiKeyState,
             updateState = currentUpdateState,
+            favoritesOnly = contentState.favoritesOnly,
             historyHasMore =
                 activeHistoryFilters.isNotEmpty() &&
-                    (filteredHistory.size > contentState.historyLimit ||
-                        (!loadState.endReached && loadState.error == null)),
+                    if (contentState.favoritesOnly) {
+                        filteredHistory.size > contentState.historyLimit
+                    } else {
+                        filteredHistory.size > contentState.historyLimit ||
+                            (!loadState.endReached && loadState.error == null)
+                    },
             isLoadingHistory = loadState.isLoading,
             historyLoadError = loadState.error,
             notificationNavigationRequest = contentState.notificationNavigationRequest,
@@ -251,6 +279,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         refreshHistory()
+        syncOnFirstLaunchIfNeeded()
         if (legacyAvatarIdsToRefresh.isNotEmpty()) {
             viewModelScope.launch {
                 refreshMissingAvatars(legacyAvatarIdsToRefresh)
@@ -262,12 +291,38 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         query.value = value.take(MAX_SEARCH_QUERY_CHARS)
     }
 
+    fun setFavoritesOnly(enabled: Boolean) {
+        favoritesOnly.value = enabled
+        historyLimit.value = HISTORY_PAGE_SIZE
+    }
+
+    fun setFavorite(videoId: String, favorite: Boolean) {
+        viewModelScope.launch {
+            try {
+                val updated = withContext(Dispatchers.IO) {
+                    graph.database.setFavorite(videoId, favorite)
+                }
+                if (updated) {
+                    refreshHistoryNow()
+                } else {
+                    actionMessage.value = "Nie znaleziono materiału w lokalnej historii."
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                actionMessage.value =
+                    "Nie udało się zmienić Ulubionych: ${error.displayMessage()}"
+            }
+        }
+    }
+
     fun setCreatorSelected(creatorId: String, selected: Boolean) {
         viewModelScope.launch {
             graph.preferences.setCreatorSelected(creatorId, selected)
             graph.scheduler.schedule(graph.preferences.current())
             resetHistoryPaging()
             if (selected) refreshMissingAvatars(setOf(creatorId))
+            if (selected) syncOnFirstLaunchIfNeeded()
         }
     }
 
@@ -278,6 +333,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             resetHistoryPaging()
             if (selected) {
                 refreshMissingAvatars(graph.catalog.creators.mapTo(mutableSetOf()) { it.id })
+                syncOnFirstLaunchIfNeeded()
             }
         }
     }
@@ -366,6 +422,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { graph.preferences.setThemeMode(value) }
     }
 
+    fun setHighContrastEnabled(value: Boolean) {
+        viewModelScope.launch { graph.preferences.setHighContrastEnabled(value) }
+    }
+
+    fun setYouTubeLinkTarget(value: YouTubeLinkTarget) {
+        viewModelScope.launch { graph.preferences.setYouTubeLinkTarget(value) }
+    }
+
     fun setAccentColor(argb: Long) {
         viewModelScope.launch { graph.preferences.setAccentColor(argb) }
     }
@@ -425,13 +489,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         refreshHistory()
     }
 
-    fun syncNow() {
+    fun syncNow() = syncNowWithTrigger(DiagnosticSyncTrigger.MANUAL)
+
+    private fun syncNowWithTrigger(trigger: DiagnosticSyncTrigger) {
         if (refreshing.value) return
         refreshing.value = true
         syncJob = viewModelScope.launch {
             actionMessage.value = null
+            val diagnosticRun = DiagnosticSyncRun.create(trigger)
             try {
-                val outcome = graph.syncEngine.sync()
+                val outcome = graph.syncEngine.sync(
+                    diagnosticRun = diagnosticRun,
+                )
                 actionMessage.value = buildString {
                     append(outcome.toPolishSummary())
                     if (outcome.errors.isNotEmpty()) {
@@ -446,6 +515,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 refreshHistoryNow()
                 avatars.value = graph.database.getCreatorAvatars().normalizedAvatarUrls()
             } catch (error: Exception) {
+                diagnosticRun.event(
+                    "SYNC_ERROR",
+                    level = pl.lewicowyt.notifier.diagnostics.DiagnosticLevel.ERROR,
+                    reason = pl.lewicowyt.notifier.diagnostics.DiagnosticReasonCode.DELIVERY_FAILED,
+                    fields = mapOf("type" to error.javaClass.simpleName),
+                )
+                diagnosticRun.finish(mapOf("result" to "ERROR"))
                 AppLog.error(
                     "ManualSync",
                     "Ręcznie uruchomiona synchronizacja nie została ukończona",
@@ -456,6 +532,51 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         error.displayMessage()
             } finally {
                 refreshing.value = false
+            }
+        }
+    }
+
+    private fun syncOnFirstLaunchIfNeeded() {
+        if (initialSyncCheckRunning) return
+        initialSyncCheckRunning = true
+        viewModelScope.launch {
+            try {
+                val settings = graph.preferences.current()
+                if (
+                    settings.lastCompletedSyncAtMillis <= 0L &&
+                    settings.hasEnabledContentForSelectedCreators() &&
+                    !isNotificationInterruptionSuppressed(getApplication())
+                ) {
+                    syncNowWithTrigger(DiagnosticSyncTrigger.FIRST_SYNC)
+                }
+            } finally {
+                initialSyncCheckRunning = false
+            }
+        }
+    }
+
+    fun saveDiagnosticSnapshot(onResult: (String) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = graph.diagnostics.writeSnapshot("MANUAL_PANEL")
+            withContext(Dispatchers.Main) {
+                onResult(
+                    "Alarmy: ${result.alarmsPresent}/${result.alarmsExpected}; " +
+                        "FTS5: ${if (result.fts5Available) "OK" else "niedostępne"}",
+                )
+            }
+        }
+    }
+
+    fun checkDiagnosticDatabase(onResult: (String) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = graph.syncEngine.runExclusiveMaintenance {
+                graph.diagnostics.quickCheck()
+            }
+            withContext(Dispatchers.Main) {
+                onResult(
+                    if (ok) "Baza danych: OK" else
+                        "Wykryto problem — szczegóły zapisano w diagnostyce.",
+                )
             }
         }
     }
@@ -505,7 +626,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
-                updateStatus.value = UpdateUiState.Error(error.displayMessage())
+                updateStatus.value = UpdateUiState.Error(
+                    message = error.displayMessage(),
+                    update = update,
+                )
             }
         }
     }
@@ -524,6 +648,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         historyLoadJob = viewModelScope.launch {
             try {
                 historyLimit.value += HISTORY_PAGE_SIZE
+                if (favoritesOnly.value) return@launch
                 val settings = graph.preferences.current()
                 val activeHistoryFilters = settings.historyFilters
                     .intersect(settings.globalHistoryTypes)

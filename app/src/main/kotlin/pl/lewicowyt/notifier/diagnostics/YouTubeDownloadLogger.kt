@@ -29,20 +29,36 @@ internal fun logYouTubeDownload(
     source: DiagnosticYouTubeSource,
     videoIds: Iterable<String>,
     role: DiagnosticDownloadRole = DiagnosticDownloadRole.ITEMS,
+    run: DiagnosticSyncRun? = null,
 ) {
     val links = videoIds
         .mapNotNull(::diagnosticYouTubeVideoUrl)
         .distinct()
-    DiagnosticLogStore.info(
-        area.category,
-        "Pobranie zakończone | cel=${area.label} | źródło=${source.label} | " +
-            "rola=${role.label} | liczba=${links.size}",
+    DiagnosticLogStore.event(
+        category = area.category,
+        level = DiagnosticLevel.INFO,
+        name = "SOURCE_RESULT",
+        syncId = run?.syncId,
+        fields = mapOf(
+            "area" to area.name,
+            "source" to source.name,
+            "role" to role.name,
+            "count" to links.size,
+        ),
+        text = "Pobranie zakończone: ${area.label}, ${source.label}",
     )
     links.forEach { link ->
-        DiagnosticLogStore.info(
-            area.category,
-            "Pobrano | cel=${area.label} | źródło=${source.label} | " +
-                "rola=${role.label} | $link",
+        DiagnosticLogStore.event(
+            category = area.category,
+            level = DiagnosticLevel.INFO,
+            name = "MATERIAL_FETCHED",
+            syncId = run?.syncId,
+            fields = mapOf(
+                "area" to area.name,
+                "source" to source.name,
+                "role" to role.name,
+                "video" to link,
+            ),
         )
     }
 }

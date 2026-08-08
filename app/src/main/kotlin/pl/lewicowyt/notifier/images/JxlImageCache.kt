@@ -26,7 +26,16 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import pl.lewicowyt.notifier.BuildConfig
 import pl.lewicowyt.notifier.data.DataRetentionPolicy
+import pl.lewicowyt.notifier.diagnostics.DiagnosticCategory
+import pl.lewicowyt.notifier.diagnostics.DiagnosticLevel
+import pl.lewicowyt.notifier.diagnostics.DiagnosticLogStore
 import pl.lewicowyt.notifier.network.PrivacyHttpClient
+
+internal data class ImageCacheDiagnosticState(
+    val files: Int,
+    val bytes: Long,
+    val conversionsInProgress: Int,
+)
 
 /**
  * Obraz jest dostępny od razu z pobranego JPG, a jego zamiana na JXL odbywa się
@@ -177,13 +186,28 @@ object JxlImageCache {
     fun pruneExpired(
         context: Context,
         nowMillis: Long = System.currentTimeMillis(),
+        protectedUrls: Set<String> = emptySet(),
     ) {
+        var removedFiles = 0
+        var freedBytes = 0L
         val cutoff = DataRetentionPolicy.cutoffs(nowMillis).historyBeforeMillis
         val directories = cacheDirectories(context)
+        val protectedReferenceNames = protectedUrls.mapTo(mutableSetOf()) { url ->
+            "${ImageContentAddressing.urlKey(url)}.ref"
+        }
         directories.references.listFiles()
             .orEmpty()
-            .filter { it.isFile && it.lastModified() < cutoff }
-            .forEach(File::delete)
+            .filter {
+                it.isFile && it.lastModified() < cutoff &&
+                    it.name !in protectedReferenceNames
+            }
+            .forEach { file ->
+                val size = file.length()
+                if (file.delete()) {
+                    removedFiles += 1
+                    freedBytes += size
+                }
+            }
         val referencedKeys = ImageContentAddressing.referencedContentKeys(directories.references)
         directories.content.listFiles()
             .orEmpty()
@@ -192,12 +216,53 @@ object JxlImageCache {
                     file.lastModified() < cutoff &&
                     file.nameWithoutExtension !in referencedKeys
             }
-            .forEach(File::delete)
+            .forEach { file ->
+                val size = file.length()
+                if (file.delete()) {
+                    removedFiles += 1
+                    freedBytes += size
+                }
+            }
         File(context.applicationContext.cacheDir, URL_ADDRESSED_CACHE_DIRECTORY)
             .listFiles()
             .orEmpty()
             .filter { it.isFile && it.lastModified() < cutoff }
-            .forEach(File::delete)
+            .forEach { file ->
+                val size = file.length()
+                if (file.delete()) {
+                    removedFiles += 1
+                    freedBytes += size
+                }
+            }
+        if (removedFiles > 0) {
+            DiagnosticLogStore.event(
+                DiagnosticCategory.IMAGE,
+                DiagnosticLevel.INFO,
+                "IMAGE_CACHE_CLEANUP",
+                fields = mapOf(
+                    "removed" to removedFiles,
+                    "freedBytes" to freedBytes,
+                    "protectedFavorites" to protectedUrls.size,
+                ),
+            )
+        }
+    }
+
+    internal fun diagnosticState(context: Context): ImageCacheDiagnosticState {
+        val appCache = context.applicationContext.cacheDir
+        val roots = listOf(
+            File(appCache, CACHE_DIRECTORY),
+            File(appCache, URL_ADDRESSED_CACHE_DIRECTORY),
+            File(appCache, LEGACY_CACHE_DIRECTORY),
+        )
+        val files = roots.flatMap { root ->
+            root.walkTopDown().filter(File::isFile).take(MAX_DIAGNOSTIC_FILES).toList()
+        }
+        return ImageCacheDiagnosticState(
+            files = files.size,
+            bytes = files.sumOf(File::length),
+            conversionsInProgress = conversionsInProgress.size,
+        )
     }
 
     /**
@@ -344,6 +409,8 @@ object JxlImageCache {
         conversionScope.launch {
             try {
                 conversionSemaphore.withPermit {
+                    val startedAtNanos = System.nanoTime()
+                    val inputBytes = sourceFile.length()
                     if (generation != cacheGeneration.get()) return@withPermit
                     synchronized(cacheMutationLock) {
                         if (generation != cacheGeneration.get()) return@withPermit
@@ -352,7 +419,10 @@ object JxlImageCache {
                             return@withPermit
                         }
                     }
-                    val bitmap = decodeOriginal(sourceFile) ?: return@withPermit
+                    val bitmap = decodeOriginal(sourceFile) ?: run {
+                        logJxlError("DECODE_ORIGINAL_FAILED", inputBytes, null)
+                        return@withPermit
+                    }
                     val encoded = try {
                         runCatching {
                             JxlCoder.encode(
@@ -362,17 +432,38 @@ object JxlImageCache {
                                 JxlEffort.GLACIER,
                                 JXL_QUALITY,
                             )
+                        }.onFailure { error ->
+                            logJxlError("ENCODE_FAILED", inputBytes, error)
                         }.getOrNull()
                     } finally {
                         bitmap.recycle()
                     } ?: return@withPermit
                     if (!JxlCoder.isJXL(encoded) || JxlCoder.getSize(encoded) == null) {
+                        logJxlError("VERIFY_FAILED", inputBytes, null)
                         return@withPermit
                     }
                     synchronized(cacheMutationLock) {
                         if (generation != cacheGeneration.get()) return@withPermit
-                        if (!writeAtomically(jxlFile, encoded)) return@withPermit
+                        if (!writeAtomically(jxlFile, encoded)) {
+                            logJxlError("WRITE_FAILED", inputBytes, null)
+                            return@withPermit
+                        }
                         sourceFile.delete()
+                    }
+                    val durationMillis = (System.nanoTime() - startedAtNanos) / 1_000_000L
+                    if (durationMillis >= SLOW_JXL_MILLIS) {
+                        DiagnosticLogStore.event(
+                            DiagnosticCategory.IMAGE,
+                            DiagnosticLevel.WARNING,
+                            "JXL_ENCODE",
+                            fields = mapOf(
+                                "result" to "OK",
+                                "inputBytes" to inputBytes,
+                                "outputBytes" to encoded.size,
+                                "durationMs" to durationMillis,
+                            ),
+                            text = "Nietypowo wolna kompresja obrazu",
+                        )
                     }
                 }
             } finally {
@@ -386,6 +477,20 @@ object JxlImageCache {
         return runCatching { JxlCoder.decode(file.readBytes()) }
             .getOrNull()
             ?.takeIf { isSafeDecodedSize(it.width, it.height) }
+    }
+
+    private fun logJxlError(stage: String, inputBytes: Long, error: Throwable?) {
+        DiagnosticLogStore.event(
+            DiagnosticCategory.IMAGE,
+            DiagnosticLevel.ERROR,
+            "JXL_ENCODE",
+            fields = mapOf(
+                "result" to "ERROR",
+                "stage" to stage,
+                "inputBytes" to inputBytes,
+                "type" to error?.javaClass?.simpleName,
+            ),
+        )
     }
 
     private fun decodeOriginal(file: File): Bitmap? {
@@ -555,6 +660,8 @@ object JxlImageCache {
     private const val MAX_DECODED_DIMENSION = 1_280
     private const val MAX_DECODED_PIXELS = 2_097_152L
     private const val MAX_REDIRECTS = 4
+    private const val MAX_DIAGNOSTIC_FILES = 10_000
+    private const val SLOW_JXL_MILLIS = 2_000L
     private val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
     private val IMAGE_HOST_SUFFIXES = setOf(
         "ytimg.com",

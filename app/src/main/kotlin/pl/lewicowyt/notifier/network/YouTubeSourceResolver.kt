@@ -120,7 +120,16 @@ class YouTubeSourceResolver(
 
     /** Pomija zapisany URL; używane przez tygodniową kontrolę zawartości. */
     fun resolveFreshCreatorAvatar(creator: Creator): String? {
-        for (source in creator.sources) {
+        val profileSource = creator.profileChannelId?.let { profileChannelId ->
+            creator.sources.firstOrNull {
+                it.type == SourceType.CHANNEL && it.externalId == profileChannelId
+            }
+        }
+        val avatarSources = buildList {
+            profileSource?.let(::add)
+            creator.sources.filterTo(this) { it != profileSource }
+        }
+        for (source in avatarSources) {
             val pageUrl = when (source.type) {
                 SourceType.CHANNEL -> normalizeChannelPageUrl(source.url)
                 SourceType.PLAYLIST -> {

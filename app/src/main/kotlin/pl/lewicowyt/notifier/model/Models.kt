@@ -15,6 +15,7 @@ data class Creator(
     val id: String,
     val name: String,
     val sources: List<CreatorSource>,
+    val profileChannelId: String? = null,
 )
 
 enum class VideoKind {
@@ -162,6 +163,7 @@ data class HistoryItem(
     val kind: VideoKind,
     val notified: Boolean,
     val origin: VideoOrigin = VideoOrigin.YOUTUBE,
+    val isFavorite: Boolean = false,
 )
 
 data class SyncOutcome(

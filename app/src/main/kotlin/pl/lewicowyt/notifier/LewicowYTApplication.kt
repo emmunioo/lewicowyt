@@ -7,20 +7,26 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import pl.lewicowyt.notifier.diagnostics.DiagnosticLogStore
 import pl.lewicowyt.notifier.images.JxlImageCache
+import pl.lewicowyt.notifier.worker.InterruptionModeController
 
 class LewicowYTApplication : Application() {
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private lateinit var interruptionModeController: InterruptionModeController
 
     override fun onCreate() {
         super.onCreate()
         DiagnosticLogStore.initialize(this)
         AppGraph.initialize(this)
         AppGraph.notifications.createChannel()
+        interruptionModeController = InterruptionModeController(this).also { it.start() }
         applicationScope.launch {
             cancelNotificationsAfterSourceCatalogRepair()
             AppGraph.updateManager.removeStalePreparedUpdate()
             AppGraph.database.pruneExpiredData()
-            JxlImageCache.pruneExpired(this@LewicowYTApplication)
+            JxlImageCache.pruneExpired(
+                context = this@LewicowYTApplication,
+                protectedUrls = AppGraph.database.favoriteThumbnailUrls(),
+            )
             JxlImageCache.migrateExisting(this@LewicowYTApplication)
             AppGraph.scheduler.ensureScheduled()
         }

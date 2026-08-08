@@ -49,4 +49,30 @@ class CreatorChannelUrlTest {
 
         assertNull(creatorYouTubeChannelUrl(creator))
     }
+
+    @Test
+    fun explicitProfileChannelWinsOverFirstSynchronizedChannel() {
+        val creator = Creator(
+            id = "myslec-glebiej",
+            name = "Myśleć Głębiej",
+            profileChannelId = "UC1DbpEM6ve_ugCGwRVRmAMA",
+            sources = listOf(
+                CreatorSource(
+                    type = SourceType.CHANNEL,
+                    url = "https://www.youtube.com/@myslecglebiejluzniej",
+                    externalId = "UCXDlRb5RjgkoHN3E1Ilf0vA",
+                ),
+                CreatorSource(
+                    type = SourceType.CHANNEL,
+                    url = "https://www.youtube.com/MyslecGlebiej",
+                    externalId = "UC1DbpEM6ve_ugCGwRVRmAMA",
+                ),
+            ),
+        )
+
+        assertEquals(
+            "https://www.youtube.com/channel/UC1DbpEM6ve_ugCGwRVRmAMA",
+            creatorYouTubeChannelUrl(creator),
+        )
+    }
 }

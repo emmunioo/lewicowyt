@@ -24,6 +24,7 @@ import pl.lewicowyt.notifier.ui.AppViewModel
 import pl.lewicowyt.notifier.ui.LewicowYTApp
 import pl.lewicowyt.notifier.ui.theme.LewicowYTTheme
 import pl.lewicowyt.notifier.updates.AppUpdateTracker
+import pl.lewicowyt.notifier.worker.hasNotificationPolicyAccess
 
 class MainActivity : ComponentActivity() {
     private val viewModel: AppViewModel by viewModels { AppViewModel.Factory(application) }
@@ -31,6 +32,7 @@ class MainActivity : ComponentActivity() {
     private var notificationPermissionGranted = false
     private var exactAlarmAccessGranted by mutableStateOf(true)
     private var batteryOptimizationIgnored by mutableStateOf(true)
+    private var notificationPolicyAccessGranted by mutableStateOf(false)
     private var whatsNewVisible by mutableStateOf(false)
 
     private val notificationPermissionLauncher = registerForActivityResult(
@@ -45,6 +47,7 @@ class MainActivity : ComponentActivity() {
         notificationPermissionGranted = hasNotificationPermission()
         exactAlarmAccessGranted = hasExactAlarmAccess()
         batteryOptimizationIgnored = isBatteryOptimizationIgnored()
+        notificationPolicyAccessGranted = hasNotificationPolicyAccess(this)
         whatsNewVisible = appUpdateTracker.shouldShowWhatsNew(BuildConfig.VERSION_CODE)
         handleIntent(intent)
         enableEdgeToEdge()
@@ -53,11 +56,13 @@ class MainActivity : ComponentActivity() {
             LewicowYTTheme(
                 themeMode = state.settings.themeMode,
                 accentColorArgb = state.settings.accentColorArgb,
+                highContrast = state.settings.highContrastEnabled,
             ) {
                 LewicowYTApp(
                     viewModel = viewModel,
                     exactAlarmAccessGranted = exactAlarmAccessGranted,
                     batteryOptimizationIgnored = batteryOptimizationIgnored,
+                    notificationPolicyAccessGranted = notificationPolicyAccessGranted,
                     whatsNewVisible = whatsNewVisible,
                     acknowledgeWhatsNew = {
                         appUpdateTracker.acknowledge(BuildConfig.VERSION_CODE)
@@ -65,6 +70,7 @@ class MainActivity : ComponentActivity() {
                     },
                     requestExactAlarmAccess = ::requestExactAlarmAccess,
                     openBatteryOptimizationSettings = ::openBatteryOptimizationSettings,
+                    requestNotificationPolicyAccess = ::requestNotificationPolicyAccess,
                 )
             }
         }
@@ -85,6 +91,7 @@ class MainActivity : ComponentActivity() {
             viewModel.refreshBackgroundSchedule()
         }
         batteryOptimizationIgnored = isBatteryOptimizationIgnored()
+        notificationPolicyAccessGranted = hasNotificationPolicyAccess(this)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -159,11 +166,27 @@ class MainActivity : ComponentActivity() {
             .isIgnoringBatteryOptimizations(packageName)
     }
 
+    private fun requestNotificationPolicyAccess() {
+        val packageUri = "package:$packageName".toUri()
+        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Intent(ACTION_NOTIFICATION_POLICY_ACCESS_DETAIL_SETTINGS, packageUri)
+        } else {
+            Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
+        }
+        try {
+            startActivity(intent)
+        } catch (_: ActivityNotFoundException) {
+            startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS))
+        }
+    }
+
     private fun openApplicationDetails(packageUri: android.net.Uri) {
         startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri))
     }
 
     companion object {
         const val EXTRA_OPEN_NOTIFICATIONS = "open_notifications"
+        private const val ACTION_NOTIFICATION_POLICY_ACCESS_DETAIL_SETTINGS =
+            "android.settings.NOTIFICATION_POLICY_ACCESS_DETAIL_SETTINGS"
     }
 }

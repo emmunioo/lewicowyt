@@ -10,6 +10,20 @@ internal enum class SyncNetworkAccess {
     UNMETERED,
 }
 
+internal enum class DiagnosticNetworkType {
+    WIFI,
+    CELLULAR,
+    ETHERNET,
+    OTHER,
+    NONE,
+}
+
+internal data class DiagnosticNetworkState(
+    val type: DiagnosticNetworkType,
+    val available: Boolean,
+    val metered: Boolean,
+)
+
 /**
  * Synchronizacja może korzystać z sieci taryfowej tylko po zgodzie użytkownika.
  * Sieć oznaczona przez Androida jako bez limitu jest dozwolona zawsze.
@@ -38,4 +52,30 @@ internal fun currentSyncNetworkAccess(context: Context): SyncNetworkAccess {
     } else {
         SyncNetworkAccess.METERED
     }
+}
+
+internal fun currentDiagnosticNetworkState(context: Context): DiagnosticNetworkState {
+    val manager = context.getSystemService(ConnectivityManager::class.java)
+        ?: return DiagnosticNetworkState(DiagnosticNetworkType.NONE, false, false)
+    val network = manager.activeNetwork
+        ?: return DiagnosticNetworkState(DiagnosticNetworkType.NONE, false, false)
+    val capabilities = manager.getNetworkCapabilities(network)
+        ?: return DiagnosticNetworkState(DiagnosticNetworkType.NONE, false, false)
+    val available = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    val type = when {
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ->
+            DiagnosticNetworkType.WIFI
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ->
+            DiagnosticNetworkType.CELLULAR
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) ->
+            DiagnosticNetworkType.ETHERNET
+        available -> DiagnosticNetworkType.OTHER
+        else -> DiagnosticNetworkType.NONE
+    }
+    return DiagnosticNetworkState(
+        type = type,
+        available = available,
+        metered = !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED),
+    )
 }

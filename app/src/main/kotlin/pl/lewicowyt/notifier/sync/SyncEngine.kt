@@ -31,8 +31,17 @@ import pl.lewicowyt.notifier.diagnostics.DiagnosticCategory
 import pl.lewicowyt.notifier.diagnostics.DiagnosticDownloadArea
 import pl.lewicowyt.notifier.diagnostics.DiagnosticDownloadRole
 import pl.lewicowyt.notifier.diagnostics.DiagnosticLogStore
+import pl.lewicowyt.notifier.diagnostics.DiagnosticLevel
+import pl.lewicowyt.notifier.diagnostics.DiagnosticNotificationResult
+import pl.lewicowyt.notifier.diagnostics.DiagnosticReasonCode
+import pl.lewicowyt.notifier.diagnostics.DiagnosticSyncRun
+import pl.lewicowyt.notifier.diagnostics.DiagnosticSyncStage
+import pl.lewicowyt.notifier.diagnostics.DiagnosticSyncTrigger
 import pl.lewicowyt.notifier.diagnostics.DiagnosticYouTubeSource
+import pl.lewicowyt.notifier.diagnostics.DiagnosticYouTubeOperation
+import pl.lewicowyt.notifier.diagnostics.diagnosticYouTubeSourceSummary
 import pl.lewicowyt.notifier.diagnostics.logYouTubeDownload
+import pl.lewicowyt.notifier.diagnostics.youtubeIssue
 import pl.lewicowyt.notifier.images.CreatorAvatarUpdater
 import pl.lewicowyt.notifier.model.Creator
 import pl.lewicowyt.notifier.model.CreatorSource
@@ -58,6 +67,7 @@ import pl.lewicowyt.notifier.network.YouTubePageClassifier
 import pl.lewicowyt.notifier.network.YouTubeSourceResolver
 import pl.lewicowyt.notifier.network.rssVideoKindDecision
 import pl.lewicowyt.notifier.notifications.NotificationHelper
+import pl.lewicowyt.notifier.notifications.NotificationDeliveryResult
 import pl.lewicowyt.notifier.notifications.toNotificationCandidate
 
 class SyncEngine(
@@ -84,11 +94,17 @@ class SyncEngine(
     suspend fun <T> runExclusiveMaintenance(block: suspend () -> T): T =
         syncMutex.withLock { block() }
 
-    suspend fun sync(): SyncOutcome = syncMutex.withLock {
+    internal suspend fun sync(
+        deliverSystemNotifications: Boolean = true,
+        diagnosticRun: DiagnosticSyncRun = DiagnosticSyncRun.create(DiagnosticSyncTrigger.MANUAL),
+    ): SyncOutcome = syncMutex.withLock {
         withContext(Dispatchers.IO) {
+            diagnosticRun.start()
             val startedAtNanos = System.nanoTime()
-            database.pruneExpiredData()
-            val settings = preferences.current()
+            val settings = diagnosticRun.measure(DiagnosticSyncStage.PREPARE) {
+                database.pruneExpiredData()
+                preferences.current()
+            }
             val apiKey = if (settings.youtubeApiEnabled) preferences.youtubeApiKey() else ""
             val selectedIds = settings.selectedCreatorIds
             val selectedCreators = catalog.creators.filter {
@@ -115,6 +131,13 @@ class SyncEngine(
                     creator.sources.map { source -> creator to source }
                 }
             }
+            diagnosticRun.event(
+                "SOURCE_PRIORITY",
+                fields = mapOf(
+                    "sources" to prioritizedSources.size,
+                    "adaptive" to prioritizedSources.size,
+                ),
+            )
             val completedPriorityObservations = Collections.synchronizedList(
                 mutableListOf<SourcePriorityObservation>(),
             )
@@ -128,6 +151,7 @@ class SyncEngine(
                             classificationSemaphore = classificationSemaphore,
                             enabledHistoryTypes = settings.historyTypesFor(creator.id),
                             enabledNotificationTypes = settings.notificationTypesFor(creator.id),
+                            diagnosticRun = diagnosticRun,
                         ).also { result ->
                             result.priorityObservation?.let(
                                 completedPriorityObservations::add,
@@ -160,6 +184,7 @@ class SyncEngine(
             val unclassifiedItems = database.unclassifiedHistory(selectedIds, limit = 12)
             val apiKinds = if (apiKey.isNotBlank()) {
                 try {
+                    diagnosticRun.sourceRequest(DiagnosticYouTubeSource.DATA_API)
                     dataApiClient.fetchVideoKindDecisions(
                         (pendingItems + unclassifiedItems).map { it.videoId },
                         apiKey,
@@ -185,6 +210,7 @@ class SyncEngine(
             val fallbackKinds = coroutineScope {
                 missingKindIds.map { videoId ->
                     async(Dispatchers.IO) {
+                        diagnosticRun.sourceRequest(DiagnosticYouTubeSource.WEB)
                         val kind = classificationSemaphore.withPermit {
                             classifier.classify(videoId)
                         }
@@ -204,12 +230,14 @@ class SyncEngine(
                     source = DiagnosticYouTubeSource.DATA_API,
                     videoIds = pendingItems.map { it.videoId }.filter(apiIds::contains),
                     role = DiagnosticDownloadRole.CLASSIFICATION,
+                    run = diagnosticRun,
                 )
                 logYouTubeDownload(
                     area = DiagnosticDownloadArea.HISTORY,
                     source = DiagnosticYouTubeSource.DATA_API,
                     videoIds = unclassifiedItems.map { it.videoId }.filter(apiIds::contains),
                     role = DiagnosticDownloadRole.CLASSIFICATION,
+                    run = diagnosticRun,
                 )
             }
             if (fallbackKinds.isNotEmpty()) {
@@ -219,12 +247,14 @@ class SyncEngine(
                     source = DiagnosticYouTubeSource.WEB,
                     videoIds = pendingItems.map { it.videoId }.filter(webIds::contains),
                     role = DiagnosticDownloadRole.CLASSIFICATION,
+                    run = diagnosticRun,
                 )
                 logYouTubeDownload(
                     area = DiagnosticDownloadArea.HISTORY,
                     source = DiagnosticYouTubeSource.WEB,
                     videoIds = unclassifiedItems.map { it.videoId }.filter(webIds::contains),
                     role = DiagnosticDownloadRole.CLASSIFICATION,
+                    run = diagnosticRun,
                 )
             }
 
@@ -261,8 +291,10 @@ class SyncEngine(
                     failedHistoryKinds += historyItem.videoId
                 }
             }
-            database.markVideoClassifications(resolvedHistoryKinds)
-            database.recordFailedVideoClassifications(failedHistoryKinds)
+            diagnosticRun.measure(DiagnosticSyncStage.DATABASE) {
+                database.markVideoClassifications(resolvedHistoryKinds)
+                database.recordFailedVideoClassifications(failedHistoryKinds)
+            }
 
             // Użytkownik mógł zmienić wybór kanałów podczas trwających zapytań.
             // Odczytujemy ustawienie ponownie bezpośrednio przed dostarczeniem.
@@ -275,16 +307,88 @@ class SyncEngine(
             // Rekord wyłączonego rodzaju nie może czekać ukryty i wywołać starego
             // powiadomienia po ponownym włączeniu ustawienia.
             database.markVideosNotified(suppressedPending.map { it.videoId })
+            suppressedPending.forEach { item ->
+                diagnosticRun.notificationDecision(
+                    item.videoId,
+                    DiagnosticNotificationResult.SKIPPED,
+                    DiagnosticReasonCode.NOTIFICATION_DISABLED_FOR_TYPE,
+                )
+            }
             val uniqueCandidates = allowedPending
                 .map { it.toNotificationCandidate() }
                 .distinctBy { it.entry.id }
             if (uniqueCandidates.isNotEmpty()) {
-                database.addNotificationInbox(uniqueCandidates.map { it.entry.id })
+                diagnosticRun.measure(DiagnosticSyncStage.INBOX) {
+                    database.addNotificationInbox(uniqueCandidates.map { it.entry.id })
+                }
+                uniqueCandidates.forEach { candidate ->
+                    diagnosticRun.event(
+                        "INBOX_WRITE",
+                        fields = mapOf("video" to candidate.entry.id, "success" to true),
+                    )
+                }
             }
-            val delivery = notifications.notifyBatch(uniqueCandidates) { candidate ->
-                val latest = preferences.current()
-                candidate.creator.id in latest.selectedCreatorIds &&
-                    latest.isNotificationEnabledFor(candidate.creator.id, candidate.kind)
+            val delivery = if (deliverSystemNotifications) {
+                diagnosticRun.measure(DiagnosticSyncStage.NOTIFICATIONS) {
+                    notifications.notifyBatch(uniqueCandidates) { candidate ->
+                        val latest = preferences.current()
+                        candidate.creator.id in latest.selectedCreatorIds &&
+                            latest.isNotificationEnabledFor(candidate.creator.id, candidate.kind)
+                    }
+                }
+            } else {
+                // Sprawdzenie po zakończeniu DND może przypadać przed terminem
+                // wybranym przez użytkownika. Materiały trafiają wtedy do skrzynki
+                // i pozostają nieoznaczone, aby właściwy alarm mógł je dostarczyć.
+                NotificationDeliveryResult()
+            }
+            if (!deliverSystemNotifications) {
+                uniqueCandidates.forEach { candidate ->
+                    diagnosticRun.notificationDecision(
+                        candidate.entry.id,
+                        DiagnosticNotificationResult.INBOX_ONLY,
+                        DiagnosticReasonCode.NOT_YET_NOTIFICATION_TIME,
+                    )
+                }
+            } else {
+                delivery.deliveredVideoIds.forEach { videoId ->
+                    diagnosticRun.event(
+                        "SYSTEM_NOTIFICATION",
+                        fields = mapOf("video" to videoId, "attempted" to true, "success" to true),
+                    )
+                    diagnosticRun.notificationDecision(
+                        videoId,
+                        DiagnosticNotificationResult.SENT,
+                    )
+                }
+                val skippedReasons = buildMap<String, DiagnosticReasonCode> {
+                    delivery.permissionMissingVideoIds.forEach {
+                        put(it, DiagnosticReasonCode.NOTIFICATION_PERMISSION_MISSING)
+                    }
+                    delivery.revalidationRejectedVideoIds.forEach {
+                        put(it, DiagnosticReasonCode.NOTIFICATION_DISABLED_FOR_CREATOR)
+                    }
+                    delivery.failedVideoIds.forEach {
+                        put(it, DiagnosticReasonCode.DELIVERY_FAILED)
+                    }
+                }
+                skippedReasons.forEach { (videoId, reason) ->
+                        diagnosticRun.event(
+                            "SYSTEM_NOTIFICATION",
+                            level = DiagnosticLevel.WARNING,
+                            reason = reason,
+                            fields = mapOf(
+                                "video" to videoId,
+                                "attempted" to true,
+                                "success" to false,
+                            ),
+                        )
+                        diagnosticRun.notificationDecision(
+                            videoId,
+                            DiagnosticNotificationResult.SKIPPED,
+                            reason,
+                        )
+                }
             }
             database.markVideosNotified(delivery.deliveredVideoIds)
 
@@ -316,6 +420,15 @@ class SyncEngine(
                     "czas_s=${durationSeconds.coerceAtLeast(0L)}",
             )
             preferences.updateLastSync(System.currentTimeMillis(), outcome.toPolishSummary())
+            diagnosticRun.finish(
+                mapOf(
+                    "result" to "OK",
+                    "checked" to checkedSources,
+                    "detected" to detectedItems,
+                    "notifications" to delivery.systemNotificationsSent,
+                    "errors" to errors.size,
+                ),
+            )
             outcome
         }
     }
@@ -327,12 +440,16 @@ class SyncEngine(
         classificationSemaphore: Semaphore,
         enabledHistoryTypes: Set<HistoryFilter>,
         enabledNotificationTypes: Set<HistoryFilter>,
+        diagnosticRun: DiagnosticSyncRun,
     ): SourceSyncResult {
         val sourceKey = resolver.sourceKey(creator, source)
         val priorityCandidate = sourcePriorityScheduler.candidate(creator, source)
+        var resolvedForDiagnostics: ResolvedSource? = null
         return try {
-            val resolved = resolver.resolve(creator, source)
-            refreshMissingChannelTabsDaily(resolved)
+            val resolved = resolver.resolve(creator, source).also {
+                resolvedForDiagnostics = it
+            }
+            refreshMissingChannelTabsDaily(creator, source, resolved, diagnosticRun)
             val sourceInitialized = database.isSourceInitialized(sourceKey)
             val notificationCursor = database.getNotificationCursor(sourceKey)
             val lastCheckedMillis = database.getSourceLastCheckedMillis(sourceKey)
@@ -341,6 +458,9 @@ class SyncEngine(
                 apiKey = apiKey,
                 cursor = notificationCursor,
                 enabledHistoryTypes = enabledHistoryTypes,
+                diagnosticRun = diagnosticRun,
+                creatorId = creator.id,
+                source = source,
             )
             val entries = notificationFetch.entries
             val previousRssSnapshot = database.getRssNotificationSnapshot(sourceKey)
@@ -410,6 +530,7 @@ class SyncEngine(
                         (resolved.type == SourceType.PLAYLIST ||
                             enabledHistoryTypes.containsAll(HistoryFilter.entries)) -> {
                         val kind = classificationSemaphore.withPermit {
+                            diagnosticRun.sourceRequest(DiagnosticYouTubeSource.WEB)
                             classifier.classify(entry.id)
                         }
                         logYouTubeDownload(
@@ -417,6 +538,7 @@ class SyncEngine(
                             source = DiagnosticYouTubeSource.WEB,
                             videoIds = listOf(entry.id),
                             role = DiagnosticDownloadRole.CLASSIFICATION,
+                            run = diagnosticRun,
                         )
                         if (kind == VideoKind.UNKNOWN) {
                             VideoKindDecision.Unknown
@@ -477,8 +599,28 @@ class SyncEngine(
             database.markSourceChecked(sourceKey, message)
             AppLog.error(
                 "lewicowYTSync",
-                "Błąd pojedynczego źródła YouTube",
+                "Błąd pojedynczego źródła YouTube; " +
+                    diagnosticYouTubeSourceSummary(creator.id, source, resolvedForDiagnostics),
                 error,
+            )
+            diagnosticRun.youtubeIssue(
+                name = "SOURCE_ERROR",
+                level = DiagnosticLevel.ERROR,
+                creatorId = creator.id,
+                source = source,
+                resolved = resolvedForDiagnostics,
+                operation = if (resolvedForDiagnostics == null) {
+                    DiagnosticYouTubeOperation.SOURCE_RESOLVE
+                } else {
+                    DiagnosticYouTubeOperation.SOURCE_SYNC
+                },
+                fallbackReason = if (resolvedForDiagnostics == null) {
+                    DiagnosticReasonCode.SOURCE_RESOLUTION_FAILED
+                } else {
+                    DiagnosticReasonCode.INVALID_SOURCE_RESULT
+                },
+                error = error,
+                text = "Źródło YouTube nie zostało poprawnie sprawdzone",
             )
             SourceSyncResult(
                 error = message,
@@ -492,7 +634,12 @@ class SyncEngine(
         }
     }
 
-    private fun refreshMissingChannelTabsDaily(resolved: ResolvedSource) {
+    private fun refreshMissingChannelTabsDaily(
+        creator: Creator,
+        source: CreatorSource,
+        resolved: ResolvedSource,
+        diagnosticRun: DiagnosticSyncRun,
+    ) {
         if (resolved.type != SourceType.CHANNEL) return
         val now = System.currentTimeMillis()
         val boundary = dailyChannelTabRefreshBoundaryMillis(now)
@@ -509,8 +656,20 @@ class SyncEngine(
             .onFailure { error ->
                 AppLog.warning(
                     "lewicowYTSync",
-                    "Dobowa kontrola brakujących kart kanału nie powiodła się",
+                    "Dobowa kontrola brakujących kart kanału nie powiodła się; " +
+                        diagnosticYouTubeSourceSummary(creator.id, source, resolved),
                     error,
+                )
+                diagnosticRun.youtubeIssue(
+                    name = "SOURCE_FALLBACK",
+                    level = DiagnosticLevel.WARNING,
+                    creatorId = creator.id,
+                    source = source,
+                    resolved = resolved,
+                    operation = DiagnosticYouTubeOperation.CHANNEL_TABS,
+                    fallbackReason = DiagnosticReasonCode.CHANNEL_TABS_UNAVAILABLE,
+                    error = error,
+                    text = "Dobowa kontrola kart kanału nie powiodła się",
                 )
             }
     }
@@ -520,21 +679,32 @@ class SyncEngine(
         apiKey: String,
         cursor: NotificationCursor?,
         enabledHistoryTypes: Set<HistoryFilter>,
+        diagnosticRun: DiagnosticSyncRun,
+        creatorId: String,
+        source: CreatorSource,
     ): NotificationFetchResult = coroutineScope {
         val retentionCutoff = DataRetentionPolicy.cutoffs(System.currentTimeMillis())
             .historyBeforeMillis
         val coverageCursor = notificationCoverageCursor(cursor, retentionCutoff)
         val rssRequest = async(Dispatchers.IO) {
-            runSuspendCatching { feedClient.fetch(resolved) }
+            runSuspendCatching {
+                diagnosticRun.sourceRequest(DiagnosticYouTubeSource.RSS)
+                diagnosticRun.measure(DiagnosticSyncStage.RSS) {
+                    feedClient.fetch(resolved)
+                }
+            }
         }
         val dataApiRequest = if (apiKey.isNotBlank()) {
             async(Dispatchers.IO) {
                 runSuspendCatching {
-                    fetchDataApiNotificationEntries(
-                        resolved = resolved,
-                        apiKey = apiKey,
-                        cursorPublishedAtMillis = coverageCursor?.publishedAtMillis,
-                    )
+                    diagnosticRun.sourceRequest(DiagnosticYouTubeSource.DATA_API)
+                    diagnosticRun.measure(DiagnosticSyncStage.API) {
+                        fetchDataApiNotificationEntries(
+                            resolved = resolved,
+                            apiKey = apiKey,
+                            cursorPublishedAtMillis = coverageCursor?.publishedAtMillis,
+                        )
+                    }
                 }
             }
         } else {
@@ -542,11 +712,16 @@ class SyncEngine(
         }
         val rssResult = rssRequest.await()
         val dataApiResult = dataApiRequest?.await()
+        if (rssResult.isFailure) diagnosticRun.sourceError(DiagnosticYouTubeSource.RSS)
+        if (dataApiResult?.isFailure == true) {
+            diagnosticRun.sourceError(DiagnosticYouTubeSource.DATA_API)
+        }
         rssResult.getOrNull()?.let { entries ->
             logYouTubeDownload(
                 area = DiagnosticDownloadArea.NOTIFICATIONS,
                 source = DiagnosticYouTubeSource.RSS,
                 videoIds = entries.map(VideoEntry::id),
+                run = diagnosticRun,
             )
         }
         dataApiResult?.getOrNull()?.let { entries ->
@@ -554,6 +729,7 @@ class SyncEngine(
                 area = DiagnosticDownloadArea.NOTIFICATIONS,
                 source = DiagnosticYouTubeSource.DATA_API,
                 videoIds = entries.map { it.entry.id },
+                run = diagnosticRun,
             )
         }
 
@@ -565,20 +741,25 @@ class SyncEngine(
         val pagedApiComplete = dataApiResult?.isSuccess == true
         val webResult = if (apiKey.isNotBlank() && !pagedApiComplete && !rssCoversRange) {
             runSuspendCatching {
-                fetchWebNotificationEntries(
-                    resolved = resolved,
-                    cursorPublishedAtMillis = coverageCursor?.publishedAtMillis,
-                    enabledHistoryTypes = enabledHistoryTypes,
-                )
+                diagnosticRun.sourceRequest(DiagnosticYouTubeSource.WEB)
+                diagnosticRun.measure(DiagnosticSyncStage.WEB) {
+                    fetchWebNotificationEntries(
+                        resolved = resolved,
+                        cursorPublishedAtMillis = coverageCursor?.publishedAtMillis,
+                        enabledHistoryTypes = enabledHistoryTypes,
+                    )
+                }
             }
         } else {
             null
         }
+        if (webResult?.isFailure == true) diagnosticRun.sourceError(DiagnosticYouTubeSource.WEB)
         webResult?.getOrNull()?.let { entries ->
             logYouTubeDownload(
                 area = DiagnosticDownloadArea.NOTIFICATIONS,
                 source = DiagnosticYouTubeSource.WEB,
                 videoIds = entries.map { it.entry.id },
+                run = diagnosticRun,
             )
         }
 
@@ -603,22 +784,58 @@ class SyncEngine(
         rssResult.exceptionOrNull()?.let { error ->
             AppLog.warning(
                 "lewicowYTSync",
-                "YouTube RSS nie odpowiedział; używam innego źródła YouTube",
+                "YouTube RSS nie odpowiedział; używam innego źródła YouTube; " +
+                    diagnosticYouTubeSourceSummary(creatorId, source, resolved),
                 error,
+            )
+            diagnosticRun.youtubeIssue(
+                name = "SOURCE_FALLBACK",
+                level = DiagnosticLevel.WARNING,
+                creatorId = creatorId,
+                source = source,
+                resolved = resolved,
+                operation = DiagnosticYouTubeOperation.RSS_FEED,
+                fallbackReason = DiagnosticReasonCode.RSS_SOURCE_FAILED,
+                error = error,
+                text = "RSS nie odpowiedział; używane jest inne źródło YouTube",
             )
         }
         dataApiResult?.exceptionOrNull()?.let { error ->
             AppLog.warning(
                 "lewicowYTSync",
-                "YouTube Data API nie odpowiedziało; używam YouTube RSS",
+                "YouTube Data API nie odpowiedziało; używam YouTube RSS; " +
+                    diagnosticYouTubeSourceSummary(creatorId, source, resolved),
                 error,
+            )
+            diagnosticRun.youtubeIssue(
+                name = "SOURCE_FALLBACK",
+                level = DiagnosticLevel.WARNING,
+                creatorId = creatorId,
+                source = source,
+                resolved = resolved,
+                operation = DiagnosticYouTubeOperation.API_PLAYLIST_ITEMS,
+                fallbackReason = DiagnosticReasonCode.DATA_API_SOURCE_FAILED,
+                error = error,
+                text = "Data API nie odpowiedziało; używane jest RSS lub Web",
             )
         }
         webResult?.exceptionOrNull()?.let { error ->
             AppLog.warning(
                 "lewicowYTSync",
-                "YouTube Web nie uzupełnił luki w RSS",
+                "YouTube Web nie uzupełnił luki w RSS; " +
+                    diagnosticYouTubeSourceSummary(creatorId, source, resolved),
                 error,
+            )
+            diagnosticRun.youtubeIssue(
+                name = "SOURCE_FALLBACK",
+                level = DiagnosticLevel.WARNING,
+                creatorId = creatorId,
+                source = source,
+                resolved = resolved,
+                operation = DiagnosticYouTubeOperation.WEB_HISTORY,
+                fallbackReason = DiagnosticReasonCode.WEB_SOURCE_FAILED,
+                error = error,
+                text = "YouTube Web nie uzupełnił luki w RSS",
             )
         }
 
@@ -678,12 +895,25 @@ class SyncEngine(
                     .onFailure { error ->
                         AppLog.warning(
                             "lewicowYTSync",
-                            "Nie udało się odświeżyć listy kart nowego materiału",
+                            "Nie udało się odświeżyć listy kart nowego materiału; " +
+                                diagnosticYouTubeSourceSummary(creatorId, source, resolved),
                             error,
+                        )
+                        diagnosticRun.youtubeIssue(
+                            name = "SOURCE_FALLBACK",
+                            level = DiagnosticLevel.WARNING,
+                            creatorId = creatorId,
+                            source = source,
+                            resolved = resolved,
+                            operation = DiagnosticYouTubeOperation.CHANNEL_TABS,
+                            fallbackReason = DiagnosticReasonCode.CHANNEL_TABS_UNAVAILABLE,
+                            error = error,
+                            text = "Nie udało się odświeżyć listy kart nowego materiału",
                         )
                     }
             }
             runSuspendCatching {
+                diagnosticRun.sourceRequest(DiagnosticYouTubeSource.WEB)
                 fetchRecentChannelMembership(
                     resolved,
                     membershipCandidateIds,
@@ -696,6 +926,7 @@ class SyncEngine(
                         source = DiagnosticYouTubeSource.WEB,
                         videoIds = membership.keys,
                         role = DiagnosticDownloadRole.CLASSIFICATION,
+                        run = diagnosticRun,
                     )
                 }
                 membership.forEach { (videoId, kind) ->
@@ -712,8 +943,20 @@ class SyncEngine(
                 AppLog.warning(
                     "lewicowYTSync",
                     "YouTube nie potwierdził kart nowych materiałów; " +
-                        "nierozpoznane wpisy zostaną ponowione",
+                        "nierozpoznane wpisy zostaną ponowione; " +
+                        diagnosticYouTubeSourceSummary(creatorId, source, resolved),
                     error,
+                )
+                diagnosticRun.youtubeIssue(
+                    name = "SOURCE_FALLBACK",
+                    level = DiagnosticLevel.WARNING,
+                    creatorId = creatorId,
+                    source = source,
+                    resolved = resolved,
+                    operation = DiagnosticYouTubeOperation.CHANNEL_TABS,
+                    fallbackReason = DiagnosticReasonCode.CHANNEL_TABS_UNAVAILABLE,
+                    error = error,
+                    text = "YouTube nie potwierdził kart; wpisy zostaną ponowione",
                 )
             }
         }

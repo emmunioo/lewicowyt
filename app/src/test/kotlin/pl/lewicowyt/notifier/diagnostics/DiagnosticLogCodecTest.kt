@@ -29,6 +29,8 @@ class DiagnosticLogCodecTest {
         val sanitized = DiagnosticLogCodec.sanitize(
             "GET https://example.org/path?key=AIzaABCDEFGHIJKLMNOPQRSTUVWXY12345 " +
                 "Authorization: Bearer bardzo_tajny_token " +
+                "Cookie: SID=sekret_ciasteczka access_token=sekret_token " +
+                "https://objects.githubusercontent.com/file.apk?X-Amz-Signature=podpis " +
                 "/data/user/0/pl.lewicowyt.notifier/files/sekret",
         )
 
@@ -36,6 +38,10 @@ class DiagnosticLogCodecTest {
         assertFalse("AIza" in sanitized)
         assertFalse("bardzo_tajny_token" in sanitized)
         assertFalse("?key=" in sanitized)
+        assertFalse("sekret_ciasteczka" in sanitized)
+        assertFalse("sekret_token" in sanitized)
+        assertFalse("X-Amz-Signature" in sanitized)
+        assertFalse("podpis" in sanitized)
         assertFalse("/data/user" in sanitized)
     }
 
@@ -46,5 +52,24 @@ class DiagnosticLogCodecTest {
         assertEquals("https://youtu.be/AbCdEf_12-3", link)
         assertEquals(link, DiagnosticLogCodec.sanitize(requireNotNull(link)))
         assertEquals(null, diagnosticYouTubeVideoUrl("zly"))
+    }
+
+    @Test
+    fun `one expanded diagnostic event remains strictly bounded`() {
+        val encoded = DiagnosticLogCodec.encode(
+            DiagnosticEvent(
+                timestampSeconds = 1L,
+                level = DiagnosticLevel.ERROR,
+                category = DiagnosticCategory.NETWORK,
+                message = buildString {
+                    repeat(10_000) { append(('A'.code + it % 26).toChar()) }
+                },
+            ),
+        )
+        val decoded = DataInputStream(ByteArrayInputStream(encoded))
+            .use(DiagnosticLogCodec::decode)
+
+        assertTrue(encoded.size <= 4_096)
+        assertTrue(requireNotNull(decoded).message.toByteArray().size <= 1_024)
     }
 }

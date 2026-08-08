@@ -23,8 +23,15 @@ import pl.lewicowyt.notifier.data.contentType
 import pl.lewicowyt.notifier.data.historyTypesFor
 import pl.lewicowyt.notifier.diagnostics.DiagnosticDownloadArea
 import pl.lewicowyt.notifier.diagnostics.DiagnosticDownloadRole
+import pl.lewicowyt.notifier.diagnostics.DiagnosticLevel
+import pl.lewicowyt.notifier.diagnostics.DiagnosticReasonCode
 import pl.lewicowyt.notifier.diagnostics.DiagnosticYouTubeSource
+import pl.lewicowyt.notifier.diagnostics.DiagnosticYouTubeOperation
+import pl.lewicowyt.notifier.diagnostics.DiagnosticSyncRun
+import pl.lewicowyt.notifier.diagnostics.DiagnosticSyncStage
+import pl.lewicowyt.notifier.diagnostics.DiagnosticSyncTrigger
 import pl.lewicowyt.notifier.diagnostics.logYouTubeDownload
+import pl.lewicowyt.notifier.diagnostics.youtubeIssue
 import pl.lewicowyt.notifier.model.Creator
 import pl.lewicowyt.notifier.model.CreatorSource
 import pl.lewicowyt.notifier.model.HistoryFilter
@@ -121,9 +128,13 @@ class HistoryBackfillLoader(
         settings: AppSettings,
         onProgress: suspend () -> Unit = {},
     ): BackfillResult = loadMutex.withLock {
+        val diagnosticRun = DiagnosticSyncRun.create(DiagnosticSyncTrigger.HISTORY_BACKFILL)
+        diagnosticRun.start()
+        diagnosticRun.stage(DiagnosticSyncStage.HISTORY)
         val apiKey = if (settings.youtubeApiEnabled) preferences.youtubeApiKey() else ""
         val signature = buildSignature(settings, apiKey)
         if (completedSignature == signature) {
+            diagnosticRun.finish(mapOf("result" to "ALREADY_COMPLETE"))
             return BackfillResult(insertedCount = 0, exhausted = true)
         }
         if (activeSignature != signature) {
@@ -136,6 +147,7 @@ class HistoryBackfillLoader(
             .groupBy { resolver.sourceKey(it.creator, it.source) }
         if (targetsByChannel.isEmpty()) {
             completedSignature = signature
+            diagnosticRun.finish(mapOf("result" to "NO_TARGETS"))
             return BackfillResult(insertedCount = 0, exhausted = true)
         }
 
@@ -160,17 +172,32 @@ class HistoryBackfillLoader(
         val results = prioritizedChannelGroups.mapConcurrently(
             maxConcurrency = HISTORY_CHANNEL_CONCURRENCY,
         ) { channelTargets ->
-            loadChannel(channelTargets, cutoff, settings, apiKey, reporter)
+            loadChannel(
+                channelTargets,
+                cutoff,
+                settings,
+                apiKey,
+                reporter,
+                diagnosticRun,
+            )
         }
         reporter.report(force = true)
 
         val errors = results.flatMap(ChannelResult::errors)
         if (errors.isEmpty()) completedSignature = signature
-        BackfillResult(
+        val result = BackfillResult(
             insertedCount = results.sumOf(ChannelResult::insertedCount),
             exhausted = errors.isEmpty(),
             error = errors.takeIf { it.isNotEmpty() }?.toSummary(),
         )
+        diagnosticRun.finish(
+            mapOf(
+                "result" to if (errors.isEmpty()) "OK" else "PARTIAL",
+                "inserted" to result.insertedCount,
+                "errors" to errors.size,
+            ),
+        )
+        result
     }
 
     private suspend fun loadChannel(
@@ -179,6 +206,7 @@ class HistoryBackfillLoader(
         settings: AppSettings,
         apiKey: String,
         reporter: ProgressReporter,
+        diagnosticRun: DiagnosticSyncRun,
     ): ChannelResult {
         val firstTarget = targets.first()
         val enabledHistoryTypes = settings.historyTypesFor(firstTarget.creator.id)
@@ -186,13 +214,24 @@ class HistoryBackfillLoader(
         val sourceKey = resolver.sourceKey(firstTarget.creator, firstTarget.source)
         val resolved = try {
             if (firstTarget.tab == null) {
-                resolveForDataApi(firstTarget, sourceKey, apiKey)
+                resolveForDataApi(firstTarget, sourceKey, apiKey, diagnosticRun)
             } else {
                 resolver.resolve(firstTarget.creator, firstTarget.source)
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
+            diagnosticRun.youtubeIssue(
+                name = "SOURCE_ERROR",
+                level = DiagnosticLevel.ERROR,
+                creatorId = firstTarget.creator.id,
+                source = firstTarget.source,
+                operation = DiagnosticYouTubeOperation.SOURCE_RESOLVE,
+                fallbackReason = DiagnosticReasonCode.SOURCE_RESOLUTION_FAILED,
+                error = error,
+                extra = mapOf("area" to "HISTORY"),
+                text = "Nie udało się rozpoznać źródła historii",
+            )
             return ChannelResult(
                 insertedCount = 0,
                 errors = listOf(
@@ -223,6 +262,23 @@ class HistoryBackfillLoader(
                 classifyEntries =
                     apiKey.isBlank() && resolved.type == SourceType.PLAYLIST,
                 enabledHistoryTypes = enabledHistoryTypes,
+                diagnosticRun = diagnosticRun,
+            )
+        }
+        if (rssResult.isFailure) {
+            diagnosticRun.sourceError(DiagnosticYouTubeSource.RSS)
+            val error = rssResult.exceptionOrNull()!!
+            diagnosticRun.youtubeIssue(
+                name = "SOURCE_FALLBACK",
+                level = DiagnosticLevel.WARNING,
+                creatorId = firstTarget.creator.id,
+                source = firstTarget.source,
+                resolved = resolved,
+                operation = DiagnosticYouTubeOperation.RSS_FEED,
+                fallbackReason = DiagnosticReasonCode.RSS_SOURCE_FAILED,
+                error = error,
+                extra = mapOf("area" to "HISTORY"),
+                text = "RSS historii nie odpowiedział; używane jest API lub Web",
             )
         }
 
@@ -234,6 +290,7 @@ class HistoryBackfillLoader(
                 apiKey,
                 reporter,
                 enabledHistoryTypes,
+                diagnosticRun,
             )
             // Data API zapewnia szybkie ID i dokładne daty, natomiast karta
             // wybrana przez użytkownika jest wiarygodnym dowodem rodzaju.
@@ -261,6 +318,7 @@ class HistoryBackfillLoader(
                 historyWindowDays = settings.historyWindowDays,
                 reporter = reporter,
                 enabledHistoryTypes = enabledHistoryTypes,
+                diagnosticRun = diagnosticRun,
             )
             if (webResult.errors.isEmpty()) {
                 // Pełny zakres został dostarczony przez YouTube Web.
@@ -295,6 +353,7 @@ class HistoryBackfillLoader(
                 historyWindowDays = settings.historyWindowDays,
                 reporter = reporter,
                 enabledHistoryTypes = enabledHistoryTypes,
+                diagnosticRun = diagnosticRun,
             ),
             creatorName = firstTarget.creator.name,
         )
@@ -307,12 +366,17 @@ class HistoryBackfillLoader(
         reporter: ProgressReporter,
         classifyEntries: Boolean,
         enabledHistoryTypes: Set<HistoryFilter>,
+        diagnosticRun: DiagnosticSyncRun,
     ): Int {
-        val entries = feedClient.fetch(resolved)
+        diagnosticRun.sourceRequest(DiagnosticYouTubeSource.RSS)
+        val entries = diagnosticRun.measure(DiagnosticSyncStage.RSS) {
+            feedClient.fetch(resolved)
+        }
         logYouTubeDownload(
             area = DiagnosticDownloadArea.HISTORY,
             source = DiagnosticYouTubeSource.RSS,
             videoIds = entries.map(VideoEntry::id),
+            run = diagnosticRun,
         )
         val items = rssHistoryItems(
             entries = entries,
@@ -320,7 +384,7 @@ class HistoryBackfillLoader(
         ).filter { it.isSafeForEnabledContentTypes(enabledHistoryTypes) }
         val insertedCount = database.insertHistoricalVideos(creator, items)
         reporter.report()
-        if (classifyEntries) classifyRssItems(items, reporter)
+        if (classifyEntries) classifyRssItems(items, reporter, diagnosticRun)
         return insertedCount
     }
 
@@ -332,6 +396,7 @@ class HistoryBackfillLoader(
     private suspend fun classifyRssItems(
         items: List<YouTubeHistoryItem>,
         reporter: ProgressReporter,
+        diagnosticRun: DiagnosticSyncRun,
     ) {
         // Wpis RSS ma już słaby fallback VIDEO, ale playlista nie ujawnia
         // rodzaju materiału kartą kanału. Sprawdzamy więc bieżący pakiet RSS
@@ -344,6 +409,7 @@ class HistoryBackfillLoader(
             candidateIds.map { videoId ->
                 async(Dispatchers.IO) {
                     videoId to classificationSemaphore.withPermit {
+                        diagnosticRun.sourceRequest(DiagnosticYouTubeSource.WEB)
                         classifier.classify(videoId)
                     }
                 }
@@ -354,6 +420,7 @@ class HistoryBackfillLoader(
             source = DiagnosticYouTubeSource.WEB,
             videoIds = results.map { (videoId) -> videoId },
             role = DiagnosticDownloadRole.CLASSIFICATION,
+            run = diagnosticRun,
         )
         database.markVideoClassifications(
             results
@@ -403,6 +470,7 @@ class HistoryBackfillLoader(
         apiKey: String,
         reporter: ProgressReporter,
         enabledHistoryTypes: Set<HistoryFilter>,
+        diagnosticRun: DiagnosticSyncRun,
     ): ChannelResult {
         var insertedCount = 0
         val errors = mutableListOf<String>()
@@ -418,18 +486,43 @@ class HistoryBackfillLoader(
                     apiKey,
                     reporter,
                     enabledHistoryTypes,
+                    diagnosticRun,
                 )
                 insertedCount += result.insertedCount
                 unresolvedVideoIds += result.unresolvedVideoIds
                 if (result.complete) {
                     completedTargets += target.key
                 } else {
+                    diagnosticRun.youtubeIssue(
+                        name = "HISTORY_PARTIAL",
+                        level = DiagnosticLevel.WARNING,
+                        creatorId = target.creator.id,
+                        source = target.source,
+                        resolved = resolved,
+                        operation = DiagnosticYouTubeOperation.API_PLAYLIST_ITEMS,
+                        fallbackReason = DiagnosticReasonCode.HISTORY_PAGE_LIMIT_REACHED,
+                        extra = mapOf("area" to "HISTORY"),
+                        text = "Data API osiągnęło limit stron przed objęciem zakresu",
+                    )
                     errors +=
                         "${target.creator.name}: osiągnięto limit stron przed objęciem całego zakresu"
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
+                diagnosticRun.sourceError(DiagnosticYouTubeSource.DATA_API)
+                diagnosticRun.youtubeIssue(
+                    name = "SOURCE_ERROR",
+                    level = DiagnosticLevel.ERROR,
+                    creatorId = target.creator.id,
+                    source = target.source,
+                    resolved = resolved,
+                    operation = DiagnosticYouTubeOperation.API_PLAYLIST_ITEMS,
+                    fallbackReason = DiagnosticReasonCode.DATA_API_SOURCE_FAILED,
+                    error = error,
+                    extra = mapOf("area" to "HISTORY"),
+                    text = "Data API nie pobrało strony playlistItems historii",
+                )
                 errors += (
                     "${target.creator.name}: " +
                         (error.message ?: error.javaClass.simpleName)
@@ -444,6 +537,7 @@ class HistoryBackfillLoader(
         target: Target,
         sourceKey: String,
         apiKey: String,
+        diagnosticRun: DiagnosticSyncRun,
     ): ResolvedSource {
         if (target.source.type == SourceType.PLAYLIST) {
             return resolver.resolve(target.creator, target.source)
@@ -454,7 +548,19 @@ class HistoryBackfillLoader(
                 ?.takeIf { it.startsWith("UC") }
             ?: runCatching {
                 dataApiClient.resolveChannelId(target.source.url, apiKey)
-            }.getOrElse {
+            }.getOrElse { error ->
+                diagnosticRun.sourceError(DiagnosticYouTubeSource.DATA_API)
+                diagnosticRun.youtubeIssue(
+                    name = "SOURCE_FALLBACK",
+                    level = DiagnosticLevel.WARNING,
+                    creatorId = target.creator.id,
+                    source = target.source,
+                    operation = DiagnosticYouTubeOperation.SOURCE_RESOLVE,
+                    fallbackReason = DiagnosticReasonCode.SOURCE_RESOLUTION_FAILED,
+                    error = error,
+                    extra = mapOf("area" to "HISTORY", "fallback" to "WEB_RESOLVER"),
+                    text = "Data API nie rozpoznało kanału; używany jest resolver Web",
+                )
                 return resolver.resolve(target.creator, target.source)
             }
         database.saveResolvedId(sourceKey, externalId)
@@ -479,6 +585,7 @@ class HistoryBackfillLoader(
         historyWindowDays: Int,
         reporter: ProgressReporter,
         enabledHistoryTypes: Set<HistoryFilter>,
+        diagnosticRun: DiagnosticSyncRun,
     ): ChannelResult {
         val states = targets.associateWith { WebTargetPagingState() }
         val failedTargets = mutableSetOf<Target>()
@@ -507,19 +614,52 @@ class HistoryBackfillLoader(
                         reporter = reporter,
                         state = state,
                         enabledHistoryTypes = enabledHistoryTypes,
+                        diagnosticRun = diagnosticRun,
                     )
                     insertedCount += result.insertedCount
                     if (result.targetComplete) {
                         completedTargets += target.key
                     } else if (!result.stageComplete) {
                         failedTargets += target
+                        diagnosticRun.youtubeIssue(
+                            name = "HISTORY_PARTIAL",
+                            level = DiagnosticLevel.WARNING,
+                            creatorId = target.creator.id,
+                            source = target.source,
+                            resolved = resolved,
+                            operation = DiagnosticYouTubeOperation.WEB_HISTORY,
+                            fallbackReason = DiagnosticReasonCode.HISTORY_PAGE_LIMIT_REACHED,
+                            extra = mapOf(
+                                "area" to "HISTORY",
+                                "tab" to target.tab?.name,
+                                "stageDays" to stageDepthDays,
+                            ),
+                            text = "Web osiągnął limit stron przed objęciem zakresu",
+                        )
                         errors +=
                             "${target.creator.name}: osiągnięto limit stron przed objęciem całego zakresu"
                     }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (error: Exception) {
+                    diagnosticRun.sourceError(DiagnosticYouTubeSource.WEB)
                     failedTargets += target
+                    diagnosticRun.youtubeIssue(
+                        name = "SOURCE_ERROR",
+                        level = DiagnosticLevel.ERROR,
+                        creatorId = target.creator.id,
+                        source = target.source,
+                        resolved = resolved,
+                        operation = DiagnosticYouTubeOperation.WEB_HISTORY,
+                        fallbackReason = DiagnosticReasonCode.WEB_SOURCE_FAILED,
+                        error = error,
+                        extra = mapOf(
+                            "area" to "HISTORY",
+                            "tab" to target.tab?.name,
+                            "stageDays" to stageDepthDays,
+                        ),
+                        text = "YouTube Web nie pobrał etapu historii",
+                    )
                     errors += (
                         "${target.creator.name}: " +
                             (error.message ?: error.javaClass.simpleName)
@@ -536,6 +676,17 @@ class HistoryBackfillLoader(
                 (!state.networkComplete || state.deferredItems.isNotEmpty()) &&
                 target !in failedTargets
             ) {
+                diagnosticRun.youtubeIssue(
+                    name = "HISTORY_PARTIAL",
+                    level = DiagnosticLevel.WARNING,
+                    creatorId = target.creator.id,
+                    source = target.source,
+                    resolved = resolved,
+                    operation = DiagnosticYouTubeOperation.WEB_HISTORY,
+                    fallbackReason = DiagnosticReasonCode.HISTORY_RANGE_INCOMPLETE,
+                    extra = mapOf("area" to "HISTORY", "tab" to target.tab?.name),
+                    text = "Nie ukończono wszystkich etapów historii",
+                )
                 errors +=
                     "${target.creator.name}: nie ukończono dwutygodniowych etapów historii"
             }
@@ -551,6 +702,7 @@ class HistoryBackfillLoader(
         reporter: ProgressReporter,
         state: WebTargetPagingState,
         enabledHistoryTypes: Set<HistoryFilter>,
+        diagnosticRun: DiagnosticSyncRun,
     ): WebStageLoadResult {
         var insertedCount = 0
         val readyDeferred = state.deferredItems.values.filter {
@@ -574,14 +726,20 @@ class HistoryBackfillLoader(
             currentCoroutineContext().ensureActive()
             val page = if (!state.started) {
                 state.started = true
-                client.firstPage(resolved, tab)
+                diagnosticRun.sourceRequest(DiagnosticYouTubeSource.WEB)
+                diagnosticRun.measure(DiagnosticSyncStage.WEB) {
+                    client.firstPage(resolved, tab)
+                }
             } else {
                 val cursor = state.cursor
                 if (cursor == null) {
                     state.networkComplete = true
                     break
                 }
-                client.nextPage(cursor, tab)
+                diagnosticRun.sourceRequest(DiagnosticYouTubeSource.WEB)
+                diagnosticRun.measure(DiagnosticSyncStage.WEB) {
+                    client.nextPage(cursor, tab)
+                }
             }
             state.loadedPageCount += 1
             val datedIds = page.items.mapTo(linkedSetOf()) { it.entry.id }
@@ -589,6 +747,7 @@ class HistoryBackfillLoader(
                 area = DiagnosticDownloadArea.HISTORY,
                 source = DiagnosticYouTubeSource.WEB,
                 videoIds = datedIds,
+                run = diagnosticRun,
             )
             val classificationOnlyIds = page.membershipKinds.keys - datedIds
             if (classificationOnlyIds.isNotEmpty()) {
@@ -597,6 +756,7 @@ class HistoryBackfillLoader(
                     source = DiagnosticYouTubeSource.WEB,
                     videoIds = classificationOnlyIds,
                     role = DiagnosticDownloadRole.CLASSIFICATION,
+                    run = diagnosticRun,
                 )
             }
             val pageItems = if (
@@ -613,6 +773,7 @@ class HistoryBackfillLoader(
                             .filter { it.evidence == VideoKindEvidence.PLAYER_METADATA }
                             .map { it.entry.id },
                         role = DiagnosticDownloadRole.CLASSIFICATION,
+                        run = diagnosticRun,
                     )
                 }
             } else {
@@ -688,6 +849,7 @@ class HistoryBackfillLoader(
         apiKey: String,
         reporter: ProgressReporter,
         enabledHistoryTypes: Set<HistoryFilter>,
+        diagnosticRun: DiagnosticSyncRun,
     ): TargetLoadResult {
         var pageToken: String? = null
         var insertedCount = 0
@@ -697,22 +859,27 @@ class HistoryBackfillLoader(
 
         while (pageNumber < MAX_PAGES_PER_TARGET) {
             currentCoroutineContext().ensureActive()
-            val page = dataApiClient.fetchPage(
-                source = resolved,
-                apiKey = apiKey,
-                pageToken = pageToken,
-                classifyAfterMillis = cutoff,
-            )
+            diagnosticRun.sourceRequest(DiagnosticYouTubeSource.DATA_API)
+            val page = diagnosticRun.measure(DiagnosticSyncStage.API) {
+                dataApiClient.fetchPage(
+                    source = resolved,
+                    apiKey = apiKey,
+                    pageToken = pageToken,
+                    classifyAfterMillis = cutoff,
+                )
+            }
             pageNumber += 1
             logYouTubeDownload(
                 area = DiagnosticDownloadArea.HISTORY,
                 source = DiagnosticYouTubeSource.DATA_API,
                 videoIds = page.items.map { it.entry.id },
+                run = diagnosticRun,
             )
             val withinRange = page.items.filter { it.entry.publishedAtMillis >= cutoff }
             val classified = if (target.source.type == SourceType.PLAYLIST) {
                 resolveAmbiguousDataApiKinds(withinRange) { videoId ->
                     classificationSemaphore.withPermit {
+                        diagnosticRun.sourceRequest(DiagnosticYouTubeSource.WEB)
                         classifier.classify(videoId)
                     }
                 }

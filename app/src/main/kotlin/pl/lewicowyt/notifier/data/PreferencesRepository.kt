@@ -24,6 +24,18 @@ enum class ThemeMode {
     DARK,
 }
 
+enum class YouTubeLinkTarget {
+    SYSTEM_DEFAULT,
+    ALWAYS_ASK,
+    YOUTUBE,
+    NEWPIPE,
+    BROWSER,
+}
+
+internal fun parseYouTubeLinkTarget(value: String?): YouTubeLinkTarget =
+    value?.let { runCatching { YouTubeLinkTarget.valueOf(it) }.getOrNull() }
+        ?: YouTubeLinkTarget.SYSTEM_DEFAULT
+
 data class AppSettings(
     val selectedCreatorIds: Set<String> = emptySet(),
     val deselectedCreatorAtMillis: Map<String, Long> = emptyMap(),
@@ -39,17 +51,24 @@ data class AppSettings(
     val allowMobileData: Boolean = true,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val accentColorArgb: Long = DEFAULT_ACCENT_COLOR_ARGB,
+    val highContrastEnabled: Boolean = false,
+    val youtubeLinkTarget: YouTubeLinkTarget = YouTubeLinkTarget.SYSTEM_DEFAULT,
     val youtubeApiEnabled: Boolean = false,
     val youtubeApiNeedsValidation: Boolean = false,
     val automaticUpdatesEnabled: Boolean = true,
     val lastBackgroundUpdateCheckAtMillis: Long = 0L,
     val lastSyncAtMillis: Long = 0L,
     val lastCompletedSyncAtMillis: Long = 0L,
+    val deferredDndSyncAtMillis: Long = 0L,
     val lastSyncSummary: String = "Jeszcze nie synchronizowano",
 )
 
 class PreferencesRepository(private val context: Context) {
     private val secureApiKeyStore = SecureApiKeyStore(context)
+    private val appearanceBackup = context.getSharedPreferences(
+        APPEARANCE_BACKUP_NAME,
+        Context.MODE_PRIVATE,
+    )
 
     private object Keys {
         val selectedCreators = stringSetPreferencesKey("selected_creators")
@@ -68,6 +87,8 @@ class PreferencesRepository(private val context: Context) {
         val allowMobileData = booleanPreferencesKey("allow_mobile_data")
         val themeMode = stringPreferencesKey("theme_mode")
         val accentColor = longPreferencesKey("accent_color_argb")
+        val highContrastEnabled = booleanPreferencesKey("high_contrast_enabled")
+        val youtubeLinkTarget = stringPreferencesKey("youtube_link_target")
         val youtubeApiEnabled = booleanPreferencesKey("youtube_api_enabled")
         val youtubeApiValidated = booleanPreferencesKey("youtube_api_validated")
         val automaticUpdatesEnabled = booleanPreferencesKey("automatic_updates_enabled")
@@ -77,6 +98,7 @@ class PreferencesRepository(private val context: Context) {
         val youtubeApiKey = stringPreferencesKey("youtube_api_key")
         val lastSyncAt = longPreferencesKey("last_sync_at")
         val lastCompletedSyncAt = longPreferencesKey("last_completed_sync_at")
+        val deferredDndSyncAt = longPreferencesKey("deferred_dnd_sync_at")
         val lastSyncSummary = stringPreferencesKey("last_sync_summary")
     }
 
@@ -96,6 +118,26 @@ class PreferencesRepository(private val context: Context) {
                 values = preferences[Keys.globalNotificationTypes],
                 keyExists = preferences.contains(Keys.globalNotificationTypes),
             ).intersect(globalHistoryTypes)
+            val storedAccent = preferences[Keys.accentColor]
+                ?.takeIf(::isValidAccentColor)
+            val backupAccent = appearanceBackup
+                .takeIf { it.contains(APPEARANCE_BACKUP_ACCENT_KEY) }
+                ?.getLong(APPEARANCE_BACKUP_ACCENT_KEY, DEFAULT_ACCENT_COLOR_ARGB)
+                ?.takeIf(::isValidAccentColor)
+            val resolvedAccent = resolveAccentColor(storedAccent, backupAccent)
+            if (
+                storedAccent != null &&
+                appearanceBackup.getLong(
+                    APPEARANCE_BACKUP_ACCENT_KEY,
+                    Long.MIN_VALUE,
+                ) != storedAccent
+            ) {
+                // Druga, niezależna kopia chroni wygląd przy migracji lub
+                // uszkodzeniu pojedynczego klucza Preferences DataStore.
+                appearanceBackup.edit()
+                    .putLong(APPEARANCE_BACKUP_ACCENT_KEY, storedAccent)
+                    .apply()
+            }
             AppSettings(
                 selectedCreatorIds = preferences[Keys.selectedCreators].orEmpty(),
                 deselectedCreatorAtMillis = decodeDeselectedCreators(
@@ -128,9 +170,9 @@ class PreferencesRepository(private val context: Context) {
                 themeMode = preferences[Keys.themeMode]
                     ?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() }
                     ?: ThemeMode.SYSTEM,
-                accentColorArgb = preferences[Keys.accentColor]
-                    ?.takeIf { it in MIN_ARGB..MAX_ARGB }
-                    ?: DEFAULT_ACCENT_COLOR_ARGB,
+                accentColorArgb = resolvedAccent,
+                highContrastEnabled = preferences[Keys.highContrastEnabled] ?: false,
+                youtubeLinkTarget = parseYouTubeLinkTarget(preferences[Keys.youtubeLinkTarget]),
                 youtubeApiEnabled = hasStoredApiKey &&
                     preferences[Keys.youtubeApiEnabled] == true &&
                     preferences[Keys.youtubeApiValidated] == true,
@@ -146,6 +188,7 @@ class PreferencesRepository(private val context: Context) {
                 lastCompletedSyncAtMillis = preferences[Keys.lastCompletedSyncAt]
                     ?: preferences[Keys.lastSyncAt]
                     ?: 0L,
+                deferredDndSyncAtMillis = preferences[Keys.deferredDndSyncAt] ?: 0L,
                 lastSyncSummary = preferences[Keys.lastSyncSummary]
                     ?: "Jeszcze nie synchronizowano",
             )
@@ -344,9 +387,24 @@ class PreferencesRepository(private val context: Context) {
         context.settingsDataStore.edit { it[Keys.themeMode] = value.name }
     }
 
+    suspend fun setHighContrastEnabled(value: Boolean) {
+        context.settingsDataStore.edit { it[Keys.highContrastEnabled] = value }
+    }
+
+    suspend fun setYouTubeLinkTarget(value: YouTubeLinkTarget) {
+        context.settingsDataStore.edit { it[Keys.youtubeLinkTarget] = value.name }
+    }
+
     suspend fun setAccentColor(argb: Long) {
+        val normalized = normalizeAccentColor(argb)
+        // Backup jest zapisywany synchronicznie przed DataStore. Dzięki temu
+        // nawet przerwanie procesu bezpośrednio po przesunięciu suwaka nie
+        // przywróci domyślnej czerwieni przy następnym uruchomieniu/aktualizacji.
+        appearanceBackup.edit()
+            .putLong(APPEARANCE_BACKUP_ACCENT_KEY, normalized)
+            .commit()
         context.settingsDataStore.edit {
-            it[Keys.accentColor] = argb.coerceIn(MIN_ARGB, MAX_ARGB)
+            it[Keys.accentColor] = normalized
         }
     }
 
@@ -419,11 +477,24 @@ class PreferencesRepository(private val context: Context) {
         }
     }
 
+    suspend fun recordDeferredDndSync(timestamp: Long = System.currentTimeMillis()) {
+        context.settingsDataStore.edit { preferences ->
+            val previous = preferences[Keys.deferredDndSyncAt] ?: 0L
+            if (previous <= 0L || timestamp < previous) {
+                preferences[Keys.deferredDndSyncAt] = timestamp
+            }
+        }
+    }
+
+    suspend fun clearDeferredDndSync() {
+        context.settingsDataStore.edit { it.remove(Keys.deferredDndSyncAt) }
+    }
+
     private companion object {
         val HISTORY_WINDOWS = setOf(7, 14, 21, 30, 60)
-        const val MIN_ARGB = 0xFF000000L
-        const val MAX_ARGB = 0xFFFFFFFFL
         const val MAX_SYNC_SUMMARY_CHARS = 1_000
+        const val APPEARANCE_BACKUP_NAME = "lewicowyt_appearance_backup"
+        const val APPEARANCE_BACKUP_ACCENT_KEY = "accent_color_argb"
 
         fun normalizeHistoryDays(value: Int): Int =
         if (value in HISTORY_WINDOWS) value else 14
@@ -469,4 +540,16 @@ class PreferencesRepository(private val context: Context) {
     }
 }
 
+internal fun isValidAccentColor(value: Long): Boolean = value in MIN_ARGB..MAX_ARGB
+
+internal fun normalizeAccentColor(value: Long): Long =
+    value.coerceIn(MIN_ARGB, MAX_ARGB)
+
+internal fun resolveAccentColor(stored: Long?, backup: Long?): Long =
+    stored?.takeIf(::isValidAccentColor)
+        ?: backup?.takeIf(::isValidAccentColor)
+        ?: DEFAULT_ACCENT_COLOR_ARGB
+
 const val DEFAULT_ACCENT_COLOR_ARGB = 0xFFFF0000L
+private const val MIN_ARGB = 0xFF000000L
+private const val MAX_ARGB = 0xFFFFFFFFL

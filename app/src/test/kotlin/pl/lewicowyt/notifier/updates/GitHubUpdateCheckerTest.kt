@@ -84,6 +84,7 @@ class GitHubUpdateCheckerTest {
         )
 
         assertEquals("1.1-beta", selected?.version)
+        assertEquals(13_000_000L, selected?.update?.apkSizeBytes)
     }
 
     @Test
@@ -154,6 +155,7 @@ class GitHubUpdateCheckerTest {
                     put(
                         JSONObject()
                             .put("name", "lewicowYT-$version.apk")
+                            .put("size", 13_000_000L)
                             .put(
                                 "browser_download_url",
                                 "https://github.com/emmunioo/lewicowyt/releases/" +

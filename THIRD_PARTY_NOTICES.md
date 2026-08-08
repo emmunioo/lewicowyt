@@ -9,6 +9,7 @@ W aplikacji są używane następujące główne komponenty:
 | Komponent | Licencja | Projekt |
 |---|---|---|
 | AndroidX, Jetpack Compose, DataStore i Material Components | Apache License 2.0 | <https://developer.android.com/jetpack/androidx> |
+| SQLite dołączony przez AndroidX SQLite Bundled | Domena publiczna | <https://www.sqlite.org/copyright.html> |
 | Kotlin i biblioteki Kotlin | Apache License 2.0 | <https://github.com/JetBrains/kotlin> |
 | OkHttp i Okio | Apache License 2.0 | <https://github.com/square/okhttp>, <https://github.com/square/okio> |
 | jxl-coder 2.6.1 | Apache License 2.0 i BSD 3-Clause | <https://github.com/awxkee/jxl-coder> |

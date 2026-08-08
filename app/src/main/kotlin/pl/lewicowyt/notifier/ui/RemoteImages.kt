@@ -17,6 +17,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import pl.lewicowyt.notifier.images.JxlImageCache
 
@@ -30,13 +31,14 @@ fun ProfileImage(
     if (bitmap != null) {
         Image(
             bitmap = bitmap!!.asImageBitmap(),
-            contentDescription = "Zdjęcie profilowe: $creatorName",
+            contentDescription = null,
             modifier = modifier.clip(CircleShape),
             contentScale = ContentScale.Crop,
         )
     } else {
         Box(
             modifier = modifier
+                .clearAndSetSemantics { }
                 .clip(CircleShape)
                 .background(MaterialTheme.colorScheme.surfaceVariant),
             contentAlignment = Alignment.Center,
@@ -60,13 +62,15 @@ fun VideoThumbnail(
     if (bitmap != null) {
         Image(
             bitmap = bitmap!!.asImageBitmap(),
-            contentDescription = "Miniatura filmu",
+            contentDescription = null,
             modifier = modifier,
             contentScale = ContentScale.Crop,
         )
     } else {
         Box(
-            modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
+            modifier = modifier
+                .clearAndSetSemantics { }
+                .background(MaterialTheme.colorScheme.surfaceVariant),
             contentAlignment = Alignment.Center,
         ) {
             Text(

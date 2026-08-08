@@ -15,7 +15,7 @@ https://api.github.com/repos/emmunioo/lewicowyt/releases?per_page=100
 ```
 
 Pomija szkice, używa porównania wersji zbliżonego do SemVer i obsługuje wersje
-wstępne, np. `1.5-beta`, `1.5-beta.2` oraz `1.5-rc.1`. Dzięki temu wydanie beta
+wstępne, np. `1.5-beta`, `1.6-beta` oraz `1.6-rc.1`. Dzięki temu wydanie beta
 może wykryć kolejną betę, a później wydanie stabilne.
 
 Automatyczna kontrola odbywa się razem ze sprawdzaniem YouTube, najwyżej raz na
@@ -70,7 +70,7 @@ Przed pierwszym wysłaniem wykonaj w głównym folderze projektu:
 git init
 git add .
 git status
-git commit -m "Wydanie 1.5-beta"
+git commit -m "Wydanie 1.6-beta"
 git branch -M main
 git remote add origin https://github.com/emmunioo/lewicowyt.git
 git push -u origin main
@@ -132,8 +132,8 @@ oraz w osobnej, zaszyfrowanej kopii awaryjnej.
 Plik `app/build.gradle.kts` powinien zawierać:
 
 ```kotlin
-versionCode = 15
-versionName = "1.5-beta"
+versionCode = 16
+versionName = "1.6-beta"
 ```
 
 Każda kolejna publikacja musi zwiększyć `versionCode`, nawet jeśli zmienia się
@@ -161,8 +161,8 @@ nie plikiem przeznaczonym do publikacji.
 W Android Studio użyj `Build → Analyze APK` i sprawdź:
 
 - nazwę pakietu `pl.lewicowyt.notifier`;
-- `versionName` równe `1.5-beta`;
-- `versionCode` równe `15`;
+- `versionName` równe `1.6-beta`;
+- `versionCode` równe `16`;
 - brak klucza YouTube API, haseł i pliku klucza podpisu.
 
 Jeżeli przekazujesz APK do MobSF lub innego skanera, wybierz podpisany wariant
@@ -174,38 +174,80 @@ problemy wysokiego poziomu.
 Podpis można zweryfikować narzędziem z Android SDK:
 
 ```powershell
-apksigner verify --verbose --print-certs .\lewicowYT-1.5-beta.apk
+apksigner verify --verbose --print-certs .\lewicowYT-1.6-beta.apk
 ```
 
 Zapisz również sumę kontrolną:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\lewicowYT-1.5-beta.apk
+Get-FileHash -Algorithm SHA256 .\lewicowYT-1.6-beta.apk
 ```
 
-## Publikowanie wersji 1.5-beta
+## Publikowanie wersji 1.6-beta
 
 1. Poczekaj, aż kontrole GitHub Actions zakończą się powodzeniem.
 2. W repozytorium otwórz `Releases → Draft a new release`.
 3. Utwórz tag:
 
 ```text
-v1.5-beta
+v1.6-beta
 ```
 
 4. Zaznacz wydanie jako **pre-release**.
 5. Dołącz dokładnie jeden podpisany APK, np.:
 
 ```text
-lewicowYT-1.5-beta.apk
+lewicowYT-1.6-beta.apk
 ```
 
 6. W opisie podaj SHA-256 APK oraz najważniejsze znane ograniczenia.
 7. Opublikuj wydanie i sprawdź w aplikacji przycisk `Sprawdź aktualizacje`.
 
-### Zakres zmian 1.5-beta
+Historyczny zweryfikowany artefakt bazowej wersji 1.5-beta (nie używać jego
+SHA-256 dla nowego APK 1.6-beta):
 
-W informacji o wersji 1.5-beta należy uwzględnić:
+- nazwa: `lewicowYT-1.5-beta.apk`;
+- rozmiar: 13 161 454 bajty (12,55 MiB);
+- SHA-256:
+  `41bff61a26ddebf32f09064b4fa9e17a3b9a407b18c9d29316e98f3443995eac`;
+- [VirusTotal](https://www.virustotal.com/gui/file/41bff61a26ddebf32f09064b4fa9e17a3b9a407b18c9d29316e98f3443995eac);
+- [MobSF 1.5-beta](https://emmunioo.github.io/lewicowyt/lewicowYT-1.5-beta-MobSF.pdf):
+  A, 69/100 (`LOW RISK`), 0 ustaleń wysokiego poziomu.
+
+### Zakres zmian 1.6-beta
+
+W opisie wydania należy uwzględnić:
+
+- bezpieczne śledzenie przekierowań GitHub Release Assets oraz zachowanie
+  dotychczasowej weryfikacji pobranego APK;
+- czytelniejszy ekran aktualizacji z rozmiarem i opisem zmian oraz awaryjny
+  przycisk otwierający stronę właściwego wydania po błędzie pobierania;
+- lokalne Ulubione w Historii i Powiadomieniach, chronione przed automatyczną
+  retencją razem z używaną miniaturą;
+- tryb wysokiego kontrastu z minimalnym kontrastem tekstu 4,5:1 oraz poprawki
+  TalkBack/powiększonego tekstu;
+- migrację zachowującą dane do schematu 24 i AndroidX SQLite Bundled. Należy
+  jasno napisać, że 1.6-beta tylko potwierdza dostępność FTS5, a produkcyjny
+  indeks, wyszukiwarka i magazyn opisów Zstd BLOB należą do 1.7-beta;
+- automatyczną pierwszą synchronizację, kolejkę przyszłych alarmów,
+  WakeLock, watchdog oraz wstrzymanie sieci w trybie Nie przeszkadzać;
+- trwałą kopię awaryjną koloru akcentu i poprawione mapowanie kanału oraz
+  awatara Myśleć Głębiej;
+- jedno ustawienie aplikacji otwierającej wszystkie linki YouTube: system,
+  chooser, YouTube, NewPipe albo przeglądarka, z bezpiecznym fallbackiem;
+- kopiowanie URL po długim przytrzymaniu materiału w Historii lub
+  Powiadomieniach;
+- rozszerzoną prywatną diagnostykę synchronizacji z `syncId`, stabilnymi
+  `reasonCode`, kontekstem twórcy/źródła, czasami etapów i snapshotami stanu,
+  bez sekretów oraz danych prywatnych.
+
+Przed publikacją zastąp informacje historyczne 1.5 wynikami dotyczącymi
+dokładnie finalnego, podpisanego APK 1.6-beta. Nie wolno przepisywać starego
+SHA-256, VirusTotal ani MobSF do nowego wydania.
+
+### Zakres zmian bazowej wersji 1.5-beta
+
+W informacji o bazowej wersji 1.5-beta uwzględniono:
 
 - globalne i indywidualne ustawienia historii oraz powiadomień osobno dla
   filmów, streamów i Shortów;
@@ -238,9 +280,9 @@ Przykładowa kolejność:
 
 ```text
 1.5-beta
-1.5-beta.2
-1.5-rc.1
-1.5
+1.6-beta
+1.6-rc.1
+1.6
 ```
 
 Dla każdego wydania zwiększ `versionCode`, podpisz APK tym samym kluczem i użyj

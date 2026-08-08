@@ -5,8 +5,10 @@ import android.content.Context
 import pl.lewicowyt.notifier.data.CreatorCatalog
 import pl.lewicowyt.notifier.data.LocalDatabase
 import pl.lewicowyt.notifier.data.PreferencesRepository
+import pl.lewicowyt.notifier.diagnostics.DiagnosticSnapshotProvider
 import pl.lewicowyt.notifier.images.BundledAvatarStore
 import pl.lewicowyt.notifier.images.CreatorAvatarUpdater
+import pl.lewicowyt.notifier.links.YouTubeLinkLauncher
 import pl.lewicowyt.notifier.network.HttpTextClient
 import pl.lewicowyt.notifier.network.PrivacyHttpClient
 import pl.lewicowyt.notifier.network.YouTubeFeedClient
@@ -37,6 +39,8 @@ object AppGraph {
         private set
     lateinit var notifications: NotificationHelper
         private set
+    lateinit var youtubeLinks: YouTubeLinkLauncher
+        private set
     lateinit var resolver: YouTubeSourceResolver
         private set
     lateinit var dataApiClient: YouTubeDataApiHistoryClient
@@ -46,6 +50,8 @@ object AppGraph {
     lateinit var historyBackfill: HistoryBackfillLoader
         private set
     lateinit var scheduler: SyncScheduler
+        private set
+    internal lateinit var diagnostics: DiagnosticSnapshotProvider
         private set
     lateinit var updateChecker: GitHubUpdateChecker
         private set
@@ -62,8 +68,9 @@ object AppGraph {
             catalog = CreatorCatalog(appContext)
             preferences = PreferencesRepository(appContext)
             database = LocalDatabase(appContext)
+            youtubeLinks = YouTubeLinkLauncher(appContext)
             BundledAvatarStore.seedDatabase(appContext, database)
-            notifications = NotificationHelper(appContext, database)
+            notifications = NotificationHelper(appContext, database, youtubeLinks)
             val okHttp = PrivacyHttpClient.get(appContext)
             val http = HttpTextClient(okHttp)
             val feedClient = YouTubeFeedClient(http)
@@ -104,6 +111,13 @@ object AppGraph {
                 avatarUpdater = avatarUpdater,
             )
             scheduler = SyncScheduler(appContext, preferences)
+            diagnostics = DiagnosticSnapshotProvider(
+                context = appContext,
+                catalog = catalog,
+                preferences = preferences,
+                database = database,
+                scheduler = scheduler,
+            )
             updateChecker = GitHubUpdateChecker(http, BuildConfig.UPDATE_REPOSITORY)
             updateManager = AppUpdateManager(appContext, okHttp)
             backgroundUpdateCoordinator = BackgroundUpdateCoordinator(

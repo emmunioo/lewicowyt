@@ -92,6 +92,7 @@ internal object DiagnosticLogStore {
     private var enabled = false
     private var lastFingerprint = ""
     private var lastFingerprintAtMillis = 0L
+    private var exportSummary: List<String> = emptyList()
 
     fun initialize(context: Context): Unit = synchronized(lock) {
         if (appContext != null) return
@@ -117,6 +118,8 @@ internal object DiagnosticLogStore {
             eventCount = context?.let(::readAllLocked)?.size ?: 0,
         )
     }
+
+    fun isEnabled(): Boolean = synchronized(lock) { enabled }
 
     fun unlock(): Unit = synchronized(lock) {
         val context = appContext ?: return
@@ -170,6 +173,31 @@ internal object DiagnosticLogStore {
         if (enabled) appendLocked(DiagnosticLevel.INFO, category, message)
     }
 
+    fun event(
+        category: DiagnosticCategory,
+        level: DiagnosticLevel,
+        name: String,
+        syncId: String? = null,
+        reason: DiagnosticReasonCode? = null,
+        fields: Map<String, Any?> = emptyMap(),
+        text: String? = null,
+    ) = synchronized(lock) {
+        if (enabled) {
+            appendLocked(
+                level,
+                category,
+                formatDiagnosticEvent(name, syncId, reason, fields, text),
+            )
+        }
+    }
+
+    fun updateExportSummary(lines: List<String>) = synchronized(lock) {
+        exportSummary = lines
+            .map(DiagnosticLogCodec::sanitize)
+            .filter(String::isNotBlank)
+            .take(MAX_EXPORT_SUMMARY_LINES)
+    }
+
     fun warning(tag: String, message: String, error: Throwable?) = synchronized(lock) {
         if (enabled) appendLocked(
             DiagnosticLevel.WARNING,
@@ -202,9 +230,10 @@ internal object DiagnosticLogStore {
             context.contentResolver.openOutputStream(destination, "w")?.use { output ->
                 BestSizeGzipOutputStream(output).use { gzip ->
                     BufferedWriter(OutputStreamWriter(gzip, Charsets.UTF_8)).use { writer ->
-                        writer.appendLine("lewicowYT — dziennik diagnostyczny")
-                        writer.appendLine("wersja=${BuildConfig.VERSION_NAME}; sdk=${Build.VERSION.SDK_INT}")
-                        writer.appendLine("Klucze API, nagłówki autoryzacji i parametry URL są usuwane.")
+                        writer.appendLine("=== lewicowYT diagnostics ===")
+                        writer.appendLine("APP | version=${BuildConfig.VERSION_NAME} | sdk=${Build.VERSION.SDK_INT}")
+                        exportSummary.forEach(writer::appendLine)
+                        writer.appendLine("LOG | secrets=redacted | urlQueries=redacted")
                         writer.appendLine()
                         events.forEach { event ->
                             writer.append(EXPORT_TIME_FORMAT.format(
@@ -317,6 +346,7 @@ internal object DiagnosticLogStore {
     private const val MAX_FILE_BYTES = 1_024L * 1_024L
     private const val MAX_READ_BYTES = MAX_FILE_BYTES + 64L * 1024L
     private const val DEDUP_MILLIS = 2L * 60L * 1_000L
+    private const val MAX_EXPORT_SUMMARY_LINES = 12
     private val EXPORT_TIME_FORMAT = DateTimeFormatter
         .ofPattern("uuuu-MM-dd HH:mm:ss 'UTC'")
         .withZone(ZoneOffset.UTC)
@@ -368,6 +398,8 @@ internal object DiagnosticLogCodec {
     fun sanitize(value: String): String = value
         .replace(API_KEY, "[USUNIĘTY_KLUCZ_API]")
         .replace(AUTHORIZATION, "[USUNIĘTA_AUTORYZACJA]")
+        .replace(COOKIE, "[USUNIĘTE_COOKIE]")
+        .replace(SENSITIVE_ASSIGNMENT, "$1=[USUNIĘTY_SEKRET]")
         .replace(URL_QUERY) { match -> match.groupValues[1] }
         .replace(ANDROID_PRIVATE_PATH, "[PRYWATNA_ŚCIEŻKA]")
         .replace(Regex("[\\r\\n\\t]+"), " ")
@@ -417,7 +449,11 @@ internal object DiagnosticLogCodec {
     private val AUTHORIZATION = Regex(
         "(?i)(?:authorization\\s*[:=]\\s*(?:bearer\\s+)?|bearer\\s+)[^,;\\s]+",
     )
-    private val URL_QUERY = Regex("(https://[^?\\s]+)\\?[^\\s]+")
+    private val COOKIE = Regex("(?i)(?:set-cookie|cookie)\\s*[:=]\\s*[^;\\r\\n]+")
+    private val SENSITIVE_ASSIGNMENT = Regex(
+        "(?i)\\b(token|access_token|refresh_token|signature|x-amz-signature|password|secret)\\s*[:=]\\s*[^&;,\\s]+",
+    )
+    private val URL_QUERY = Regex("(https?://[^?\\s]+)\\?[^\\s]+")
     private val ANDROID_PRIVATE_PATH = Regex(
         "(?:/data/(?:user/\\d+|data)/|/storage/emulated/\\d+/)[^\\s,;]+",
     )

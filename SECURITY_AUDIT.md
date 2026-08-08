@@ -1,12 +1,30 @@
 # Audyt bezpieczeństwa
 
-Data przeglądu kodu: 1 sierpnia 2026 r.
+Data ostatniej aktualizacji przeglądu kodu: 8 sierpnia 2026 r.
 
-Wersja kodu: `1.5-beta` (`versionCode 15`).
+Wersja kodu: `1.6-beta` (`versionCode 16`).
 
-Podpisany APK 1.5-beta, jego SHA-256, VirusTotal i ponowny raport MobSF nie są
-jeszcze dostępne. Poniższe dane konkretnego APK 1.4-beta pozostają historycznym
-punktem odniesienia i nie są dowodem właściwości przyszłego artefaktu 1.5-beta.
+Wersja 1.6-beta naprawia pobieranie APK przez standardowe przekierowanie
+GitHub Releases. Przekierowania są obsługiwane ręcznie, mają limit pięciu
+kroków i muszą prowadzić przez HTTPS na `github.com`,
+`objects.githubusercontent.com` albo host w domenie `githubusercontent.com`.
+Nie są przesyłane dane uwierzytelniające, a końcowy APK nadal podlega kontroli
+rozmiaru, SHA-256, pakietu, wersji i certyfikatu podpisującego.
+
+W tej wersji baza przechodzi ze składnika SQLite dostarczanego przez system
+Android na dołączony AndroidX SQLite Bundled. Jeden silnik otwiera cały plik
+bazy; nie są mieszane równoległe połączenia systemowe i bundled. Migracja do
+schematu 24 zachowuje rekordy i Ulubione. W 1.6-beta sprawdzana jest dostępność
+FTS5, ale produkcyjny indeks oraz magazyn opisów nie są jeszcze tworzone.
+Migracja usuwa także przedwczesny testowy indeks/pole opisu ze schematu 23 bez
+utraty historii. Właściwy magazyn Zstd BLOB i niezależny indeks powstaną dopiero
+w 1.7-beta.
+
+Kandydat źródłowy 1.6-beta jest przygotowany do finalnej walidacji i podpisania,
+ale raport dotyczący finalnego APK nie został jeszcze dostarczony. Poniższy wynik
+VirusTotal i MobSF pozostaje historycznym wynikiem bazowego APK 1.5-beta. Oba raporty
+dotyczą pliku o SHA-256
+`41bff61a26ddebf32f09064b4fa9e17a3b9a407b18c9d29316e98f3443995eac`.
 
 ## Zakres
 
@@ -26,6 +44,17 @@ poziomu wynikają z celowych właściwości kompilacji debug (`debuggable=true`,
 certyfikat Android Debug i narzędziowy kod debug).
 
 ## Wynik i interpretacja MobSF
+
+Raport podpisanego wydania 1.5-beta z 1 sierpnia 2026 r. potwierdza pakiet
+`pl.lewicowyt.notifier`, `versionCode 15`, `versionName 1.5-beta` i podpis v2.
+MobSF przyznał ocenę A, 69/100 (`LOW RISK`): 0 ustaleń wysokiego, 8 średniego
+i 1 informacyjne. Raport jest dostępny jako
+[PDF](https://emmunioo.github.io/lewicowyt/lewicowYT-1.5-beta-MobSF.pdf), a
+odpowiadający mu wynik jest dostępny w
+[VirusTotal](https://www.virustotal.com/gui/file/41bff61a26ddebf32f09064b4fa9e17a3b9a407b18c9d29316e98f3443995eac).
+
+Poniższe uwagi obejmują również wcześniejsze raporty użyte podczas utwardzania
+aplikacji:
 
 - ocena statyczna badanego APK: `A`, 67/100, `LOW RISK`, bez ustaleń wysokiego
   poziomu w podsumowaniu;
@@ -113,10 +142,20 @@ certyfikat Android Debug i narzędziowy kod debug).
 - migracja bazy do wersji 15 ponawia klasyfikację bez zerowania `kind`.
   Nieudana klasyfikacja zachowuje dotychczasowy rodzaj, a potwierdzona karta lub
   odtwarzacz poprawia rekord w miejscu;
-- bieżący schemat bazy ma wersję 22 i przechowuje m.in. stan kart kanału,
+- bieżący schemat bazy ma wersję 24 i przechowuje m.in. stan kart kanału,
   model kolejności, metadane awatarów oraz stabilny snapshot RSS dla
   powiadomień. Migracje są wykonywane sekwencyjnie także przy aktualizacji
   bezpośrednio ze starszej instalacji;
+- SQLite Bundled zapewnia jednolity zestaw funkcji na wspieranych Androidach.
+  W 1.6-beta FTS5 jest tylko testowane tabelą tymczasową; nie istnieje
+  produkcyjna tabela FTS ani tekstowa kolumna opisu. Dane użytkownika nie są
+  składane do dynamicznych poleceń schematu;
+- zapytania zwracające listy historii, skrzynki i statystyk mapują wiersze
+  bezpośrednio ze `SQLiteStatement`, bez drugiej pełnej kopii w `MatrixCursor`.
+  Zapytania listowe mają limity; przyszłe wyniki FTS5 muszą pozostać
+  stronicowane i nie mogą ładować całej historii do pamięci;
+- automatyczne czyszczenie historii pomija Ulubione, a czyszczenie cache obrazów
+  zachowuje zawartość nadal wskazywaną przez ulubiony materiał;
 - migracja bazy do wersji 10 usuwa niepotwierdzone rekordy pozostawione przez
   dawną integrację zewnętrzną; zostają ponownie pobrane wyłącznie z YouTube;
 - nieprawidłowe i skrajnie przyszłe daty z RSS, Data API lub YouTube Web
@@ -205,7 +244,16 @@ certyfikat Android Debug i narzędziowy kod debug).
 
 ## Wynik automatycznej walidacji
 
-Końcowy przebieg lokalny dla kodu `1.5-beta` obejmuje przebudowaną historię,
+Końcowa walidacja źródeł kandydata 1.6-beta z 8 sierpnia 2026 r. objęła
+210/210 testów jednostkowych osobno dla wariantu debug i release. Lint obu
+wariantów zakończył się bez błędów (44 ostrzeżenia niewstrzymujące), a APK
+debug oraz niepodpisany APK release zostały poprawnie złożone poza repozytorium
+w katalogu kompilacji. Testów urządzeniowych nie powtórzono w tej sesji,
+ponieważ Gradle nie wykrył podłączonego emulatora; ostatni dostępny wynik
+urządzeniowy pozostaje pozytywny, ale przed publikacją zalecany jest krótki test
+ręczny podpisanego APK na fizycznym urządzeniu.
+
+Pełny przebieg lokalny bazowego kodu `1.5-beta` obejmował przebudowaną historię,
 selektywne ustawienia rodzajów, klasyfikację, lokalny model kolejności,
 współdzielenie obrazów i wbudowane awatary. Ostatni przebieg wykonano
 1 sierpnia 2026 r. przed podpisaniem APK:
@@ -219,6 +267,24 @@ współdzielenie obrazów i wbudowane awatary. Ostatni przebieg wykonano
   (po 43 ostrzeżenia niewstrzymujące wydania);
 - zadanie przygotowania 49 awatarów JXL zakończone powodzeniem, a jego
   konfiguracja została sprawdzona z włączonym Gradle Configuration Cache;
+- dla rozpoczętej wersji 1.6-beta uruchomiono 14 testów aktualizatora i wyboru
+  wydań: 0 niepowodzeń, 0 błędów i 0 pominiętych testów. Testy obejmują
+  akceptację hosta plików wydań GitHuba oraz odrzucanie HTTP, danych logowania,
+  niestandardowego portu i niezaufanych domen;
+- celowane testy 1.6 objęły także wspólny launcher linków YouTube, trwały
+  zapis jego preferencji, systemowy chooser, jawne alternatywy NewPipe i
+  przeglądarki, fallbacki oraz URL filmu i kanału;
+- długie przytrzymanie karty Historii/Powiadomień kopiuje wyłącznie
+  zweryfikowany standardowy URL YouTube. Zwykłe kliknięcie nadal przechodzi
+  przez wspólny launcher;
+- po dodaniu SQLite Bundled i Ulubionych kompilacja aplikacji oraz androidTest
+  przeszła, a 192 testy jednostkowe debug zakończyły się bez błędów. Na
+  emulatorze Android przeszło 5 celowanych testów: pełna migracja wszystkich
+  tabel schematu 22→24, migracja z niezatwierdzonym WAL, usunięcie
+  przedwczesnego FTS/pola opisu ze schematu 23, INSERT+UPDATE przez androidowe
+  `ContentValues` oraz kontrast tekstu co najmniej 4,5:1. Test `ContentValues`
+  zabezpiecza regresję `UnsupportedOperationException` powodowaną wcześniej
+  przez próbę konwersji `ContentValues.valueSet()` przez `toArray()`;
 - katalog 49 twórców i 52 źródeł: brak pustych pozycji, zduplikowanych kluczy
   źródeł i adresów spoza dozwolonych hostów YouTube;
 - ponownie scalone i przetworzone biblioteki natywne debug i release zawierają
@@ -230,6 +296,21 @@ współdzielenie obrazów i wbudowane awatary. Ostatni przebieg wykonano
   zawierają klienta Piped ani adresów jego publicznych instancji;
 - skan plików publikowanych: brak kluczy podpisu, APK/AAB, zrzutów pamięci,
   raportów awarii, osadzonych kluczy API oraz danych osobowych z certyfikatu.
+
+### Artefakt wydania 1.5-beta
+
+Podpisany artefakt `lewicowYT-1.5-beta.apk` ma:
+
+- rozmiar 13 161 454 bajty (12,55 MiB);
+- SHA-256 APK:
+  `41bff61a26ddebf32f09064b4fa9e17a3b9a407b18c9d29316e98f3443995eac`;
+- pakiet `pl.lewicowyt.notifier`, `versionCode 15`, `versionName 1.5-beta`;
+- poprawny podpis APK Signature Scheme v2 i jednego sygnatariusza;
+- SHA-256 certyfikatu:
+  `2d242f3390a37913459085f86edf96484f2ccc3866e327325d2915c74a8e980a`;
+- minimalny Android API 26, docelowy API 36 oraz cztery deklarowane ABI.
+
+SHA-256 jest zgodny z identyfikatorem raportów VirusTotal i MobSF.
 
 ### Historyczny artefakt 1.4-beta
 

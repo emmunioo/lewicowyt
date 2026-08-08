@@ -1,10 +1,14 @@
 package pl.lewicowyt.notifier.ui
 
 import android.app.TimePickerDialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color as AndroidColor
 import android.os.SystemClock
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -12,6 +16,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -47,6 +52,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconToggleButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -76,6 +82,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -93,11 +108,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import pl.lewicowyt.notifier.BuildConfig
+import pl.lewicowyt.notifier.AppGraph
 import pl.lewicowyt.notifier.R
 import pl.lewicowyt.notifier.data.DEFAULT_ACCENT_COLOR_ARGB
 import pl.lewicowyt.notifier.data.AppSettings
 import pl.lewicowyt.notifier.data.MAX_YOUTUBE_API_KEY_CHARS
 import pl.lewicowyt.notifier.data.ThemeMode
+import pl.lewicowyt.notifier.data.YouTubeLinkTarget
 import pl.lewicowyt.notifier.data.isHistoryEnabledFor
 import pl.lewicowyt.notifier.data.isNotificationEnabledFor
 import pl.lewicowyt.notifier.diagnostics.DiagnosticLogState
@@ -123,12 +140,19 @@ fun LewicowYTApp(
     viewModel: AppViewModel,
     exactAlarmAccessGranted: Boolean = true,
     batteryOptimizationIgnored: Boolean = true,
+    notificationPolicyAccessGranted: Boolean = false,
     whatsNewVisible: Boolean = false,
     acknowledgeWhatsNew: () -> Unit = {},
     requestExactAlarmAccess: () -> Unit = {},
     openBatteryOptimizationSettings: () -> Unit = {},
+    requestNotificationPolicyAccess: () -> Unit = {},
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val whatsNewScrollState = rememberScrollState()
+    val youtubeLinks = remember { AppGraph.youtubeLinks }
+    val openYouTubeLink: (String) -> Unit = { url ->
+        youtubeLinks.open(url, state.settings.youtubeLinkTarget)
+    }
     var selectedScreenIndex by rememberSaveable { mutableIntStateOf(0) }
     var batteryOptimizationNoticeVisible by remember {
         mutableStateOf(false)
@@ -155,47 +179,69 @@ fun LewicowYTApp(
     if (whatsNewVisible) {
         AlertDialog(
             onDismissRequest = acknowledgeWhatsNew,
-            title = { Text("Co nowego w lewicowYT 1.5-beta") },
+            title = { Text("Co nowego w lewicowYT 1.6-beta") },
             text = {
                 Column(
                     modifier = Modifier
                         .heightIn(max = 440.dp)
-                        .verticalScroll(rememberScrollState()),
+                        .verticalScroll(whatsNewScrollState),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text("Pełna kontrola rodzajów", fontWeight = FontWeight.Bold)
+                    Text("Aktualizacje z czytelniejszym podsumowaniem", fontWeight = FontWeight.Bold)
                     Text(
-                        "Filmy, streamy i Shorty można wyłączać globalnie albo osobno dla " +
-                            "każdego twórcy — niezależnie dla historii i powiadomień. " +
-                            "Wyłączenie historii pomija także pobieranie odpowiedniej karty.",
+                        "Aplikacja bezpiecznie obsługuje teraz przekierowanie HTTPS, którego " +
+                            "GitHub używa podczas pobierania plików APK. Nadal odrzuca " +
+                            "przekierowania poza zaufane serwery plików GitHuba, a pobrany " +
+                            "plik przechodzi dotychczasową kontrolę sumy, pakietu i podpisu.",
+                    )
+                    Text(
+                        "Ekran aktualizacji pokazuje wersję, rozmiar i opis wydania. Jeśli " +
+                            "automatyczne pobranie się nie powiedzie, można awaryjnie otworzyć " +
+                            "stronę właściwego wydania.",
                     )
                     Spacer(Modifier.height(2.dp))
-                    Text("Znacznie szybsza historia", fontWeight = FontWeight.Bold)
+                    Text("Ulubione materiały", fontWeight = FontWeight.Bold)
                     Text(
-                        "RSS pokazuje pierwsze wyniki, a pięć kanałów jest uzupełnianych " +
-                            "równolegle etapami po dwa tygodnie: Filmy, Shorty, Streamy. " +
-                            "Poprawiono daty, karty kanału i stronicowanie YouTube.",
+                        "Materiały z Historii i Powiadomień można oznaczać gwiazdką. Filtr " +
+                            "Ulubione zbiera je w jednym miejscu i chroni przed automatycznym " +
+                            "usunięciem po upływie zwykłego okresu historii.",
                     )
                     Spacer(Modifier.height(2.dp))
-                    Text("Pewniejsze typy i powiadomienia", fontWeight = FontWeight.Bold)
+                    Text("Dostępność i wysoki kontrast", fontWeight = FontWeight.Bold)
                     Text(
-                        "Ujednolicono rozpoznawanie filmów, Shortów i transmisji dla trybu " +
-                            "API oraz bez API. Powiadomienia bez klucza wykrywają rzeczywistą " +
-                            "zmianę RSS i nie powtarzają starszych materiałów.",
+                        "Dopracowano opisy i kolejność elementów dla TalkBack, większe obszary " +
+                            "dotyku oraz układ przy powiększonym tekście. Nowy tryb wysokiego " +
+                            "kontrastu wzmacnia tekst, obramowania i elementy sterujące.",
                     )
                     Spacer(Modifier.height(2.dp))
-                    Text("Mniej transferu i zajętego miejsca", fontWeight = FontWeight.Bold)
+                    Text("Baza gotowa na dalszy rozwój", fontWeight = FontWeight.Bold)
                     Text(
-                        "Web pobiera tylko potrzebne metadane. Wbudowane awatary 176×176 są " +
-                            "sprawdzane raz w tygodniu, a identyczne miniatury współdzielą " +
-                            "jeden plik dzięki SHA-256.",
+                        "Istniejąca historia jest automatycznie przenoszona do dołączonego " +
+                            "silnika SQLite z obsługą FTS5. Wyszukiwarka nie jest jeszcze " +
+                            "włączona — jej interfejs i opisy materiałów są planowane na " +
+                            "następne wydanie.",
                     )
                     Spacer(Modifier.height(2.dp))
-                    Text("Uzupełnienie zmian z 1.4-beta", fontWeight = FontWeight.Bold)
+                    Text("Pewniejsze działanie w tle", fontWeight = FontWeight.Bold)
                     Text(
-                        "Uwzględniono pominięte wcześniej informacje o poprawionym " +
-                            "wykrywaniu wydań, bezpiecznym pobieraniu aktualizacji i ochronie " +
-                            "przed instalacją niewłaściwego APK.",
+                        "Pierwsza synchronizacja uruchamia się automatycznie, a kolejka " +
+                            "dokładnych alarmów, krótki WakeLock i watchdog pomagają " +
+                            "kontynuować sprawdzanie przy wygaszonym ekranie. Podczas trybu " +
+                            "Nie przeszkadzać aplikacja wstrzymuje sieć i nadrabia zaległy termin.",
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text("Linki otwierane po Twojemu", fontWeight = FontWeight.Bold)
+                    Text(
+                        "Jedno ustawienie wybiera aplikację dla filmów i kanałów: " +
+                            "system, pytanie za każdym razem, YouTube, NewPipe albo " +
+                            "przeglądarka. Długie przytrzymanie materiału w Historii lub " +
+                            "Powiadomieniach kopiuje jego link zamiast go otwierać.",
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text("Trwalsze ustawienia wyglądu", fontWeight = FontWeight.Bold)
+                    Text(
+                        "Wybrany kolor akcentu ma dodatkową lokalną kopię awaryjną, " +
+                            "dlatego aktualizacja nie powinna przywracać domyślnej czerwieni.",
                     )
                     Spacer(Modifier.height(2.dp))
                     Text("Więcej informacji znajduje się na stronie projektu.")
@@ -249,7 +295,17 @@ fun LewicowYTApp(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     Screen.entries.forEachIndexed { index, item ->
-                        TextButton(onClick = { selectedScreenIndex = index }) {
+                        TextButton(
+                            onClick = { selectedScreenIndex = index },
+                            modifier = Modifier.semantics {
+                                selected = index == selectedScreenIndex
+                                stateDescription = if (index == selectedScreenIndex) {
+                                    "Wybrana karta"
+                                } else {
+                                    "Karta niewybrana"
+                                }
+                            },
+                        ) {
                             Text(
                                 text = item.title,
                                 fontWeight = if (index == selectedScreenIndex) {
@@ -267,16 +323,19 @@ fun LewicowYTApp(
     ) { padding ->
         Surface(Modifier.fillMaxSize().padding(padding)) {
             when (screen) {
-                Screen.CREATORS -> CreatorsScreen(state, viewModel)
-                Screen.HISTORY -> HistoryScreen(state, viewModel)
-                Screen.NOTIFICATIONS -> NotificationsScreen(state)
+                Screen.CREATORS -> CreatorsScreen(state, viewModel, openYouTubeLink)
+                Screen.HISTORY -> HistoryScreen(state, viewModel, openYouTubeLink)
+                Screen.NOTIFICATIONS -> NotificationsScreen(state, viewModel, openYouTubeLink)
                 Screen.SETTINGS -> SettingsScreen(
                     state = state,
                     viewModel = viewModel,
                     exactAlarmAccessGranted = exactAlarmAccessGranted,
                     batteryOptimizationIgnored = batteryOptimizationIgnored,
+                    notificationPolicyAccessGranted = notificationPolicyAccessGranted,
                     requestExactAlarmAccess = requestExactAlarmAccess,
                     openBatteryOptimizationSettings = openBatteryOptimizationSettings,
+                    requestNotificationPolicyAccess = requestNotificationPolicyAccess,
+                    openYouTubeLink = openYouTubeLink,
                 )
             }
         }
@@ -284,9 +343,17 @@ fun LewicowYTApp(
 }
 
 @Composable
-private fun CreatorsScreen(state: AppUiState, viewModel: AppViewModel) {
-    val uriHandler = LocalUriHandler.current
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
+private fun CreatorsScreen(
+    state: AppUiState,
+    viewModel: AppViewModel,
+    openYouTubeLink: (String) -> Unit,
+) {
+    val creatorsListState = rememberLazyListState()
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+    ) {
         OutlinedTextField(
             value = state.query,
             onValueChange = viewModel::setQuery,
@@ -295,16 +362,21 @@ private fun CreatorsScreen(state: AppUiState, viewModel: AppViewModel) {
             label = { Text("Szukaj twórcy") },
         )
         Spacer(Modifier.height(10.dp))
-        Row(
+        Column(
             modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("Wybrano: ${state.selectedCreatorIds.size}/${state.allCreatorCount}")
+            Text(
+                "Wybrano: ${state.selectedCreatorIds.size}/${state.allCreatorCount}",
+                modifier = Modifier.semantics {
+                    stateDescription =
+                        "Wybrano ${state.selectedCreatorIds.size} z ${state.allCreatorCount} twórców"
+                },
+            )
             Button(
                 onClick = viewModel::syncNow,
                 enabled = !state.isRefreshing,
-                modifier = Modifier.widthIn(min = 156.dp),
+                modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(
                     disabledContainerColor = MaterialTheme.colorScheme.primaryContainer,
                     disabledContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -312,7 +384,9 @@ private fun CreatorsScreen(state: AppUiState, viewModel: AppViewModel) {
             ) {
                 if (state.isRefreshing) {
                     CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
+                        modifier = Modifier
+                            .size(18.dp)
+                            .semantics { contentDescription = "Synchronizacja trwa" },
                         color = MaterialTheme.colorScheme.onPrimaryContainer,
                         strokeWidth = 2.dp,
                     )
@@ -328,7 +402,9 @@ private fun CreatorsScreen(state: AppUiState, viewModel: AppViewModel) {
             Card(Modifier.fillMaxWidth()) {
                 Text(
                     text = message,
-                    modifier = Modifier.padding(12.dp),
+                    modifier = Modifier
+                        .padding(12.dp)
+                        .semantics { liveRegion = LiveRegionMode.Polite },
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -346,6 +422,7 @@ private fun CreatorsScreen(state: AppUiState, viewModel: AppViewModel) {
         }
         Spacer(Modifier.height(8.dp))
         LazyColumn(
+            state = creatorsListState,
             contentPadding = PaddingValues(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -363,7 +440,7 @@ private fun CreatorsScreen(state: AppUiState, viewModel: AppViewModel) {
                         viewModel.setCreatorNotificationType(creator.id, type, enabled)
                     },
                     onOpenChannel = {
-                        creatorYouTubeChannelUrl(creator)?.let(uriHandler::openUri)
+                        creatorYouTubeChannelUrl(creator)?.let(openYouTubeLink)
                     },
                 )
             }
@@ -383,45 +460,65 @@ private fun CreatorRow(
     onOpenChannel: () -> Unit,
 ) {
     var expanded by rememberSaveable(creator.id) { mutableStateOf(false) }
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .combinedClickable(
-                onClick = { expanded = !expanded },
-                onLongClickLabel = "Otwórz kanał w YouTube",
-                onLongClick = onOpenChannel,
-            ),
-    ) {
+    Card(modifier = Modifier.fillMaxWidth()) {
         Column {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                ProfileImage(
-                    url = avatarUrl,
-                    creatorName = creator.name,
-                    modifier = Modifier.size(48.dp),
-                )
-                Column(
+                Row(
                     modifier = Modifier
                         .weight(1f)
-                        .padding(start = 12.dp, end = 8.dp),
+                        .combinedClickable(
+                            onClickLabel = if (expanded) {
+                                "Zwiń ustawienia twórcy"
+                            } else {
+                                "Rozwiń ustawienia twórcy"
+                            },
+                            onClick = { expanded = !expanded },
+                            onLongClickLabel = "Otwórz kanał",
+                            onLongClick = onOpenChannel,
+                        )
+                        .semantics {
+                            stateDescription = if (expanded) {
+                                "Ustawienia rozwinięte"
+                            } else {
+                                "Ustawienia zwinięte"
+                            }
+                        }
+                        .padding(end = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(creator.name, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        text = if (expanded) {
-                            "Dotknij kafelka, aby ukryć ustawienia"
-                        } else if (creator.sources.size == 1) {
-                            "1 źródło YouTube"
-                        } else {
-                            "${creator.sources.size} źródła YouTube"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
+                    ProfileImage(
+                        url = avatarUrl,
+                        creatorName = creator.name,
+                        modifier = Modifier.size(48.dp),
                     )
+                    Column(modifier = Modifier.padding(start = 12.dp)) {
+                        Text(creator.name, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            text = if (expanded) {
+                                "Ustawienia rozwinięte"
+                            } else if (creator.sources.size == 1) {
+                                "1 źródło YouTube"
+                            } else {
+                                "${creator.sources.size} źródła YouTube"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
                 }
                 Checkbox(
                     checked = selected,
                     onCheckedChange = onSelectedChange,
+                    modifier = Modifier.semantics {
+                        contentDescription = "Obserwuj twórcę ${creator.name}"
+                        stateDescription = if (selected) {
+                            "Obserwowany"
+                        } else {
+                            "Nieobserwowany"
+                        }
+                    },
                 )
             }
             AnimatedVisibility(visible = expanded) {
@@ -432,6 +529,7 @@ private fun CreatorRow(
                     HorizontalDivider()
                     Text(
                         "Ustawienia tego twórcy",
+                        modifier = Modifier.semantics { heading() },
                         fontWeight = FontWeight.SemiBold,
                     )
                     HistoryFilter.entries.forEach { type ->
@@ -487,8 +585,11 @@ private fun CreatorContentTypeSettings(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun HistoryScreen(state: AppUiState, viewModel: AppViewModel) {
-    val uriHandler = LocalUriHandler.current
+private fun HistoryScreen(
+    state: AppUiState,
+    viewModel: AppViewModel,
+    openYouTubeLink: (String) -> Unit,
+) {
     var rangeMenuOpen by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val availableHistoryFilters = HistoryFilter.entries.filter {
@@ -512,15 +613,30 @@ private fun HistoryScreen(state: AppUiState, viewModel: AppViewModel) {
         if (shouldLoadMore && !state.isLoadingHistory) viewModel.loadMoreHistory()
     }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(
+        Modifier
+            .fillMaxSize(),
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Text("Od najnowszych", fontWeight = FontWeight.SemiBold)
+            Text(
+                "Od najnowszych",
+                modifier = Modifier.semantics { heading() },
+                fontWeight = FontWeight.SemiBold,
+            )
             Box {
-                OutlinedButton(onClick = { rangeMenuOpen = true }) {
+                OutlinedButton(
+                    onClick = { rangeMenuOpen = true },
+                    modifier = Modifier.semantics {
+                        contentDescription = "Zakres historii"
+                        stateDescription = historyRangeLabel(
+                            state.settings.historyWindowDays,
+                        )
+                    },
+                ) {
                     Text(historyRangeLabel(state.settings.historyWindowDays))
                 }
                 DropdownMenu(
@@ -540,7 +656,10 @@ private fun HistoryScreen(state: AppUiState, viewModel: AppViewModel) {
             }
         }
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             availableHistoryFilters.forEach { filter ->
@@ -555,6 +674,11 @@ private fun HistoryScreen(state: AppUiState, viewModel: AppViewModel) {
                     label = { Text(historyFilterLabel(filter)) },
                 )
             }
+            FilterChip(
+                selected = state.favoritesOnly,
+                onClick = { viewModel.setFavoritesOnly(!state.favoritesOnly) },
+                label = { Text("Ulubione") },
+            )
         }
 
         if (state.history.isEmpty()) {
@@ -563,7 +687,11 @@ private fun HistoryScreen(state: AppUiState, viewModel: AppViewModel) {
                 contentAlignment = Alignment.Center,
             ) {
                 if (state.isLoadingHistory) {
-                    CircularProgressIndicator()
+                    CircularProgressIndicator(
+                        modifier = Modifier.semantics {
+                            contentDescription = "Ładowanie historii"
+                        },
+                    )
                 } else if (state.historyLoadError != null) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -576,7 +704,9 @@ private fun HistoryScreen(state: AppUiState, viewModel: AppViewModel) {
                     }
                 } else {
                     Text(
-                        if (state.selectedCreatorIds.isEmpty()) {
+                        if (state.favoritesOnly) {
+                            "Brak ulubionych materiałów pasujących do aktywnych filtrów."
+                        } else if (state.selectedCreatorIds.isEmpty()) {
                             "Zaznacz co najmniej jednego twórcę. Historia pokazuje tylko " +
                                 "aktualnie wybrane kanały."
                         } else if (state.settings.globalHistoryTypes.isEmpty()) {
@@ -600,48 +730,13 @@ private fun HistoryScreen(state: AppUiState, viewModel: AppViewModel) {
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             items(state.history, key = HistoryItem::videoId) { item ->
-                Card(
-                    modifier = Modifier.fillMaxWidth().clickable {
-                        youtubeWatchUrl(item.videoId)?.let(uriHandler::openUri)
+                MaterialHistoryCard(
+                    item = item,
+                    onOpen = {
+                        youtubeWatchUrl(item.videoId)?.let(openYouTubeLink)
                     },
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        VideoThumbnail(
-                            videoId = item.videoId,
-                            modifier = Modifier
-                                .size(width = 128.dp, height = 72.dp)
-                                .clip(RoundedCornerShape(8.dp)),
-                        )
-                        Column(
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(start = 12.dp),
-                        ) {
-                            Text(item.creatorName, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                item.title,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Spacer(Modifier.height(4.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.Bottom,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                Text(
-                                    "${kindLabel(item.kind)} · " +
-                                        formatTime(item.publishedAtMillis),
-                                    modifier = Modifier.weight(1f),
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                            }
-                        }
-                    }
-                }
+                    onFavoriteChange = { viewModel.setFavorite(item.videoId, it) },
+                )
             }
             if (state.historyHasMore) {
                 item(key = "history-loading") {
@@ -650,7 +745,13 @@ private fun HistoryScreen(state: AppUiState, viewModel: AppViewModel) {
                         contentAlignment = Alignment.Center,
                     ) {
                         if (state.isLoadingHistory) {
-                            CircularProgressIndicator(modifier = Modifier.size(28.dp))
+                            CircularProgressIndicator(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .semantics {
+                                        contentDescription = "Ładowanie dalszej historii"
+                                    },
+                            )
                         }
                     }
                 }
@@ -662,7 +763,13 @@ private fun HistoryScreen(state: AppUiState, viewModel: AppViewModel) {
                             modifier = Modifier.padding(14.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Text(error, color = MaterialTheme.colorScheme.error)
+                            Text(
+                                error,
+                                modifier = Modifier.semantics {
+                                    liveRegion = LiveRegionMode.Polite
+                                },
+                                color = MaterialTheme.colorScheme.error,
+                            )
                             OutlinedButton(onClick = viewModel::retryHistoryLoading) {
                                 Text("Spróbuj ponownie")
                             }
@@ -675,8 +782,12 @@ private fun HistoryScreen(state: AppUiState, viewModel: AppViewModel) {
 }
 
 @Composable
-private fun NotificationsScreen(state: AppUiState) {
-    val uriHandler = LocalUriHandler.current
+private fun NotificationsScreen(
+    state: AppUiState,
+    viewModel: AppViewModel,
+    openYouTubeLink: (String) -> Unit,
+) {
+    val notificationsListState = rememberLazyListState()
 
     if (state.notifications.isEmpty()) {
         Box(
@@ -692,61 +803,122 @@ private fun NotificationsScreen(state: AppUiState) {
     }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize(),
+        state = notificationsListState,
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item {
             Text(
                 "Najnowsze powiadomienia",
+                modifier = Modifier.semantics { heading() },
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
             )
         }
         items(state.notifications, key = HistoryItem::videoId) { item ->
-            Card(
-                modifier = Modifier.fillMaxWidth().clickable {
-                    youtubeWatchUrl(item.videoId)?.let(uriHandler::openUri)
+            MaterialHistoryCard(
+                item = item,
+                onOpen = {
+                    youtubeWatchUrl(item.videoId)?.let(openYouTubeLink)
                 },
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    VideoThumbnail(
-                        videoId = item.videoId,
-                        modifier = Modifier
-                            .size(width = 128.dp, height = 72.dp)
-                            .clip(RoundedCornerShape(8.dp)),
+                onFavoriteChange = { viewModel.setFavorite(item.videoId, it) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun MaterialHistoryCard(
+    item: HistoryItem,
+    onOpen: () -> Unit,
+    onFavoriteChange: (Boolean) -> Unit,
+) {
+    val context = LocalContext.current
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .combinedClickable(
+                        onClickLabel = "Otwórz materiał",
+                        onLongClickLabel = "Kopiuj link do materiału",
+                        role = Role.Button,
+                        onClick = onOpen,
+                        onLongClick = {
+                            youtubeWatchUrl(item.videoId)?.let { url ->
+                                copyYouTubeLink(context, url)
+                            }
+                        },
                     )
-                    Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(start = 12.dp),
-                    ) {
-                        Text(item.creatorName, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            item.title,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.Bottom,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Text(
-                                "${kindLabel(item.kind)} · " +
-                                    formatTime(item.publishedAtMillis),
-                                modifier = Modifier.weight(1f),
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
-                    }
+                    .semantics {
+                        contentDescription = historyItemDescription(item)
+                    },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                VideoThumbnail(
+                    videoId = item.videoId,
+                    modifier = Modifier
+                        .size(width = 128.dp, height = 72.dp)
+                        .clip(RoundedCornerShape(8.dp)),
+                )
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(start = 12.dp, end = 4.dp),
+                ) {
+                    Text(item.creatorName, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        item.title,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "${kindLabel(item.kind)} · ${formatTime(item.publishedAtMillis)}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
             }
+            FavoriteToggle(
+                item = item,
+                onFavoriteChange = onFavoriteChange,
+            )
         }
+    }
+}
+
+private fun copyYouTubeLink(context: Context, url: String) {
+    val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
+    clipboard.setPrimaryClip(ClipData.newPlainText("Link YouTube", url))
+    Toast.makeText(context, "Skopiowano link do materiału", Toast.LENGTH_SHORT).show()
+}
+
+@Composable
+private fun FavoriteToggle(
+    item: HistoryItem,
+    onFavoriteChange: (Boolean) -> Unit,
+) {
+    IconToggleButton(
+        checked = item.isFavorite,
+        onCheckedChange = onFavoriteChange,
+        modifier = Modifier.semantics {
+            contentDescription = if (item.isFavorite) {
+                "Usuń ${item.title} z ulubionych"
+            } else {
+                "Dodaj ${item.title} do ulubionych"
+            }
+            stateDescription = if (item.isFavorite) "Ulubiony" else "Nieulubiony"
+        },
+    ) {
+        Text(
+            text = if (item.isFavorite) "★" else "☆",
+            style = MaterialTheme.typography.titleLarge,
+        )
     }
 }
 
@@ -756,8 +928,11 @@ private fun SettingsScreen(
     viewModel: AppViewModel,
     exactAlarmAccessGranted: Boolean,
     batteryOptimizationIgnored: Boolean,
+    notificationPolicyAccessGranted: Boolean,
     requestExactAlarmAccess: () -> Unit,
     openBatteryOptimizationSettings: () -> Unit,
+    requestNotificationPolicyAccess: () -> Unit,
+    openYouTubeLink: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val resources = LocalResources.current
@@ -769,6 +944,8 @@ private fun SettingsScreen(
     var diagnosticState by remember { mutableStateOf(DiagnosticLogStore.state()) }
     var diagnosticMessage by remember { mutableStateOf<String?>(null) }
     var dnsTapCount by rememberSaveable { mutableIntStateOf(0) }
+    val settingsListState = rememberLazyListState()
+    val noticesScrollState = rememberScrollState()
     var lastDnsTapAt by remember { mutableLongStateOf(0L) }
     val diagnosticScope = rememberCoroutineScope()
     val diagnosticExportLauncher = rememberLauncherForActivityResult(
@@ -841,7 +1018,7 @@ private fun SettingsScreen(
                     text = thirdPartyNotices,
                     modifier = Modifier
                         .heightIn(max = 420.dp)
-                        .verticalScroll(rememberScrollState()),
+                        .verticalScroll(noticesScrollState),
                     style = MaterialTheme.typography.bodySmall,
                 )
             },
@@ -854,7 +1031,9 @@ private fun SettingsScreen(
     }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize(),
+        state = settingsListState,
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -862,7 +1041,10 @@ private fun SettingsScreen(
             ThemeSettings(state, viewModel)
         }
         item {
-            FastHistorySettings(state, viewModel)
+            YouTubeLinkSettings(state, viewModel)
+        }
+        item {
+            FastHistorySettings(state, viewModel, openYouTubeLink)
         }
         item {
             GlobalContentSettings(state, viewModel)
@@ -871,14 +1053,26 @@ private fun SettingsScreen(
             ExactAlarmSettings(
                 exactAlarmAccessGranted = exactAlarmAccessGranted,
                 batteryOptimizationIgnored = batteryOptimizationIgnored,
+                notificationPolicyAccessGranted = notificationPolicyAccessGranted,
                 requestExactAlarmAccess = requestExactAlarmAccess,
                 openBatteryOptimizationSettings = openBatteryOptimizationSettings,
+                requestNotificationPolicyAccess = requestNotificationPolicyAccess,
             )
         }
         item {
-            Text("Częstotliwość", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Częstotliwość",
+                modifier = Modifier.semantics { heading() },
+                style = MaterialTheme.typography.titleMedium,
+            )
             Box {
-                OutlinedButton(onClick = { intervalMenuOpen = true }) {
+                OutlinedButton(
+                    onClick = { intervalMenuOpen = true },
+                    modifier = Modifier.semantics {
+                        contentDescription = "Częstotliwość synchronizacji"
+                        stateDescription = intervalLabel(state.settings.intervalMinutes)
+                    },
+                ) {
                     Text(intervalLabel(state.settings.intervalMinutes))
                 }
                 DropdownMenu(
@@ -912,7 +1106,11 @@ private fun SettingsScreen(
         }
         if (state.settings.intervalMinutes == 1440) {
             item {
-                Text("Godzina codziennego sprawdzenia", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Godzina codziennego sprawdzenia",
+                    modifier = Modifier.semantics { heading() },
+                    style = MaterialTheme.typography.titleMedium,
+                )
                 OutlinedButton(
                     onClick = {
                         TimePickerDialog(
@@ -922,6 +1120,13 @@ private fun SettingsScreen(
                             state.settings.dailyMinute,
                             true,
                         ).show()
+                    },
+                    modifier = Modifier.semantics {
+                        contentDescription = "Godzina codziennego sprawdzenia"
+                        stateDescription = formatClock(
+                            state.settings.dailyHour,
+                            state.settings.dailyMinute,
+                        )
                     },
                 ) {
                     Text(formatClock(state.settings.dailyHour, state.settings.dailyMinute))
@@ -954,7 +1159,11 @@ private fun SettingsScreen(
                     modifier = Modifier.padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text("Aktualizacje", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Aktualizacje",
+                        modifier = Modifier.semantics { heading() },
+                        fontWeight = FontWeight.SemiBold,
+                    )
                     Text(
                         "Zainstalowana wersja: ${BuildConfig.VERSION_NAME}",
                         style = MaterialTheme.typography.bodySmall,
@@ -977,7 +1186,11 @@ private fun SettingsScreen(
                     ) {
                         if (state.updateState == UpdateUiState.Checking) {
                             CircularProgressIndicator(
-                                modifier = Modifier.size(18.dp),
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .semantics {
+                                        contentDescription = "Sprawdzanie aktualizacji"
+                                    },
                                 strokeWidth = 2.dp,
                                 color = MaterialTheme.colorScheme.onPrimary,
                             )
@@ -999,13 +1212,59 @@ private fun SettingsScreen(
                             "Masz najnowszą wersję (${updateState.latestVersion}).",
                             style = MaterialTheme.typography.bodySmall,
                         )
-                        is UpdateUiState.Error -> Text(
-                            "Nie udało się sprawdzić aktualizacji: ${updateState.message}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                        )
+                        is UpdateUiState.Error -> {
+                            Text(
+                                if (updateState.update == null) {
+                                    "Nie udało się sprawdzić aktualizacji: " +
+                                        updateState.message
+                                } else {
+                                    "Nie udało się pobrać aktualizacji: " +
+                                        updateState.message
+                                },
+                                modifier = Modifier.semantics {
+                                    liveRegion = LiveRegionMode.Polite
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                            updateState.update?.let { update ->
+                                Column(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            viewModel.downloadAndInstallUpdate(update)
+                                        },
+                                    ) {
+                                        Text("Spróbuj ponownie")
+                                    }
+                                    TextButton(
+                                        onClick = {
+                                            uriHandler.openUri(update.releasePageUrl)
+                                        },
+                                    ) {
+                                        Text("Otwórz stronę wydania")
+                                    }
+                                }
+                            }
+                        }
                         is UpdateUiState.Available -> {
-                            Text("Dostępna wersja: ${updateState.update.version}")
+                            Text(
+                                "Dostępna aktualizacja",
+                                modifier = Modifier.semantics { heading() },
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                            Text(
+                                "${BuildConfig.VERSION_NAME} → ${updateState.update.version}",
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            updateState.update.apkSizeBytes?.let { size ->
+                                Text(
+                                    "Rozmiar APK: ${formatApkSize(size)}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
                             when (updateState.update.policy) {
                                 UpdatePolicy.OPTIONAL -> Unit
                                 UpdatePolicy.MANDATORY_SECURITY_UPDATE -> Text(
@@ -1021,6 +1280,7 @@ private fun SettingsScreen(
                                 )
                             }
                             if (updateState.update.releaseNotes.isNotBlank()) {
+                                Text("Co nowego", fontWeight = FontWeight.SemiBold)
                                 Text(
                                     updateState.update.releaseNotes,
                                     maxLines = 5,
@@ -1039,7 +1299,7 @@ private fun SettingsScreen(
                                     viewModel.downloadAndInstallUpdate(updateState.update)
                                 },
                             ) {
-                                Text("Pobierz i przygotuj aktualizację")
+                                Text("Pobierz aktualizację")
                             }
                             TextButton(
                                 onClick = {
@@ -1055,7 +1315,11 @@ private fun SettingsScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
                                 CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
+                                    modifier = Modifier
+                                        .size(18.dp)
+                                        .semantics {
+                                            contentDescription = "Pobieranie aktualizacji"
+                                        },
                                     strokeWidth = 2.dp,
                                 )
                                 Text("Pobieranie i sprawdzanie APK…")
@@ -1132,6 +1396,7 @@ private fun SettingsScreen(
         item {
             Text(
                 text = "Informacje",
+                modifier = Modifier.semantics { heading() },
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
             )
@@ -1211,6 +1476,18 @@ private fun SettingsScreen(
                         DiagnosticLogStore.clear()
                         diagnosticState = DiagnosticLogStore.state()
                         diagnosticMessage = "Usunięto zapisany dziennik."
+                    },
+                    onSnapshot = {
+                        viewModel.saveDiagnosticSnapshot { message ->
+                            diagnosticMessage = message
+                            diagnosticState = DiagnosticLogStore.state()
+                        }
+                    },
+                    onCheckDatabase = {
+                        viewModel.checkDiagnosticDatabase { message ->
+                            diagnosticMessage = message
+                            diagnosticState = DiagnosticLogStore.state()
+                        }
                     },
                     onHide = {
                         DiagnosticLogStore.hide()
@@ -1300,6 +1577,8 @@ private fun DiagnosticLogSettings(
     onEnabledChange: (Boolean) -> Unit,
     onExport: () -> Unit,
     onClear: () -> Unit,
+    onSnapshot: () -> Unit,
+    onCheckDatabase: () -> Unit,
     onHide: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth()) {
@@ -1337,6 +1616,18 @@ private fun DiagnosticLogSettings(
             ) {
                 Text("Zapisz skompresowany log")
             }
+            OutlinedButton(
+                onClick = onSnapshot,
+                enabled = state.enabled,
+            ) {
+                Text("Zapisz stan diagnostyczny teraz")
+            }
+            OutlinedButton(
+                onClick = onCheckDatabase,
+                enabled = state.enabled,
+            ) {
+                Text("Sprawdź bazę danych")
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
                     onClick = onClear,
@@ -1362,7 +1653,11 @@ private fun GlobalContentSettings(state: AppUiState, viewModel: AppViewModel) {
             modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("Rodzaje materiałów", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Rodzaje materiałów",
+                modifier = Modifier.semantics { heading() },
+                style = MaterialTheme.typography.titleMedium,
+            )
             Text(
                 "Ustawienia globalne dotyczą wszystkich twórców. Wyłączenie historii " +
                     "automatycznie wyłącza także powiadomienia danego rodzaju.",
@@ -1401,7 +1696,59 @@ private fun GlobalContentSettings(state: AppUiState, viewModel: AppViewModel) {
 }
 
 @Composable
-private fun FastHistorySettings(state: AppUiState, viewModel: AppViewModel) {
+private fun YouTubeLinkSettings(state: AppUiState, viewModel: AppViewModel) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Card(Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                "Otwieraj linki w:",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            Box {
+                OutlinedButton(
+                    onClick = { menuOpen = true },
+                    modifier = Modifier.semantics {
+                        contentDescription = "Aplikacja do otwierania linków YouTube"
+                        stateDescription = youtubeLinkTargetLabel(
+                            state.settings.youtubeLinkTarget,
+                        )
+                    },
+                ) {
+                    Text(youtubeLinkTargetLabel(state.settings.youtubeLinkTarget))
+                }
+                DropdownMenu(
+                    expanded = menuOpen,
+                    onDismissRequest = { menuOpen = false },
+                ) {
+                    YouTubeLinkTarget.entries.forEach { target ->
+                        DropdownMenuItem(
+                            text = { Text(youtubeLinkTargetLabel(target)) },
+                            onClick = {
+                                menuOpen = false
+                                viewModel.setYouTubeLinkTarget(target)
+                            },
+                        )
+                    }
+                }
+            }
+            Text(
+                "Jedno ustawienie dotyczy filmów, Shortów, transmisji i kanałów.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+@Composable
+private fun FastHistorySettings(
+    state: AppUiState,
+    viewModel: AppViewModel,
+    openYouTubeLink: (String) -> Unit,
+) {
     val uriHandler = LocalUriHandler.current
     // Sekret nie trafia do SavedState/Bundle i jest czyszczony po zapisaniu.
     var apiKey by remember { mutableStateOf("") }
@@ -1416,7 +1763,11 @@ private fun FastHistorySettings(state: AppUiState, viewModel: AppViewModel) {
             modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text("Szybka historia", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Szybka historia",
+                modifier = Modifier.semantics { heading() },
+                style = MaterialTheme.typography.titleMedium,
+            )
             Text(
                 "Opcjonalny klucz YouTube Data API v3 pozwala pobierać historię dużo szybciej " +
                     "i zatrzymywać pobieranie po osiągnięciu wybranego zakresu czasu. " +
@@ -1448,7 +1799,9 @@ private fun FastHistorySettings(state: AppUiState, viewModel: AppViewModel) {
             ) {
                 if (isValidating) {
                     CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
+                        modifier = Modifier
+                            .size(18.dp)
+                            .semantics { contentDescription = "Weryfikowanie klucza API" },
                         strokeWidth = 2.dp,
                         color = MaterialTheme.colorScheme.onPrimary,
                     )
@@ -1488,7 +1841,7 @@ private fun FastHistorySettings(state: AppUiState, viewModel: AppViewModel) {
             }
             TextButton(
                 onClick = {
-                    uriHandler.openUri("https://youtu.be/EPeDTRNKAVo")
+                    openYouTubeLink("https://youtu.be/EPeDTRNKAVo")
                 },
             ) {
                 Text("Jak uzyskać darmowy klucz API - wideo poradnik")
@@ -1518,10 +1871,20 @@ private fun ThemeSettings(state: AppUiState, viewModel: AppViewModel) {
             modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text("Wygląd", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Wygląd",
+                modifier = Modifier.semantics { heading() },
+                style = MaterialTheme.typography.titleMedium,
+            )
             Text("Motyw aplikacji", fontWeight = FontWeight.SemiBold)
             Box {
-                OutlinedButton(onClick = { themeMenuOpen = true }) {
+                OutlinedButton(
+                    onClick = { themeMenuOpen = true },
+                    modifier = Modifier.semantics {
+                        contentDescription = "Motyw aplikacji"
+                        stateDescription = themeModeLabel(state.settings.themeMode)
+                    },
+                ) {
                     Text(themeModeLabel(state.settings.themeMode))
                 }
                 DropdownMenu(
@@ -1539,6 +1902,16 @@ private fun ThemeSettings(state: AppUiState, viewModel: AppViewModel) {
                     }
                 }
             }
+            SwitchSetting(
+                title = "Wysoki kontrast",
+                checked = state.settings.highContrastEnabled,
+                onCheckedChange = viewModel::setHighContrastEnabled,
+            )
+            Text(
+                "Zwiększa kontrast tekstu, obramowań i elementów sterujących, " +
+                    "zachowując wybrany kolor akcentu.",
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 }
@@ -1565,7 +1938,11 @@ private fun AccentColorSettings(state: AppUiState, viewModel: AppViewModel) {
             modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text("Kolor akcentu", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Kolor akcentu",
+                modifier = Modifier.semantics { heading() },
+                style = MaterialTheme.typography.titleMedium,
+            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1574,6 +1951,7 @@ private fun AccentColorSettings(state: AppUiState, viewModel: AppViewModel) {
                 Box(
                     modifier = Modifier
                         .size(44.dp)
+                        .clearAndSetSemantics { }
                         .clip(RoundedCornerShape(10.dp))
                         .background(
                             androidx.compose.ui.graphics.Color(
@@ -1628,6 +2006,10 @@ private fun ColorChannelSlider(
             onValueChangeFinished = onValueChangeFinished,
             valueRange = 0f..255f,
             steps = 254,
+            modifier = Modifier.semantics {
+                contentDescription = "Składowa koloru: $label"
+                stateDescription = "${value.toInt()} z 255"
+            },
         )
     }
 }
@@ -1636,11 +2018,17 @@ private fun ColorChannelSlider(
 private fun ExactAlarmSettings(
     exactAlarmAccessGranted: Boolean,
     batteryOptimizationIgnored: Boolean,
+    notificationPolicyAccessGranted: Boolean,
     requestExactAlarmAccess: () -> Unit,
     openBatteryOptimizationSettings: () -> Unit,
+    requestNotificationPolicyAccess: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("Działanie w tle", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Działanie w tle",
+            modifier = Modifier.semantics { heading() },
+            style = MaterialTheme.typography.titleMedium,
+        )
         Text(
             "Automatyczne sprawdzanie korzysta z AlarmManagera. Dokładny alarm " +
                 "RTC_WAKEUP może obudzić urządzenie także przy wyłączonym ekranie, " +
@@ -1689,6 +2077,25 @@ private fun ExactAlarmSettings(
                 },
             )
         }
+        if (notificationPolicyAccessGranted) {
+            Text(
+                "Reakcja na „Nie przeszkadzać” jest aktywna. W tym trybie aplikacja " +
+                    "nie łączy się z YouTube, a po jego zakończeniu nadrabia sprawdzenie.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        } else {
+            Text(
+                "Zezwól na dostęp do trybu „Nie przeszkadzać”, aby aplikacja mogła " +
+                    "natychmiast wstrzymywać sprawdzanie i wznawiać je po zakończeniu " +
+                    "trybu snu. Bez dostępu stan jest kontrolowany przy każdym alarmie.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            OutlinedButton(onClick = requestNotificationPolicyAccess) {
+                Text("Zezwól na wykrywanie Nie przeszkadzać")
+            }
+        }
     }
 }
 
@@ -1705,7 +2112,21 @@ private fun SwitchSetting(
     enabled: Boolean = true,
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .toggleable(
+                value = checked,
+                enabled = enabled,
+                role = Role.Switch,
+                onValueChange = onCheckedChange,
+            )
+            .semantics(mergeDescendants = true) {
+                stateDescription = when {
+                    !enabled -> "Niedostępne"
+                    checked -> "Włączone"
+                    else -> "Wyłączone"
+                }
+            },
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
@@ -1717,8 +2138,9 @@ private fun SwitchSetting(
         )
         Switch(
             checked = checked,
-            onCheckedChange = onCheckedChange,
+            onCheckedChange = null,
             enabled = enabled,
+            modifier = Modifier.clearAndSetSemantics { },
         )
     }
 }
@@ -1771,6 +2193,14 @@ private fun historyRangeLabel(days: Int): String = when (days) {
     else -> "Ostatnie $days dni"
 }
 
+internal fun youtubeLinkTargetLabel(target: YouTubeLinkTarget): String = when (target) {
+    YouTubeLinkTarget.SYSTEM_DEFAULT -> "Domyślna aplikacja systemowa"
+    YouTubeLinkTarget.ALWAYS_ASK -> "Pytaj za każdym razem"
+    YouTubeLinkTarget.YOUTUBE -> "YouTube"
+    YouTubeLinkTarget.NEWPIPE -> "NewPipe"
+    YouTubeLinkTarget.BROWSER -> "Przeglądarka"
+}
+
 private fun formatClock(hour: Int, minute: Int): String =
     String.format(Locale.ROOT, "%02d:%02d", hour, minute)
 
@@ -1781,6 +2211,9 @@ private fun formatDiagnosticBytes(bytes: Long): String = when {
     bytes < 1_024L -> "$bytes B"
     else -> String.format(Locale.ROOT, "%.1f KiB", bytes / 1_024.0)
 }
+
+private fun formatApkSize(bytes: Long): String =
+    String.format(Locale.forLanguageTag("pl"), "%.1f MB", bytes / (1024.0 * 1024.0))
 
 private fun diagnosticRemainingTapsLabel(remaining: Int): String = when (remaining) {
     1 -> "1 dotknięcie"
@@ -1802,6 +2235,10 @@ private const val DIAGNOSTIC_UNLOCK_SEQUENCE_TIMEOUT_MILLIS = 3_000L
 private fun formatTime(epochMillis: Long): String =
     DATE_FORMATTER.format(Instant.ofEpochMilli(epochMillis))
 
+private fun historyItemDescription(item: HistoryItem): String =
+    "${item.creatorName}. ${item.title}. ${kindLabel(item.kind)}. " +
+        formatTime(item.publishedAtMillis)
+
 private fun youtubeWatchUrl(videoId: String): String? =
     videoId.takeIf(YOUTUBE_VIDEO_ID::matches)
         ?.let { "https://www.youtube.com/watch?v=$it" }
@@ -1809,7 +2246,13 @@ private fun youtubeWatchUrl(videoId: String): String? =
 private val YOUTUBE_VIDEO_ID = Regex("""[A-Za-z0-9_-]{11}""")
 
 internal fun creatorYouTubeChannelUrl(creator: Creator): String? {
-    val channel = creator.sources.firstOrNull { it.type == SourceType.CHANNEL }
+    val channel = creator.profileChannelId
+        ?.let { profileId ->
+            creator.sources.firstOrNull {
+                it.type == SourceType.CHANNEL && it.externalId == profileId
+            }
+        }
+        ?: creator.sources.firstOrNull { it.type == SourceType.CHANNEL }
     channel?.externalId
         ?.takeIf(YOUTUBE_CHANNEL_ID::matches)
         ?.let { return "https://www.youtube.com/channel/$it" }

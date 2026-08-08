@@ -42,6 +42,8 @@ class CreatorCatalog(private val context: Context) {
                         id = item.getString("id"),
                         name = item.getString("name"),
                         sources = sources,
+                        profileChannelId = item.optString("profileChannelId")
+                            .ifBlank { null },
                     ),
                 )
             }

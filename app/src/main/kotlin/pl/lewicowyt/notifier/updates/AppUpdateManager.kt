@@ -15,9 +15,16 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import pl.lewicowyt.notifier.R
+import pl.lewicowyt.notifier.diagnostics.DiagnosticCategory
+import pl.lewicowyt.notifier.diagnostics.DiagnosticLevel
+import pl.lewicowyt.notifier.diagnostics.DiagnosticLogStore
+import pl.lewicowyt.notifier.diagnostics.DiagnosticReasonCode
 
 data class PreparedUpdate(
     val update: AvailableUpdate,
@@ -33,6 +40,12 @@ class AppUpdateManager(
     private val pendingApk = File(updatesDirectory, PENDING_APK_NAME)
 
     fun prepare(update: AvailableUpdate): PreparedUpdate {
+        DiagnosticLogStore.event(
+            DiagnosticCategory.UPDATE,
+            DiagnosticLevel.INFO,
+            "DOWNLOAD_START",
+            fields = mapOf("version" to update.version, "asset" to update.apkName),
+        )
         createNotificationChannel()
         updatesDirectory.mkdirs()
 
@@ -48,6 +61,12 @@ class AppUpdateManager(
         temporaryApk.delete()
         try {
             downloadApk(update, temporaryApk)
+            DiagnosticLogStore.event(
+                DiagnosticCategory.UPDATE,
+                DiagnosticLevel.INFO,
+                "DOWNLOAD_COMPLETE",
+                fields = mapOf("bytes" to temporaryApk.length()),
+            )
             validateApk(temporaryApk, update)
             if (pendingApk.exists() && !pendingApk.delete()) {
                 throw IOException("Nie można zastąpić poprzedniego pliku aktualizacji.")
@@ -80,6 +99,11 @@ class AppUpdateManager(
     }
 
     fun launchInstaller() {
+        DiagnosticLogStore.event(
+            DiagnosticCategory.UPDATE,
+            DiagnosticLevel.INFO,
+            "INSTALLER_LAUNCHED",
+        )
         context.startActivity(
             Intent(context, UpdateInstallActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
@@ -174,15 +198,14 @@ class AppUpdateManager(
             .header("User-Agent", "lewicowYT-updater")
             .build()
         val client = httpClient.newBuilder()
+            .followRedirects(false)
+            .followSslRedirects(false)
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(45, TimeUnit.SECONDS)
             .callTimeout(5, TimeUnit.MINUTES)
             .build()
 
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IOException("GitHub zwrócił HTTP ${response.code} podczas pobierania APK.")
-            }
+        openApkResponse(client, request).use { response ->
             if (!response.request.url.isHttps) {
                 throw IOException("Przekierowanie pobierania nie używa HTTPS.")
             }
@@ -215,10 +238,73 @@ class AppUpdateManager(
             update.sha256Digest?.let { expected ->
                 val actual = digest.digest().joinToString("") { "%02x".format(it) }
                 if (!actual.equals(expected, ignoreCase = true)) {
+                    DiagnosticLogStore.event(
+                        DiagnosticCategory.UPDATE,
+                        DiagnosticLevel.ERROR,
+                        "SHA256_FAILED",
+                        reason = DiagnosticReasonCode.SHA256_MISMATCH,
+                    )
                     throw SecurityException("Suma SHA-256 pobranego APK jest nieprawidłowa.")
                 }
+                DiagnosticLogStore.event(
+                    DiagnosticCategory.UPDATE,
+                    DiagnosticLevel.INFO,
+                    "SHA256_OK",
+                )
             }
         }
+    }
+
+    private fun openApkResponse(client: OkHttpClient, initialRequest: Request): Response {
+        var currentUrl = requireSafeApkDownloadUrl(
+            value = initialRequest.url.toString(),
+            allowGitHubAssetHost = false,
+        )
+        repeat(MAX_APK_REDIRECTS + 1) {
+            val request = initialRequest.newBuilder().url(currentUrl).build()
+            val response = client.newCall(request).execute()
+            if (response.code in APK_REDIRECT_CODES) {
+                val location = response.header("Location")
+                val redirected = location?.let(currentUrl::resolve)
+                response.close()
+                if (redirected == null) {
+                    throw IOException("GitHub zwrócił nieprawidłowe przekierowanie APK.")
+                }
+                currentUrl = try {
+                    val accepted = requireSafeApkDownloadUrl(
+                        value = redirected.toString(),
+                        allowGitHubAssetHost = true,
+                    )
+                    DiagnosticLogStore.event(
+                        DiagnosticCategory.UPDATE,
+                        DiagnosticLevel.INFO,
+                        "REDIRECT_ACCEPTED",
+                        fields = mapOf(
+                            "from" to currentUrl.host,
+                            "to" to accepted.host,
+                        ),
+                    )
+                    accepted
+                } catch (_: IllegalArgumentException) {
+                    DiagnosticLogStore.event(
+                        DiagnosticCategory.UPDATE,
+                        DiagnosticLevel.ERROR,
+                        "REDIRECT_REJECTED",
+                        reason = DiagnosticReasonCode.HOST_NOT_ALLOWED,
+                        fields = mapOf("from" to currentUrl.host),
+                    )
+                    throw IOException("GitHub przekierował pobieranie APK do niedozwolonego hosta.")
+                }
+                return@repeat
+            }
+            if (!response.isSuccessful) {
+                val statusCode = response.code
+                response.close()
+                throw IOException("GitHub zwrócił HTTP $statusCode podczas pobierania APK.")
+            }
+            return response
+        }
+        throw IOException("GitHub przekroczył limit przekierowań podczas pobierania APK.")
     }
 
     private fun validateApk(file: File, update: AvailableUpdate) {
@@ -228,15 +314,43 @@ class AppUpdateManager(
         val installedInfo = installedPackageInfo(packageManager)
 
         if (archiveInfo.packageName != context.packageName) {
+            DiagnosticLogStore.event(
+                DiagnosticCategory.UPDATE,
+                DiagnosticLevel.ERROR,
+                "PACKAGE_ID_FAILED",
+                reason = DiagnosticReasonCode.PACKAGE_ID_MISMATCH,
+            )
             throw SecurityException("APK ma inny identyfikator aplikacji.")
         }
+        DiagnosticLogStore.event(
+            DiagnosticCategory.UPDATE,
+            DiagnosticLevel.INFO,
+            "PACKAGE_ID_OK",
+        )
         if (!signingCertificates(archiveInfo).any { it in signingCertificates(installedInfo) }) {
+            DiagnosticLogStore.event(
+                DiagnosticCategory.UPDATE,
+                DiagnosticLevel.ERROR,
+                "SIGNATURE_FAILED",
+                reason = DiagnosticReasonCode.SIGNATURE_MISMATCH,
+            )
             throw SecurityException("APK nie jest podpisany kluczem zainstalowanej aplikacji.")
         }
+        DiagnosticLogStore.event(
+            DiagnosticCategory.UPDATE,
+            DiagnosticLevel.INFO,
+            "SIGNATURE_OK",
+        )
 
         val installedCode = PackageInfoCompat.getLongVersionCode(installedInfo)
         val archiveCode = PackageInfoCompat.getLongVersionCode(archiveInfo)
         if (archiveCode <= installedCode) {
+            DiagnosticLogStore.event(
+                DiagnosticCategory.UPDATE,
+                DiagnosticLevel.ERROR,
+                "VERSION_CODE_FAILED",
+                reason = DiagnosticReasonCode.VERSION_CODE_INVALID,
+            )
             val rollbackHint = if (update.policy == UpdatePolicy.SECURITY_ROLLBACK) {
                 " Awaryjny APK musi zawierać starszy kod aplikacji, ale wyższy versionCode."
             } else {
@@ -246,6 +360,12 @@ class AppUpdateManager(
                 "Android odrzuci APK, ponieważ jego versionCode nie jest wyższy.$rollbackHint",
             )
         }
+        DiagnosticLogStore.event(
+            DiagnosticCategory.UPDATE,
+            DiagnosticLevel.INFO,
+            "VERSION_CODE_OK",
+            fields = mapOf("versionCode" to archiveCode),
+        )
         if (normalizeVersion(archiveInfo.versionName) != normalizeVersion(update.version)) {
             throw SecurityException("Wersja wewnątrz APK nie odpowiada wydaniu GitHub.")
         }
@@ -323,7 +443,36 @@ class AppUpdateManager(
         private const val PROJECT_REQUEST_CODE = 0x5552
         private const val MAX_NOTIFICATION_TEXT_CHARS = 180
         private const val MAX_APK_BYTES = 200L * 1024L * 1024L
+        private const val MAX_APK_REDIRECTS = 5
+        private val APK_REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
     }
+}
+
+internal fun requireSafeApkDownloadUrl(
+    value: String,
+    allowGitHubAssetHost: Boolean,
+): HttpUrl {
+    val url = value.toHttpUrlOrNull()
+    require(
+        url != null &&
+            url.isHttps &&
+            url.username.isEmpty() &&
+            url.password.isEmpty() &&
+            url.port == 443,
+    ) {
+        "Adres pobierania APK musi używać czystego HTTPS"
+    }
+    val host = url.host.trimEnd('.').lowercase()
+    val isGitHubRelease =
+        host == "github.com" &&
+            "/releases/download/" in url.encodedPath &&
+            url.encodedPath.endsWith(".apk", ignoreCase = true)
+    val isGitHubAsset = allowGitHubAssetHost &&
+        (host == "objects.githubusercontent.com" || host.endsWith(".githubusercontent.com"))
+    require(isGitHubRelease || isGitHubAsset) {
+        "Adres pobierania APK nie należy do GitHub Releases"
+    }
+    return url
 }
 
 private fun String.toUri(): android.net.Uri = android.net.Uri.parse(this)

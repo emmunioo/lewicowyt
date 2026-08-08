@@ -99,6 +99,10 @@ function Get-AvatarUrl {
     param($Creator, [string]$YtDlp)
     $pendingUrls = [Collections.Generic.Queue[string]]::new()
     $sources = @($Creator.sources | ForEach-Object { $_ })
+    $profileChannelId = [string]$Creator.profileChannelId
+    if ($profileChannelId -match '^UC[A-Za-z0-9_-]{22}$') {
+        $pendingUrls.Enqueue("https://www.youtube.com/channel/$profileChannelId")
+    }
     foreach ($source in $sources) {
         $pendingUrls.Enqueue([string]$source.url)
     }

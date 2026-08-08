@@ -3,9 +3,7 @@ package pl.lewicowyt.notifier.data
 import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
-import android.database.Cursor
-import android.database.sqlite.SQLiteDatabase
-import android.database.sqlite.SQLiteOpenHelper
+import androidx.sqlite.SQLiteStatement
 import pl.lewicowyt.notifier.model.Creator
 import pl.lewicowyt.notifier.model.HistoryItem
 import pl.lewicowyt.notifier.model.PublishedAtEvidence
@@ -33,6 +31,15 @@ data class CreatorAvatarMetadata(
     val lastAttemptAtMillis: Long,
 )
 
+internal data class DatabaseDiagnosticState(
+    val engine: String = "BUNDLED_SQLITE",
+    val sqliteVersion: String,
+    val userVersion: Int,
+    val appSchemaVersion: Int,
+    val journalMode: String,
+    val fts5Available: Boolean,
+)
+
 private data class StoredVideoEvidence(
     val publishedEvidenceRank: Int,
     val kindDecision: VideoKindDecision,
@@ -48,13 +55,43 @@ internal fun shouldReplacePublishedAt(
             incomingEvidence.canRefreshAtSameRank
         )
 
-class LocalDatabase(context: Context) : SQLiteOpenHelper(
-    context,
-    DATABASE_NAME,
-    null,
-    DATABASE_VERSION,
+class LocalDatabase(
+    context: Context,
+    databaseName: String = DATABASE_NAME,
 ) {
-    override fun onCreate(db: SQLiteDatabase) {
+    internal val writableDatabase = BundledDatabase(context.getDatabasePath(databaseName))
+    internal val readableDatabase: BundledDatabase
+        get() = writableDatabase
+
+    init {
+        val oldVersion = readableDatabase.rawQuery("PRAGMA user_version", null).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getInt(0) else 0
+        }
+        require(oldVersion <= DATABASE_VERSION) {
+            "Baza pochodzi z nowszej wersji aplikacji ($oldVersion > $DATABASE_VERSION)"
+        }
+        if (oldVersion == 0) {
+            writableDatabase.beginTransaction()
+            try {
+                onCreate(writableDatabase)
+                writableDatabase.execSQL("PRAGMA user_version = $DATABASE_VERSION")
+                writableDatabase.setTransactionSuccessful()
+            } finally {
+                writableDatabase.endTransaction()
+            }
+        } else if (oldVersion < DATABASE_VERSION) {
+            writableDatabase.beginTransaction()
+            try {
+                onUpgrade(writableDatabase, oldVersion, DATABASE_VERSION)
+                writableDatabase.execSQL("PRAGMA user_version = $DATABASE_VERSION")
+                writableDatabase.setTransactionSuccessful()
+            } finally {
+                writableDatabase.endTransaction()
+            }
+        }
+    }
+
+    private fun onCreate(db: BundledDatabase) {
         createSourceStateTable(db)
         createVideoHistoryTable(db)
         createCreatorMetadataTable(db)
@@ -64,7 +101,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         createYouTubeChannelTabsTable(db)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+    private fun onUpgrade(db: BundledDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) {
             createCreatorMetadataTable(db)
             db.execSQL(
@@ -251,9 +288,33 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         if (oldVersion < 22) {
             db.execSQL("ALTER TABLE source_state ADD COLUMN rss_known_video_ids TEXT")
         }
+        if (oldVersion < 23) {
+            db.execSQL(
+                "ALTER TABLE video_history ADD COLUMN " +
+                    "is_favorite INTEGER NOT NULL DEFAULT 0",
+            )
+            db.execSQL("ALTER TABLE video_history ADD COLUMN favorited_ms INTEGER")
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS idx_video_history_favorite " +
+                    "ON video_history(is_favorite, published_ms DESC)",
+            )
+        }
+        if (oldVersion < 24) {
+            // Przed publicznym wydaniem 1.6 wycofano przedwczesny indeks FTS5
+            // i nieskompresowaną kolumnę opisu. Bazy testowe schematu 23 mogły
+            // już je utworzyć, dlatego sprzątamy je jawnie. Właściwy magazyn
+            // Zstd BLOB i contentless FTS5 powstaną dopiero w 1.7.
+            db.execSQL("DROP TRIGGER IF EXISTS video_history_fts_insert")
+            db.execSQL("DROP TRIGGER IF EXISTS video_history_fts_delete")
+            db.execSQL("DROP TRIGGER IF EXISTS video_history_fts_update")
+            db.execSQL("DROP TABLE IF EXISTS video_history_fts")
+            if (hasColumn(db, "video_history", "description")) {
+                db.execSQL("ALTER TABLE video_history DROP COLUMN description")
+            }
+        }
     }
 
-    private fun createSourceStateTable(db: SQLiteDatabase) {
+    private fun createSourceStateTable(db: BundledDatabase) {
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS source_state (
@@ -270,7 +331,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         )
     }
 
-    private fun createVideoHistoryTable(db: SQLiteDatabase) {
+    private fun createVideoHistoryTable(db: BundledDatabase) {
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS video_history (
@@ -289,7 +350,9 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                 classification_attempts INTEGER NOT NULL DEFAULT 0,
                 classification_last_attempt_ms INTEGER NOT NULL DEFAULT 0,
                 kind_evidence INTEGER NOT NULL DEFAULT 0,
-                published_evidence INTEGER NOT NULL DEFAULT 0
+                published_evidence INTEGER NOT NULL DEFAULT 0,
+                is_favorite INTEGER NOT NULL DEFAULT 0,
+                favorited_ms INTEGER
             )
             """.trimIndent(),
         )
@@ -309,9 +372,22 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             "CREATE INDEX IF NOT EXISTS idx_video_history_classification " +
                 "ON video_history(classification_version, published_ms DESC)",
         )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS idx_video_history_favorite " +
+                "ON video_history(is_favorite, published_ms DESC)",
+        )
     }
 
-    private fun createCreatorMetadataTable(db: SQLiteDatabase) {
+    private fun hasColumn(db: BundledDatabase, table: String, column: String): Boolean =
+        db.rawQuery("PRAGMA table_info($table)", null).use { cursor ->
+            var found = false
+            while (!found && cursor.moveToNext()) {
+                found = cursor.getString(1) == column
+            }
+            found
+        }
+
+    private fun createCreatorMetadataTable(db: BundledDatabase) {
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS creator_metadata (
@@ -326,7 +402,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         )
     }
 
-    private fun createNotificationInboxTable(db: SQLiteDatabase) {
+    private fun createNotificationInboxTable(db: BundledDatabase) {
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS notification_inbox (
@@ -341,7 +417,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         )
     }
 
-    private fun createNotificationIdsTable(db: SQLiteDatabase) {
+    private fun createNotificationIdsTable(db: BundledDatabase) {
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS notification_ids (
@@ -352,7 +428,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         )
     }
 
-    private fun createSourcePriorityTable(db: SQLiteDatabase) {
+    private fun createSourcePriorityTable(db: BundledDatabase) {
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS source_priority (
@@ -370,7 +446,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         )
     }
 
-    private fun createYouTubeChannelTabsTable(db: SQLiteDatabase) {
+    private fun createYouTubeChannelTabsTable(db: BundledDatabase) {
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS youtube_channel_tabs (
@@ -414,7 +490,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             "source_state",
             null,
             values,
-            SQLiteDatabase.CONFLICT_IGNORE,
+            BundledDatabase.CONFLICT_IGNORE,
         )
         writableDatabase.update(
             "source_state",
@@ -504,7 +580,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                         put("checked_ms", checkedAtMillis)
                         put("last_attempt_ms", checkedAtMillis)
                     },
-                    SQLiteDatabase.CONFLICT_REPLACE,
+                    BundledDatabase.CONFLICT_REPLACE,
                 )
             }
             db.setTransactionSuccessful()
@@ -546,7 +622,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                         put("checked_ms", checkedAtMillis)
                         put("last_attempt_ms", checkedAtMillis)
                     },
-                    SQLiteDatabase.CONFLICT_REPLACE,
+                    BundledDatabase.CONFLICT_REPLACE,
                 )
             }
             db.setTransactionSuccessful()
@@ -591,7 +667,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                         put("checked_ms", previous?.checkedAtMillis ?: 0L)
                         put("last_attempt_ms", nowMillis)
                     },
-                    SQLiteDatabase.CONFLICT_REPLACE,
+                    BundledDatabase.CONFLICT_REPLACE,
                 )
             }
             db.setTransactionSuccessful()
@@ -636,7 +712,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                         put("checked_ms", previous?.checkedAtMillis ?: 0L)
                         put("last_attempt_ms", nowMillis)
                     },
-                    SQLiteDatabase.CONFLICT_REPLACE,
+                    BundledDatabase.CONFLICT_REPLACE,
                 )
             }
             db.setTransactionSuccessful()
@@ -660,17 +736,12 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     @Synchronized
-    fun getCreatorAvatars(): Map<String, String> = readableDatabase.rawQuery(
+    fun getCreatorAvatars(): Map<String, String> = readableDatabase.queryRows(
         "SELECT creator_id, avatar_url FROM creator_metadata WHERE avatar_url IS NOT NULL",
         null,
-    ).use { cursor ->
-        buildMap {
-            while (cursor.moveToNext()) {
-                val avatar = cursor.getString(1)
-                if (!avatar.isNullOrBlank()) put(cursor.getString(0), avatar)
-            }
-        }
-    }
+    ) { row -> row.getText(0) to row.getText(1) }
+        .filter { (_, avatar) -> avatar.isNotBlank() }
+        .toMap()
 
     @Synchronized
     fun saveCreatorAvatar(creatorId: String, avatarUrl: String) {
@@ -690,7 +761,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             "creator_metadata",
             null,
             values,
-            SQLiteDatabase.CONFLICT_REPLACE,
+            BundledDatabase.CONFLICT_REPLACE,
         )
     }
 
@@ -725,11 +796,12 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         assetUrl: String,
         sha256: String,
         checkedAtMillis: Long,
+        force: Boolean = false,
     ) {
         val existing = getCreatorAvatarMetadata(creatorId)
         // Nowszy pakiet APK może zawierać świeższy avatar niż lokalny cache.
         // Lokalnej aktualizacji wykonanej już po zbudowaniu APK nie cofamy.
-        if (existing != null && existing.checkedAtMillis >= checkedAtMillis) return
+        if (!force && existing != null && existing.checkedAtMillis >= checkedAtMillis) return
         saveVerifiedCreatorAvatar(
             creatorId = creatorId,
             avatarUrl = assetUrl,
@@ -758,7 +830,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             "creator_metadata",
             null,
             values,
-            SQLiteDatabase.CONFLICT_REPLACE,
+            BundledDatabase.CONFLICT_REPLACE,
         )
     }
 
@@ -791,7 +863,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             "creator_metadata",
             null,
             values,
-            SQLiteDatabase.CONFLICT_REPLACE,
+            BundledDatabase.CONFLICT_REPLACE,
         )
     }
 
@@ -802,16 +874,11 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         attemptedBeforeMillis: Long,
     ): Set<String> {
         if (creatorIds.isEmpty()) return emptySet()
-        val stored = readableDatabase.rawQuery(
+        val stored = readableDatabase.queryRows(
             "SELECT creator_id, avatar_checked_ms, avatar_attempt_ms FROM creator_metadata",
             null,
-        ).use { cursor ->
-            buildMap {
-                while (cursor.moveToNext()) {
-                    put(cursor.getString(0), cursor.getLong(1) to cursor.getLong(2))
-                }
-            }
-        }
+        ) { row -> row.getText(0) to (row.getLong(1) to row.getLong(2)) }
+            .toMap()
         return creatorIds.filterTo(mutableSetOf()) { creatorId ->
             val state = stored[creatorId]
             state == null ||
@@ -900,7 +967,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             "source_state",
             null,
             ContentValues().apply { put("source_key", sourceKey) },
-            SQLiteDatabase.CONFLICT_IGNORE,
+            BundledDatabase.CONFLICT_IGNORE,
         )
         writableDatabase.update(
             "source_state",
@@ -966,7 +1033,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                 "source_state",
                 null,
                 sourceValues,
-                SQLiteDatabase.CONFLICT_IGNORE,
+                BundledDatabase.CONFLICT_IGNORE,
             )
             writableDatabase.update(
                 "source_state",
@@ -1004,7 +1071,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             "source_state",
             null,
             ContentValues().apply { put("source_key", sourceKey) },
-            SQLiteDatabase.CONFLICT_IGNORE,
+            BundledDatabase.CONFLICT_IGNORE,
         )
         writableDatabase.update(
             "source_state",
@@ -1029,7 +1096,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             "source_state",
             null,
             values,
-            SQLiteDatabase.CONFLICT_IGNORE,
+            BundledDatabase.CONFLICT_IGNORE,
         )
         writableDatabase.update(
             "source_state",
@@ -1061,7 +1128,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                         put("prior_rate_per_day", seed.priorRatePerDay)
                         put("prior_exposure_days", seed.priorExposureDays)
                     },
-                    SQLiteDatabase.CONFLICT_IGNORE,
+                    BundledDatabase.CONFLICT_IGNORE,
                 )
                 db.update(
                     "source_priority",
@@ -1092,7 +1159,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         val uniqueKeys = sourceKeys.distinct()
         if (uniqueKeys.isEmpty()) return emptyMap()
         val placeholders = uniqueKeys.joinToString(",") { "?" }
-        return readableDatabase.rawQuery(
+        return readableDatabase.queryRows(
             """
             SELECT p.source_key,
                    COALESCE(s.initialized, 0),
@@ -1110,26 +1177,21 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             WHERE p.source_key IN ($placeholders)
             """.trimIndent(),
             uniqueKeys.toTypedArray(),
-        ).use { cursor ->
-            buildMap {
-                while (cursor.moveToNext()) {
-                    val stats = SourcePriorityStats(
-                        sourceKey = cursor.getString(0),
-                        initialized = cursor.getInt(1) == 1,
-                        priorRatePerDay = cursor.getDouble(2),
-                        priorExposureDays = cursor.getDouble(3),
-                        eventMass = cursor.getDouble(4),
-                        exposureDays = cursor.getDouble(5),
-                        lastModelUpdateMillis = cursor.getLong(6),
-                        lastAttemptMillis = cursor.getLong(7),
-                        lastSuccessfulCheckMillis = cursor.getLong(8),
-                        lastHitMillis = cursor.getLong(9),
-                        consecutiveFailures = cursor.getInt(10),
-                    )
-                    put(stats.sourceKey, stats)
-                }
-            }
-        }
+        ) { row ->
+            SourcePriorityStats(
+                sourceKey = row.getText(0),
+                initialized = row.getLong(1) == 1L,
+                priorRatePerDay = row.getDouble(2),
+                priorExposureDays = row.getDouble(3),
+                eventMass = row.getDouble(4),
+                exposureDays = row.getDouble(5),
+                lastModelUpdateMillis = row.getLong(6),
+                lastAttemptMillis = row.getLong(7),
+                lastSuccessfulCheckMillis = row.getLong(8),
+                lastHitMillis = row.getLong(9),
+                consecutiveFailures = row.getLong(10).toInt(),
+            )
+        }.associateBy(SourcePriorityStats::sourceKey)
     }
 
     /**
@@ -1339,7 +1401,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     private fun syncMetadataValues(
-        db: SQLiteDatabase,
+        db: BundledDatabase,
         creator: Creator,
         entry: VideoEntry,
         publishedAtEvidence: PublishedAtEvidence,
@@ -1482,7 +1544,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     private fun ContentValues.putPublishedAtIfTrusted(
-        db: SQLiteDatabase,
+        db: BundledDatabase,
         videoId: String,
         publishedAtMillis: Long,
         evidence: PublishedAtEvidence,
@@ -1504,7 +1566,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     private fun insertVideoInternal(
-        db: SQLiteDatabase,
+        db: BundledDatabase,
         creator: Creator,
         entry: VideoEntry,
         kind: VideoKind,
@@ -1533,17 +1595,17 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             put("origin", entry.origin.name)
             put("notification_checked", if (notificationChecked) 1 else 0)
         },
-        SQLiteDatabase.CONFLICT_IGNORE,
+        BundledDatabase.CONFLICT_IGNORE,
     )
 
     @Synchronized
     fun pendingUpcoming(selectedCreatorIds: Set<String>): List<HistoryItem> {
         if (selectedCreatorIds.isEmpty()) return emptyList()
         val placeholders = selectedCreatorIds.joinToString(",") { "?" }
-        return readableDatabase.rawQuery(
+        return readableDatabase.queryRows(
             """
             SELECT video_id, creator_id, creator_name, title, url,
-                   published_ms, detected_ms, kind, notified, origin
+                   published_ms, detected_ms, kind, notified, origin, is_favorite
             FROM video_history
             WHERE kind = ?
               AND notified = 0
@@ -1557,7 +1619,8 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                 VideoOrigin.YOUTUBE.name,
                 *selectedCreatorIds.toTypedArray(),
             ),
-        ).use(::readHistoryItems)
+            mapper = ::readHistoryItem,
+        )
     }
 
     @Synchronized
@@ -1567,10 +1630,10 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     ): List<HistoryItem> {
         if (selectedCreatorIds.isEmpty()) return emptyList()
         val placeholders = selectedCreatorIds.joinToString(",") { "?" }
-        return readableDatabase.rawQuery(
+        return readableDatabase.queryRows(
             """
             SELECT video_id, creator_id, creator_name, title, url,
-                   published_ms, detected_ms, kind, notified, origin
+                   published_ms, detected_ms, kind, notified, origin, is_favorite
             FROM video_history
             WHERE notified = 0
               AND kind NOT IN (?, ?)
@@ -1586,7 +1649,8 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                 *selectedCreatorIds.toTypedArray(),
                 limit.coerceIn(1, 10_000).toString(),
             ),
-        ).use(::readHistoryItems)
+            mapper = ::readHistoryItem,
+        )
     }
 
     @Synchronized
@@ -1680,10 +1744,10 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         if (selectedCreatorIds.isEmpty()) return emptyList()
         val cutoff = System.currentTimeMillis() - days.coerceIn(1, 365).toLong() * DAY_MILLIS
         val placeholders = selectedCreatorIds.joinToString(",") { "?" }
-        return readableDatabase.rawQuery(
+        return readableDatabase.queryRows(
             """
             SELECT video_id, creator_id, creator_name, title, url,
-                   published_ms, detected_ms, kind, notified, origin
+                   published_ms, detected_ms, kind, notified, origin, is_favorite
             FROM video_history
             WHERE classification_version = 0
               AND published_ms >= ?
@@ -1698,7 +1762,8 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                 *selectedCreatorIds.toTypedArray(),
                 limit.coerceIn(1, 100).toString(),
             ),
-        ).use(::readHistoryItems)
+            mapper = ::readHistoryItem,
+        )
     }
 
     @Synchronized
@@ -1711,7 +1776,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             .toList()
         if (distinctIds.isEmpty()) return emptyList()
         val placeholders = distinctIds.joinToString(",") { "?" }
-        return readableDatabase.rawQuery(
+        return readableDatabase.queryRows(
             """
             SELECT video_id
             FROM video_history
@@ -1720,11 +1785,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
               AND video_id IN ($placeholders)
             """.trimIndent(),
             arrayOf(VideoOrigin.YOUTUBE.name, *distinctIds.toTypedArray()),
-        ).use { cursor ->
-            buildList {
-                while (cursor.moveToNext()) add(cursor.getString(0))
-            }
-        }
+        ) { row -> row.getText(0) }
     }
 
     @Synchronized
@@ -1762,7 +1823,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     private fun applyKindDecisionInternal(
-        db: SQLiteDatabase,
+        db: BundledDatabase,
         videoId: String,
         incoming: VideoKindDecision,
         knownCurrent: VideoKindDecision? = null,
@@ -1825,36 +1886,29 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     private fun storedVideoEvidence(
-        db: SQLiteDatabase,
+        db: BundledDatabase,
         videoIds: List<String>,
     ): Map<String, StoredVideoEvidence> {
         val ids = videoIds.distinct().take(MAX_EVIDENCE_QUERY_IDS)
         if (ids.isEmpty()) return emptyMap()
         val placeholders = ids.joinToString(",") { "?" }
-        return db.rawQuery(
+        return db.queryRows(
             """
             SELECT video_id, published_evidence, kind, kind_evidence
             FROM video_history
             WHERE origin = ? AND video_id IN ($placeholders)
             """.trimIndent(),
             arrayOf(VideoOrigin.YOUTUBE.name, *ids.toTypedArray()),
-        ).use { cursor ->
-            buildMap {
-                while (cursor.moveToNext()) {
-                    put(
-                        cursor.getString(0),
-                        StoredVideoEvidence(
-                            publishedEvidenceRank = cursor.getInt(1),
-                            kindDecision = VideoKindDecision(
-                                kind = runCatching { VideoKind.valueOf(cursor.getString(2)) }
-                                    .getOrDefault(VideoKind.UNKNOWN),
-                                evidence = evidenceFromRank(cursor.getInt(3)),
-                            ),
-                        ),
-                    )
-                }
-            }
-        }
+        ) { row ->
+            row.getText(0) to StoredVideoEvidence(
+                publishedEvidenceRank = row.getLong(1).toInt(),
+                kindDecision = VideoKindDecision(
+                    kind = runCatching { VideoKind.valueOf(row.getText(2)) }
+                        .getOrDefault(VideoKind.UNKNOWN),
+                    evidence = evidenceFromRank(row.getLong(3).toInt()),
+                ),
+            )
+        }.toMap()
     }
 
     private fun evidenceFromRank(rank: Int): VideoKindEvidence =
@@ -1919,6 +1973,73 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     @Synchronized
+    fun setFavorite(videoId: String, favorite: Boolean): Boolean {
+        if (!YOUTUBE_VIDEO_ID.matches(videoId)) return false
+        val values = ContentValues().apply {
+            put("is_favorite", if (favorite) 1 else 0)
+            if (favorite) put("favorited_ms", System.currentTimeMillis())
+            else putNull("favorited_ms")
+        }
+        return writableDatabase.update(
+            "video_history",
+            values,
+            "video_id = ?",
+            arrayOf(videoId),
+        ) == 1
+    }
+
+    @Synchronized
+    fun favoriteThumbnailUrls(): Set<String> = readableDatabase.queryRows(
+        "SELECT video_id FROM video_history WHERE is_favorite = 1",
+        null,
+    ) { row -> row.getText(0) }
+        .mapNotNull { videoId ->
+            videoId.takeIf(YOUTUBE_VIDEO_ID::matches)
+                ?.let { "https://i.ytimg.com/vi/$it/sddefault.jpg" }
+        }
+        .toSet()
+
+    /** Lekki stan infrastruktury; nie odczytuje ani nie eksportuje rekordów. */
+    @Synchronized
+    internal fun diagnosticState(): DatabaseDiagnosticState {
+        val sqliteVersion = scalarText("SELECT sqlite_version()") ?: "UNKNOWN"
+        val userVersion = scalarLong("PRAGMA user_version")?.toInt() ?: -1
+        val journalMode = scalarText("PRAGMA journal_mode") ?: "UNKNOWN"
+        val fts5Available = runCatching {
+            writableDatabase.execSQL("DROP TABLE IF EXISTS temp.lewicowyt_fts5_probe")
+            writableDatabase.execSQL(
+                "CREATE VIRTUAL TABLE temp.lewicowyt_fts5_probe USING fts5(value)",
+            )
+            writableDatabase.execSQL("DROP TABLE temp.lewicowyt_fts5_probe")
+            true
+        }.getOrElse {
+            runCatching {
+                writableDatabase.execSQL("DROP TABLE IF EXISTS temp.lewicowyt_fts5_probe")
+            }
+            false
+        }
+        return DatabaseDiagnosticState(
+            sqliteVersion = sqliteVersion,
+            userVersion = userVersion,
+            appSchemaVersion = DATABASE_VERSION,
+            journalMode = journalMode,
+            fts5Available = fts5Available,
+        )
+    }
+
+    /** Ręczna szybka kontrola spójności; nie jest uruchamiana przy starcie. */
+    @Synchronized
+    fun quickCheck(): String = scalarText("PRAGMA quick_check(1)") ?: "UNKNOWN"
+
+    private fun scalarText(sql: String): String? = readableDatabase.rawQuery(sql, null).use {
+        if (it.moveToFirst()) it.getString(0) else null
+    }
+
+    private fun scalarLong(sql: String): Long? = readableDatabase.rawQuery(sql, null).use {
+        if (it.moveToFirst()) it.getLong(0) else null
+    }
+
+    @Synchronized
     fun pruneExpiredData(nowMillis: Long = System.currentTimeMillis()) {
         val cutoffs = DataRetentionPolicy.cutoffs(nowMillis)
         val db = writableDatabase
@@ -1939,7 +2060,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             )
             deletedRows += db.delete(
                 "video_history",
-                "published_ms < ?",
+                "published_ms < ? AND is_favorite = 0",
                 arrayOf(cutoffs.historyBeforeMillis.toString()),
             )
             deletedRows += db.delete(
@@ -1957,17 +2078,18 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
     @Synchronized
     fun recentHistory(days: Int = 60, limit: Int = 500): List<HistoryItem> {
         val cutoff = System.currentTimeMillis() - days.coerceIn(1, 365).toLong() * DAY_MILLIS
-        return readableDatabase.rawQuery(
+        return readableDatabase.queryRows(
             """
             SELECT video_id, creator_id, creator_name, title, url,
-                   published_ms, detected_ms, kind, notified, origin
+                   published_ms, detected_ms, kind, notified, origin, is_favorite
             FROM video_history
-            WHERE published_ms >= ?
+            WHERE published_ms >= ? OR is_favorite = 1
             ORDER BY published_ms DESC, detected_ms DESC
             LIMIT ?
             """.trimIndent(),
             arrayOf(cutoff.toString(), limit.coerceIn(1, 10_000).toString()),
-        ).use(::readHistoryItems)
+            mapper = ::readHistoryItem,
+        )
     }
 
     @Synchronized
@@ -1984,7 +2106,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
                         put("video_id", videoId)
                         put("created_ms", now)
                     },
-                    SQLiteDatabase.CONFLICT_IGNORE,
+                    BundledDatabase.CONFLICT_IGNORE,
                 )
             }
             writableDatabase.setTransactionSuccessful()
@@ -1999,10 +2121,11 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         nowMillis: Long = System.currentTimeMillis(),
     ): List<HistoryItem> {
         val cutoff = DataRetentionPolicy.cutoffs(nowMillis).notificationsBeforeMillis
-        return readableDatabase.rawQuery(
+        return readableDatabase.queryRows(
             """
             SELECT h.video_id, h.creator_id, h.creator_name, h.title, h.url,
-                   h.published_ms, h.detected_ms, h.kind, h.notified, h.origin
+                   h.published_ms, h.detected_ms, h.kind, h.notified, h.origin,
+                   h.is_favorite
             FROM notification_inbox n
             JOIN video_history h ON h.video_id = n.video_id
             WHERE n.created_ms >= ?
@@ -2010,7 +2133,8 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             LIMIT ?
             """.trimIndent(),
             arrayOf(cutoff.toString(), limit.coerceIn(1, 2_000).toString()),
-        ).use(::readHistoryItems)
+            mapper = ::readHistoryItem,
+        )
     }
 
     @Synchronized
@@ -2032,7 +2156,7 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
             )
             writableDatabase.delete(
                 "video_history",
-                "creator_id IN ($placeholders)",
+                "creator_id IN ($placeholders) AND is_favorite = 0",
                 arguments,
             )
             writableDatabase.delete(
@@ -2062,28 +2186,23 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    private fun readHistoryItems(cursor: Cursor): List<HistoryItem> = buildList {
-        while (cursor.moveToNext()) {
-            add(
-                HistoryItem(
-                    videoId = cursor.getString(0),
-                    creatorId = cursor.getString(1),
-                    creatorName = cursor.getString(2),
-                    title = cursor.getString(3),
-                    url = cursor.getString(4),
-                    publishedAtMillis = cursor.getLong(5),
-                    detectedAtMillis = cursor.getLong(6),
-                    kind = runCatching { VideoKind.valueOf(cursor.getString(7)) }
-                        .getOrDefault(VideoKind.UNKNOWN),
-                    notified = cursor.getInt(8) == 1,
-                    origin = runCatching { VideoOrigin.valueOf(cursor.getString(9)) }
-                        .getOrDefault(VideoOrigin.YOUTUBE),
-                ),
-            )
-        }
-    }
+    private fun readHistoryItem(row: SQLiteStatement): HistoryItem = HistoryItem(
+        videoId = row.getText(0),
+        creatorId = row.getText(1),
+        creatorName = row.getText(2),
+        title = row.getText(3),
+        url = row.getText(4),
+        publishedAtMillis = row.getLong(5),
+        detectedAtMillis = row.getLong(6),
+        kind = runCatching { VideoKind.valueOf(row.getText(7)) }
+            .getOrDefault(VideoKind.UNKNOWN),
+        notified = row.getLong(8) == 1L,
+        origin = runCatching { VideoOrigin.valueOf(row.getText(9)) }
+            .getOrDefault(VideoOrigin.YOUTUBE),
+        isFavorite = row.getLong(10) == 1L,
+    )
 
-    private fun compactDatabaseIfWorthwhile(db: SQLiteDatabase) {
+    private fun compactDatabaseIfWorthwhile(db: BundledDatabase) {
         val pageCount = db.rawQuery("PRAGMA page_count", null).use { cursor ->
             if (cursor.moveToFirst()) cursor.getLong(0) else 0L
         }
@@ -2095,9 +2214,13 @@ class LocalDatabase(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    fun close() {
+        writableDatabase.close()
+    }
+
     private companion object {
         const val DATABASE_NAME = "lewicowyt_notifier.db"
-        const val DATABASE_VERSION = 22
+        const val DATABASE_VERSION = 24
         const val CURRENT_CLASSIFIER_VERSION = 1
         const val MAX_CHANNEL_TAB_PARAMS_CHARS = 2_048
         const val MAX_EVIDENCE_QUERY_IDS = 900

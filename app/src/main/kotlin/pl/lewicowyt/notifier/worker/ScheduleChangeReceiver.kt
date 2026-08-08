@@ -11,7 +11,7 @@ import pl.lewicowyt.notifier.AppGraph
 
 /**
  * Przelicza trwały harmonogram po restarcie oraz po zmianie zegara lub strefy.
- * Receiver wykonuje wyłącznie krótki zapis następnego alarmu systemowego.
+ * Receiver wykonuje wyłącznie krótki zapis kolejki alarmów systemowych.
  */
 class ScheduleChangeReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -20,8 +20,23 @@ class ScheduleChangeReceiver : BroadcastReceiver() {
         CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
             try {
                 AppGraph.initialize(context.applicationContext)
-                AppGraph.scheduler.rescheduleAfterSystemClockChange()
-            } catch (_: Exception) {
+                val cause = when (intent.action) {
+                    Intent.ACTION_BOOT_COMPLETED -> AlarmScheduleCause.SYSTEM_BOOT
+                    Intent.ACTION_TIME_CHANGED,
+                    Intent.ACTION_TIMEZONE_CHANGED,
+                    -> AlarmScheduleCause.CLOCK_OR_TIMEZONE_CHANGED
+                    else -> AlarmScheduleCause.EXACT_ALARM_ACCESS_CHANGED
+                }
+                AppGraph.scheduler.rescheduleAfterSystemClockChange(cause)
+            } catch (error: Exception) {
+                pl.lewicowyt.notifier.diagnostics.DiagnosticLogStore.event(
+                    pl.lewicowyt.notifier.diagnostics.DiagnosticCategory.SCHEDULER,
+                    pl.lewicowyt.notifier.diagnostics.DiagnosticLevel.ERROR,
+                    "ALARM_QUEUE_ERROR",
+                    reason = pl.lewicowyt.notifier.diagnostics.DiagnosticReasonCode.SCHEDULE_ERROR,
+                    fields = mapOf("type" to error.javaClass.simpleName),
+                    text = "Nie udało się odtworzyć harmonogramu po zdarzeniu systemowym",
+                )
                 // Kolejne uruchomienie aplikacji ponownie odtworzy harmonogram.
             } finally {
                 pendingResult.finish()
