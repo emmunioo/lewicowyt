@@ -28,13 +28,22 @@ enum class YouTubeLinkTarget {
     SYSTEM_DEFAULT,
     ALWAYS_ASK,
     YOUTUBE,
+    ALTERNATIVE_YOUTUBE,
     NEWPIPE,
     BROWSER,
+    OTHER_APP,
 }
 
 internal fun parseYouTubeLinkTarget(value: String?): YouTubeLinkTarget =
     value?.let { runCatching { YouTubeLinkTarget.valueOf(it) }.getOrNull() }
         ?: YouTubeLinkTarget.SYSTEM_DEFAULT
+
+internal fun isSafeAndroidPackageName(value: String): Boolean =
+    value.length in 3..255 && ANDROID_PACKAGE_NAME.matches(value)
+
+private val ANDROID_PACKAGE_NAME = Regex(
+    "[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z][A-Za-z0-9_]*)+",
+)
 
 data class AppSettings(
     val selectedCreatorIds: Set<String> = emptySet(),
@@ -53,6 +62,7 @@ data class AppSettings(
     val accentColorArgb: Long = DEFAULT_ACCENT_COLOR_ARGB,
     val highContrastEnabled: Boolean = false,
     val youtubeLinkTarget: YouTubeLinkTarget = YouTubeLinkTarget.SYSTEM_DEFAULT,
+    val otherYouTubeAppPackage: String? = null,
     val youtubeApiEnabled: Boolean = false,
     val youtubeApiNeedsValidation: Boolean = false,
     val automaticUpdatesEnabled: Boolean = true,
@@ -89,6 +99,7 @@ class PreferencesRepository(private val context: Context) {
         val accentColor = longPreferencesKey("accent_color_argb")
         val highContrastEnabled = booleanPreferencesKey("high_contrast_enabled")
         val youtubeLinkTarget = stringPreferencesKey("youtube_link_target")
+        val otherYouTubeAppPackage = stringPreferencesKey("other_youtube_app_package")
         val youtubeApiEnabled = booleanPreferencesKey("youtube_api_enabled")
         val youtubeApiValidated = booleanPreferencesKey("youtube_api_validated")
         val automaticUpdatesEnabled = booleanPreferencesKey("automatic_updates_enabled")
@@ -173,6 +184,8 @@ class PreferencesRepository(private val context: Context) {
                 accentColorArgb = resolvedAccent,
                 highContrastEnabled = preferences[Keys.highContrastEnabled] ?: false,
                 youtubeLinkTarget = parseYouTubeLinkTarget(preferences[Keys.youtubeLinkTarget]),
+                otherYouTubeAppPackage = preferences[Keys.otherYouTubeAppPackage]
+                    ?.takeIf(::isSafeAndroidPackageName),
                 youtubeApiEnabled = hasStoredApiKey &&
                     preferences[Keys.youtubeApiEnabled] == true &&
                     preferences[Keys.youtubeApiValidated] == true,
@@ -393,6 +406,14 @@ class PreferencesRepository(private val context: Context) {
 
     suspend fun setYouTubeLinkTarget(value: YouTubeLinkTarget) {
         context.settingsDataStore.edit { it[Keys.youtubeLinkTarget] = value.name }
+    }
+
+    suspend fun setOtherYouTubeAppPackage(packageName: String) {
+        require(isSafeAndroidPackageName(packageName)) { "Nieprawidłowa nazwa pakietu" }
+        context.settingsDataStore.edit {
+            it[Keys.otherYouTubeAppPackage] = packageName
+            it[Keys.youtubeLinkTarget] = YouTubeLinkTarget.OTHER_APP.name
+        }
     }
 
     suspend fun setAccentColor(argb: Long) {

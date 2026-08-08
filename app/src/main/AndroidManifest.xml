@@ -15,11 +15,17 @@
 
     <queries>
         <package android:name="com.google.android.youtube" />
+        <package android:name="app.revanced.android.youtube" />
+        <package android:name="app.rvx.android.youtube" />
         <package android:name="org.schabi.newpipe" />
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <category android:name="android.intent.category.BROWSABLE" />
             <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
         </intent>
     </queries>
 

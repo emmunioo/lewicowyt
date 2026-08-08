@@ -17,8 +17,12 @@ class YouTubeLinkActivity : ComponentActivity() {
             return
         }
         lifecycleScope.launch {
-            val target = AppGraph.preferences.current().youtubeLinkTarget
-            AppGraph.youtubeLinks.open(url, target)
+            val settings = AppGraph.preferences.current()
+            AppGraph.youtubeLinks.open(
+                url = url,
+                target = settings.youtubeLinkTarget,
+                otherAppPackage = settings.otherYouTubeAppPackage,
+            )
             finish()
         }
     }

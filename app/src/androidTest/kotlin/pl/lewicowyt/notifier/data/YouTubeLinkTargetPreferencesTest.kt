@@ -10,8 +10,15 @@ class YouTubeLinkTargetPreferencesTest {
     fun selectedTargetIsStoredAndReadFromDataStore() = runBlocking {
         val repository = PreferencesRepository(ApplicationProvider.getApplicationContext())
         try {
-            repository.setYouTubeLinkTarget(YouTubeLinkTarget.NEWPIPE)
-            assertEquals(YouTubeLinkTarget.NEWPIPE, repository.current().youtubeLinkTarget)
+            repository.setOtherYouTubeAppPackage("com.android.calculator2")
+            assertEquals(
+                YouTubeLinkTarget.OTHER_APP,
+                repository.current().youtubeLinkTarget,
+            )
+            assertEquals(
+                "com.android.calculator2",
+                repository.current().otherYouTubeAppPackage,
+            )
         } finally {
             repository.setYouTubeLinkTarget(YouTubeLinkTarget.SYSTEM_DEFAULT)
         }

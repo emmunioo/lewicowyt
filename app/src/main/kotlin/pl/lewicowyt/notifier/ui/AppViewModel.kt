@@ -430,6 +430,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { graph.preferences.setYouTubeLinkTarget(value) }
     }
 
+    fun setOtherYouTubeAppPackage(packageName: String) {
+        viewModelScope.launch {
+            graph.preferences.setOtherYouTubeAppPackage(packageName)
+        }
+    }
+
     fun setAccentColor(argb: Long) {
         viewModelScope.launch { graph.preferences.setAccentColor(argb) }
     }

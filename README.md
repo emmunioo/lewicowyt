@@ -1,8 +1,12 @@
-# lewicowYT 1.6-beta
+# lewicowYT 1.6.1-beta
 
 Natywna aplikacja dla Androida do lokalnego obserwowania wybranych kanałów
 YouTube. Porządkuje filmy, Shorty i transmisje, zachowuje historię oraz informuje
 o nowych publikacjach bez konta w aplikacji, Firebase i własnego serwera.
+
+Wersja 1.6.1-beta rozszerza wspólne otwieranie linków o ReVanced, inne klienty
+YouTube i dowolną aplikację wskazaną przez użytkownika. Ekran zmian zachowuje
+także pełne podsumowanie 1.6-beta dla osób aktualizujących bezpośrednio z 1.5.
 
 > lewicowYT jest niezależnym, nieoficjalnym projektem. Nie jest produktem ani
 > oficjalnym klientem Google lub YouTube i nie jest przez nie wspierany.
@@ -75,11 +79,18 @@ Jedno wspólne ustawienie dotyczy filmów, Shortów, streamów i kanałów:
 - domyślna aplikacja systemowa;
 - pytaj za każdym razem;
 - oficjalny YouTube;
+- ReVanced lub inny klient YouTube;
 - NewPipe;
-- przeglądarka.
+- przeglądarka;
+- dowolna inna aplikacja wybrana z programów widocznych w launcherze Androida.
 
 Brak wybranej aplikacji powoduje bezpieczny fallback do systemowego `ACTION_VIEW`.
-Integracja z NewPipe nie używa jego SDK ani API i nie wymaga instalowania NewPipe.
+Integracja z ReVanced, podobnymi klientami oraz NewPipe nie używa ich SDK ani
+API i nie wymaga instalowania żadnej z tych aplikacji. Tryb systemowy respektuje
+aplikację domyślną wybraną w ustawieniach Androida.
+Opcja dowolnej aplikacji przekazuje jej standardowy URL jawnie; program, który
+nie obsługuje takich adresów, może odmówić ich otwarcia, ale nie powoduje to
+awarii lewicowYT.
 
 ### Wygląd i dostępność
 

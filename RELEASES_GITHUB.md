@@ -70,7 +70,7 @@ Przed pierwszym wysłaniem wykonaj w głównym folderze projektu:
 git init
 git add .
 git status
-git commit -m "Wydanie 1.6-beta"
+git commit -m "Wydanie 1.6.1-beta"
 git branch -M main
 git remote add origin https://github.com/emmunioo/lewicowyt.git
 git push -u origin main
@@ -132,8 +132,8 @@ oraz w osobnej, zaszyfrowanej kopii awaryjnej.
 Plik `app/build.gradle.kts` powinien zawierać:
 
 ```kotlin
-versionCode = 16
-versionName = "1.6-beta"
+versionCode = 17
+versionName = "1.6.1-beta"
 ```
 
 Każda kolejna publikacja musi zwiększyć `versionCode`, nawet jeśli zmienia się
@@ -161,8 +161,8 @@ nie plikiem przeznaczonym do publikacji.
 W Android Studio użyj `Build → Analyze APK` i sprawdź:
 
 - nazwę pakietu `pl.lewicowyt.notifier`;
-- `versionName` równe `1.6-beta`;
-- `versionCode` równe `16`;
+- `versionName` równe `1.6.1-beta`;
+- `versionCode` równe `17`;
 - brak klucza YouTube API, haseł i pliku klucza podpisu.
 
 Jeżeli przekazujesz APK do MobSF lub innego skanera, wybierz podpisany wariant
@@ -174,37 +174,47 @@ problemy wysokiego poziomu.
 Podpis można zweryfikować narzędziem z Android SDK:
 
 ```powershell
-apksigner verify --verbose --print-certs .\lewicowYT-1.6-beta.apk
+apksigner verify --verbose --print-certs .\lewicowYT-1.6.1-beta.apk
 ```
 
 Zapisz również sumę kontrolną:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\lewicowYT-1.6-beta.apk
+Get-FileHash -Algorithm SHA256 .\lewicowYT-1.6.1-beta.apk
 ```
 
-## Publikowanie wersji 1.6-beta
+## Publikowanie wersji 1.6.1-beta
 
 1. Poczekaj, aż kontrole GitHub Actions zakończą się powodzeniem.
 2. W repozytorium otwórz `Releases → Draft a new release`.
 3. Utwórz tag:
 
 ```text
-v1.6-beta
+v1.6.1-beta
 ```
 
 4. Zaznacz wydanie jako **pre-release**.
 5. Dołącz dokładnie jeden podpisany APK, np.:
 
 ```text
-lewicowYT-1.6-beta.apk
+lewicowYT-1.6.1-beta.apk
 ```
 
 6. W opisie podaj SHA-256 APK oraz najważniejsze znane ograniczenia.
 7. Opublikuj wydanie i sprawdź w aplikacji przycisk `Sprawdź aktualizacje`.
 
-Historyczny zweryfikowany artefakt bazowej wersji 1.5-beta (nie używać jego
-SHA-256 dla nowego APK 1.6-beta):
+Historyczne artefakty 1.5-beta i 1.6-beta nie mogą być źródłem SHA-256 ani
+raportów dla nowego APK 1.6.1-beta.
+
+### Zakres zmian 1.6.1-beta
+
+- obsługa ReVanced i innych klientów YouTube;
+- respektowanie domyślnej aplikacji ustawionej w Androidzie;
+- możliwość wskazania dowolnej innej aplikacji;
+- ulepszony wybór „Pytaj za każdym razem”, w tym dostęp do przeglądarki;
+- skumulowany ekran zmian 1.6 i 1.6.1 dla aktualizacji bezpośrednio z 1.5.
+
+Historyczny zweryfikowany artefakt bazowej wersji 1.5-beta:
 
 - nazwa: `lewicowYT-1.5-beta.apk`;
 - rozmiar: 13 161 454 bajty (12,55 MiB);

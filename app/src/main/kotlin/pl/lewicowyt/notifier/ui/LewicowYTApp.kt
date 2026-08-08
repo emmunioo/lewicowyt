@@ -151,7 +151,11 @@ fun LewicowYTApp(
     val whatsNewScrollState = rememberScrollState()
     val youtubeLinks = remember { AppGraph.youtubeLinks }
     val openYouTubeLink: (String) -> Unit = { url ->
-        youtubeLinks.open(url, state.settings.youtubeLinkTarget)
+        youtubeLinks.open(
+            url = url,
+            target = state.settings.youtubeLinkTarget,
+            otherAppPackage = state.settings.otherYouTubeAppPackage,
+        )
     }
     var selectedScreenIndex by rememberSaveable { mutableIntStateOf(0) }
     var batteryOptimizationNoticeVisible by remember {
@@ -179,7 +183,7 @@ fun LewicowYTApp(
     if (whatsNewVisible) {
         AlertDialog(
             onDismissRequest = acknowledgeWhatsNew,
-            title = { Text("Co nowego w lewicowYT 1.6-beta") },
+            title = { Text("Co nowego w lewicowYT 1.6.1-beta") },
             text = {
                 Column(
                     modifier = Modifier
@@ -187,6 +191,18 @@ fun LewicowYTApp(
                         .verticalScroll(whatsNewScrollState),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    Text("Poprawki w 1.6.1-beta", fontWeight = FontWeight.Bold)
+                    Text(
+                        "Rozszerzono otwieranie linków o ReVanced i inne klienty YouTube. " +
+                            "Tryb systemowy respektuje domyślne ustawienia Androida, a opcja " +
+                            "„Dowolna inna aplikacja” pozwala wskazać także niestandardową aplikację. " +
+                            "Ulepszono również listę aplikacji w trybie „Pytaj za każdym razem”, " +
+                            "w tym dostęp do przeglądarki.",
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    HorizontalDivider()
+                    Spacer(Modifier.height(2.dp))
+                    Text("Najważniejsze zmiany z 1.6-beta", fontWeight = FontWeight.Bold)
                     Text("Aktualizacje z czytelniejszym podsumowaniem", fontWeight = FontWeight.Bold)
                     Text(
                         "Aplikacja bezpiecznie obsługuje teraz przekierowanie HTTPS, którego " +
@@ -1698,6 +1714,68 @@ private fun GlobalContentSettings(state: AppUiState, viewModel: AppViewModel) {
 @Composable
 private fun YouTubeLinkSettings(state: AppUiState, viewModel: AppViewModel) {
     var menuOpen by remember { mutableStateOf(false) }
+    var appPickerOpen by remember { mutableStateOf(false) }
+    var launchableApps by remember { mutableStateOf(emptyList<pl.lewicowyt.notifier.links.ExternalAppOption>()) }
+    var appPickerLoading by remember { mutableStateOf(false) }
+    val youtubeLinks = remember { AppGraph.youtubeLinks }
+
+    LaunchedEffect(appPickerOpen) {
+        if (appPickerOpen) {
+            appPickerLoading = true
+            launchableApps = withContext(Dispatchers.Default) {
+                youtubeLinks.launchableApplications()
+            }
+            appPickerLoading = false
+        }
+    }
+
+    if (appPickerOpen) {
+        AlertDialog(
+            onDismissRequest = { appPickerOpen = false },
+            title = { Text("Wybierz dowolną aplikację") },
+            text = {
+                when {
+                    appPickerLoading -> Box(
+                        modifier = Modifier.fillMaxWidth().height(120.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CircularProgressIndicator()
+                    }
+                    launchableApps.isEmpty() -> Text("Nie znaleziono aplikacji do wyboru.")
+                    else -> LazyColumn(
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 480.dp),
+                    ) {
+                        items(
+                            items = launchableApps,
+                            key = { it.packageName },
+                        ) { app ->
+                            TextButton(
+                                onClick = {
+                                    viewModel.setOtherYouTubeAppPackage(app.packageName)
+                                    appPickerOpen = false
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Column(Modifier.fillMaxWidth()) {
+                                    Text(app.label, fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        app.packageName,
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { appPickerOpen = false }) {
+                    Text("Anuluj")
+                }
+            },
+        )
+    }
+
     Card(Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(14.dp),
@@ -1729,11 +1807,28 @@ private fun YouTubeLinkSettings(state: AppUiState, viewModel: AppViewModel) {
                             text = { Text(youtubeLinkTargetLabel(target)) },
                             onClick = {
                                 menuOpen = false
-                                viewModel.setYouTubeLinkTarget(target)
+                                if (target == YouTubeLinkTarget.OTHER_APP) {
+                                    appPickerOpen = true
+                                } else {
+                                    viewModel.setYouTubeLinkTarget(target)
+                                }
                             },
                         )
                     }
                 }
+            }
+            OutlinedButton(onClick = { appPickerOpen = true }) {
+                Text("Wybierz dowolną inną aplikację")
+            }
+            if (state.settings.youtubeLinkTarget == YouTubeLinkTarget.OTHER_APP) {
+                val selectedPackage = state.settings.otherYouTubeAppPackage
+                val selectedLabel = remember(selectedPackage) {
+                    youtubeLinks.applicationLabel(selectedPackage)
+                }
+                Text(
+                    "Wybrano: ${selectedLabel ?: selectedPackage ?: "brak"}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
             Text(
                 "Jedno ustawienie dotyczy filmów, Shortów, transmisji i kanałów.",
@@ -2197,8 +2292,10 @@ internal fun youtubeLinkTargetLabel(target: YouTubeLinkTarget): String = when (t
     YouTubeLinkTarget.SYSTEM_DEFAULT -> "Domyślna aplikacja systemowa"
     YouTubeLinkTarget.ALWAYS_ASK -> "Pytaj za każdym razem"
     YouTubeLinkTarget.YOUTUBE -> "YouTube"
+    YouTubeLinkTarget.ALTERNATIVE_YOUTUBE -> "ReVanced / inny klient YouTube"
     YouTubeLinkTarget.NEWPIPE -> "NewPipe"
     YouTubeLinkTarget.BROWSER -> "Przeglądarka"
+    YouTubeLinkTarget.OTHER_APP -> "Dowolna inna aplikacja"
 }
 
 private fun formatClock(hour: Int, minute: Int): String =

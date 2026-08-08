@@ -7,6 +7,7 @@ import org.junit.Test
 import pl.lewicowyt.notifier.data.AppSettings
 import pl.lewicowyt.notifier.data.YouTubeLinkTarget
 import pl.lewicowyt.notifier.data.parseYouTubeLinkTarget
+import pl.lewicowyt.notifier.data.isSafeAndroidPackageName
 import pl.lewicowyt.notifier.diagnostics.DiagnosticReasonCode
 
 class YouTubeLinkLauncherTest {
@@ -70,6 +71,23 @@ class YouTubeLinkLauncherTest {
     }
 
     @Test
+    fun `alternative youtube client prefers detected package and falls back when missing`() {
+        val detected = planYouTubeLinkOpen(
+            YouTubeLinkTarget.ALTERNATIVE_YOUTUBE,
+            available(alternativePackages = listOf("app.revanced.android.youtube")),
+        )
+        assertEquals(YouTubeLinkRoute.ALTERNATIVE_YOUTUBE, detected.route)
+        assertEquals("app.revanced.android.youtube", detected.packageName)
+
+        val fallback = planYouTubeLinkOpen(
+            YouTubeLinkTarget.ALTERNATIVE_YOUTUBE,
+            available(alternativePackages = emptyList()),
+        )
+        assertEquals(YouTubeLinkRoute.SYSTEM, fallback.route)
+        assertEquals(DiagnosticReasonCode.APP_NOT_AVAILABLE, fallback.fallbackReason)
+    }
+
+    @Test
     fun `browser route is explicit and browser absence falls back`() {
         val browser = planYouTubeLinkOpen(
             YouTubeLinkTarget.BROWSER,
@@ -84,6 +102,26 @@ class YouTubeLinkLauncherTest {
         )
         assertEquals(YouTubeLinkRoute.SYSTEM, fallback.route)
         assertEquals(DiagnosticReasonCode.BROWSER_NOT_AVAILABLE, fallback.fallbackReason)
+    }
+
+    @Test
+    fun `arbitrary selected application receives an explicit route`() {
+        val selected = planYouTubeLinkOpen(
+            target = YouTubeLinkTarget.OTHER_APP,
+            availability = available(),
+            otherAppPackage = "com.example.calculator",
+        )
+        assertEquals(YouTubeLinkRoute.OTHER_APP, selected.route)
+        assertEquals("com.example.calculator", selected.packageName)
+
+        val missing = planYouTubeLinkOpen(
+            target = YouTubeLinkTarget.OTHER_APP,
+            availability = available(),
+            otherAppPackage = null,
+        )
+        assertEquals(YouTubeLinkRoute.NONE, missing.route)
+        assertTrue(isSafeAndroidPackageName("com.example.calculator"))
+        assertFalse(isSafeAndroidPackageName("calculator"))
     }
 
     @Test
@@ -114,5 +152,12 @@ class YouTubeLinkLauncherTest {
         youtube: Boolean = false,
         newPipe: Boolean = false,
         browserPackage: String? = null,
-    ) = YouTubeLinkAvailability(system, youtube, newPipe, browserPackage)
+        alternativePackages: List<String> = emptyList(),
+    ) = YouTubeLinkAvailability(
+        system,
+        youtube,
+        newPipe,
+        browserPackage,
+        alternativePackages,
+    )
 }

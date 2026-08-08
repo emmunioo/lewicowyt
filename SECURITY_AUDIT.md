@@ -2,7 +2,12 @@
 
 Data ostatniej aktualizacji przeglądu kodu: 8 sierpnia 2026 r.
 
-Wersja kodu: `1.6-beta` (`versionCode 16`).
+Wersja kodu: `1.6.1-beta` (`versionCode 17`).
+
+Wersja 1.6.1-beta rozszerza wspólny launcher linków o ReVanced, inne klienty
+YouTube oraz aplikację wybraną przez użytkownika. Przekazywany jest wyłącznie
+standardowy URL; aplikacja nie korzysta z SDK tych klientów i nie zapisuje
+listy zainstalowanych aplikacji.
 
 Wersja 1.6-beta naprawia pobieranie APK przez standardowe przekierowanie
 GitHub Releases. Przekierowania są obsługiwane ręcznie, mają limit pięciu
