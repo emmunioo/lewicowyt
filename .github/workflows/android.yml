@@ -35,7 +35,7 @@ jobs:
         run: sdkmanager "platforms;android-36.1" "build-tools;36.0.0"
 
       - name: Gradle cache and validation
-        uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
