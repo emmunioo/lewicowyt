@@ -12,6 +12,8 @@ $effort = 10
 $avatarSize = 176
 $libJxlVersion = '0.12.0'
 $libJxlArchiveSha256 = 'ff147dc7ac4ce55392974ccc70f2a8a8ec0eff3ae28529b072258b66c8f01ab2'
+$cjxlExeSha256 = 'e2262d72f4c1028fd3fbe420d85e6e35210df06956a5521b692a92c4f0e0d8da'
+$ytDlpExeSha256 = '52fe3c26dcf71fbdc85b528589020bb0b8e383155cfa81b64dd447bbe35e24b8'
 $libJxlUrl = "https://github.com/libjxl/libjxl/releases/download/v$libJxlVersion/jxl-x64-windows-static.7z"
 $sevenZipUrl = 'https://www.7-zip.org/a/7zr.exe'
 $sevenZipSha256 = '56b8cc9f4971cef253644fafe54063ed7fdca551d4dee0f8c6baa81b855acd72'
@@ -38,16 +40,25 @@ function Resolve-Executable {
     return $null
 }
 
+function Assert-ExecutableHash {
+    param([string]$Path, [string]$ExpectedSha256, [string]$Name)
+    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+    if ($actual -ne $ExpectedSha256.ToLowerInvariant()) {
+        throw "$Name ma niezatwierdzona sume SHA-256. Zaktualizuj jawnie wersje i hash w skrypcie."
+    }
+    return $Path
+}
+
 function Get-Cjxl {
     $found = Resolve-Executable -Requested $CjxlPath -Name 'cjxl.exe' -Candidates @(
         (Join-Path $toolRoot 'cjxl.exe'),
         (Join-Path $toolRoot 'bin\cjxl.exe')
     )
-    if ($found) { return $found }
+    if ($found) { return Assert-ExecutableHash $found $cjxlExeSha256 'cjxl.exe' }
     if (Test-Path -LiteralPath $toolRoot -PathType Container) {
         $found = Get-ChildItem -LiteralPath $toolRoot -Recurse -Filter 'cjxl.exe' -File |
             Select-Object -First 1 -ExpandProperty FullName
-        if ($found) { return $found }
+        if ($found) { return Assert-ExecutableHash $found $cjxlExeSha256 'cjxl.exe' }
     }
 
     New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
@@ -73,7 +84,7 @@ function Get-Cjxl {
     $found = Get-ChildItem -LiteralPath $toolRoot -Recurse -Filter 'cjxl.exe' -File |
         Select-Object -First 1 -ExpandProperty FullName
     if (-not $found) { throw 'Archiwum libjxl nie zawiera cjxl.exe.' }
-    return $found
+    return Assert-ExecutableHash $found $cjxlExeSha256 'cjxl.exe'
 }
 
 function Normalize-AvatarUrl {
@@ -173,6 +184,7 @@ try {
     if (-not $ytDlp) {
         throw 'Nie znaleziono yt-dlp. Dodaj je do PATH albo podaj -YtDlpPath.'
     }
+    $ytDlp = Assert-ExecutableHash $ytDlp $ytDlpExeSha256 'yt-dlp.exe'
     $cjxl = Get-Cjxl
     $parsedCreators = Get-Content -Raw -LiteralPath $catalogPath | ConvertFrom-Json
     # Windows PowerShell 5 przekazuje tablicę JSON jako jeden obiekt potoku.

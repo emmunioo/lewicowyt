@@ -7,6 +7,8 @@ plugins {
 val updateRepository: String = providers.gradleProperty("UPDATE_REPOSITORY").orElse("").get()
 val isWindowsHost = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
 val avatarScript = rootProject.file("tools/Prepare-BundledAvatars.ps1")
+val creatorCatalog = project.file("src/main/assets/creators.json")
+val bundledAvatarDirectory = project.file("src/main/assets/bundled_avatars")
 val ytDlpPath = providers.gradleProperty("LEWICOWYT_YTDLP_PATH").orElse("")
 val cjxlPath = providers.gradleProperty("LEWICOWYT_CJXL_PATH").orElse("")
 val avatarCommand = mutableListOf(
@@ -28,15 +30,18 @@ val avatarCommand = mutableListOf(
     }
 }
 
-val prepareBundledAvatars = tasks.register<Exec>("prepareBundledAvatars") {
-    group = "build setup"
-    description = "Pobiera awatary 176x176 i tworzy pakiet JXL 69/10 dla APK"
+tasks.register<Exec>("refreshBundledAvatars") {
+    group = "release tooling"
+    description = "Jawnie odświeża zamrożony pakiet awatarów JXL 176x176 (sieć)"
     enabled = isWindowsHost
+    inputs.files(avatarScript, creatorCatalog)
+    inputs.property("ytDlpPath", ytDlpPath)
+    inputs.property("cjxlPath", cjxlPath)
+    outputs.dir(bundledAvatarDirectory)
+    // Wynik zależy od żywych profili YouTube, których Gradle nie potrafi
+    // zahaszować jako wejścia. Jawne wywołanie ma więc zawsze robić refresh.
+    outputs.upToDateWhen { false }
     commandLine(avatarCommand)
-}
-
-tasks.matching { it.name == "preReleaseBuild" }.configureEach {
-    dependsOn(prepareBundledAvatars)
 }
 
 android {
@@ -52,8 +57,8 @@ android {
         applicationId = "pl.lewicowyt.notifier"
         minSdk = 26
         targetSdk = 36
-        versionCode = 17
-        versionName = "1.6.1-beta"
+        versionCode = 18
+        versionName = "1.7-beta"
 
         buildConfigField(
             "String",
@@ -134,6 +139,8 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.2.1")
     implementation("androidx.sqlite:sqlite-bundled:2.7.0")
     implementation("io.github.awxkee:jxl-coder:2.6.1")
+    implementation("com.github.luben:zstd-jni:1.5.7-6@aar")
+    implementation("com.davidehrmann.vcdiff:vcdiff-core:0.2.0")
     implementation("com.squareup.okhttp3:okhttp:5.3.0")
     implementation("com.squareup.okhttp3:okhttp-dnsoverhttps:5.3.0")
 

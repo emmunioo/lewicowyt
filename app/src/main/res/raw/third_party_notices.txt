@@ -14,6 +14,12 @@ Apache License 2.0 i BSD 3-Clause
 https://github.com/awxkee/jxl-coder
 Copyright Radzivon Bartoshyk i współtwórcy.
 
+zstd-jni i Zstandard:
+BSD 2-Clause i BSD 3-Clause
+https://github.com/luben/zstd-jni
+https://github.com/facebook/zstd
+Copyright Luben Karavelov, Meta Platforms i współtwórcy.
+
 JPEG XL / libjxl:
 BSD 3-Clause — https://github.com/libjxl/libjxl
 Copyright JPEG XL Project Authors.
@@ -21,6 +27,14 @@ Copyright JPEG XL Project Authors.
 Brotli:
 MIT — https://github.com/google/brotli
 Copyright Google LLC i współtwórcy.
+
+VCDIFF Java 0.2.0 (dekoder aktualizacji różnicowych):
+Apache License 2.0 — https://github.com/ehrmann/vcdiff-java
+Copyright Google Inc., David Ehrmann i współtwórcy.
+
+slf4j-api 2.0.17 (zależność vcdiff-core, bez aktywnego providera):
+MIT — https://www.slf4j.org
+Copyright QOS.ch.
 
 Pełne teksty licencji i przypisania są dostępne w plikach LICENSES oraz
 THIRD_PARTY_NOTICES.md w repozytorium źródłowym.

@@ -120,10 +120,14 @@ import pl.lewicowyt.notifier.data.isNotificationEnabledFor
 import pl.lewicowyt.notifier.diagnostics.DiagnosticLogState
 import pl.lewicowyt.notifier.diagnostics.DiagnosticLogStore
 import pl.lewicowyt.notifier.model.Creator
+import pl.lewicowyt.notifier.model.DescriptionAvailability
 import pl.lewicowyt.notifier.model.HistoryFilter
 import pl.lewicowyt.notifier.model.HistoryItem
+import pl.lewicowyt.notifier.model.MaterialStatusBadge
 import pl.lewicowyt.notifier.model.SourceType
 import pl.lewicowyt.notifier.model.VideoKind
+import pl.lewicowyt.notifier.model.displayKindAt
+import pl.lewicowyt.notifier.model.statusBadgesAt
 import pl.lewicowyt.notifier.updates.AppUpdateManager
 import pl.lewicowyt.notifier.updates.UpdatePolicy
 
@@ -149,6 +153,7 @@ fun LewicowYTApp(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val whatsNewScrollState = rememberScrollState()
+    val whatsNewUriHandler = LocalUriHandler.current
     val youtubeLinks = remember { AppGraph.youtubeLinks }
     val openYouTubeLink: (String) -> Unit = { url ->
         youtubeLinks.open(
@@ -183,7 +188,7 @@ fun LewicowYTApp(
     if (whatsNewVisible) {
         AlertDialog(
             onDismissRequest = acknowledgeWhatsNew,
-            title = { Text("Co nowego w lewicowYT 1.6.1-beta") },
+            title = { Text("Co nowego w lewicowYT 1.7-beta") },
             text = {
                 Column(
                     modifier = Modifier
@@ -191,76 +196,35 @@ fun LewicowYTApp(
                         .verticalScroll(whatsNewScrollState),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text("Poprawki w 1.6.1-beta", fontWeight = FontWeight.Bold)
+                    Text("Nowości w 1.7-beta", fontWeight = FontWeight.Bold)
                     Text(
-                        "Rozszerzono otwieranie linków o ReVanced i inne klienty YouTube. " +
-                            "Tryb systemowy respektuje domyślne ustawienia Androida, a opcja " +
-                            "„Dowolna inna aplikacja” pozwala wskazać także niestandardową aplikację. " +
-                            "Ulepszono również listę aplikacji w trybie „Pytaj za każdym razem”, " +
-                            "w tym dostęp do przeglądarki.",
+                        "Historia ma teraz szybką lokalną wyszukiwarkę działającą offline: " +
+                            "przeszukuje tytuły, twórców i opisy, z uwzględnieniem filtrów i Ulubionych.",
+                    )
+                    Text(
+                        "Opisy materiałów są pobierane stopniowo (Data API albo YouTube Web) " +
+                            "i przechowywane oszczędnie; ich brak nigdy nie blokuje Historii ani powiadomień.",
+                    )
+                    Text(
+                        "Przycisk „Znajdź starszy” pozwala doszukać dawniejszy materiał " +
+                            "obserwowanego twórcy — przed dodaniem do Ulubionych aplikacja " +
+                            "ponownie potwierdza kanał, tytuł, datę i dostępność.",
+                    )
+                    Text(
+                        "Aktualizacje mogą teraz pobierać się jako mniejsza łatka różnicowa " +
+                            "zamiast całego pliku APK, z automatycznym powrotem do pełnego pliku, " +
+                            "gdy łatka się nie opłaca lub coś pójdzie nie tak.",
+                    )
+                    Text(
+                        "Dodatkowo utwardzono prywatność ekranu blokady oraz kontrolę podpisu " +
+                            "i narzędzi używanych przy przygotowaniu wydania.",
                     )
                     Spacer(Modifier.height(6.dp))
-                    HorizontalDivider()
-                    Spacer(Modifier.height(2.dp))
-                    Text("Najważniejsze zmiany z 1.6-beta", fontWeight = FontWeight.Bold)
-                    Text("Aktualizacje z czytelniejszym podsumowaniem", fontWeight = FontWeight.Bold)
-                    Text(
-                        "Aplikacja bezpiecznie obsługuje teraz przekierowanie HTTPS, którego " +
-                            "GitHub używa podczas pobierania plików APK. Nadal odrzuca " +
-                            "przekierowania poza zaufane serwery plików GitHuba, a pobrany " +
-                            "plik przechodzi dotychczasową kontrolę sumy, pakietu i podpisu.",
-                    )
-                    Text(
-                        "Ekran aktualizacji pokazuje wersję, rozmiar i opis wydania. Jeśli " +
-                            "automatyczne pobranie się nie powiedzie, można awaryjnie otworzyć " +
-                            "stronę właściwego wydania.",
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text("Ulubione materiały", fontWeight = FontWeight.Bold)
-                    Text(
-                        "Materiały z Historii i Powiadomień można oznaczać gwiazdką. Filtr " +
-                            "Ulubione zbiera je w jednym miejscu i chroni przed automatycznym " +
-                            "usunięciem po upływie zwykłego okresu historii.",
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text("Dostępność i wysoki kontrast", fontWeight = FontWeight.Bold)
-                    Text(
-                        "Dopracowano opisy i kolejność elementów dla TalkBack, większe obszary " +
-                            "dotyku oraz układ przy powiększonym tekście. Nowy tryb wysokiego " +
-                            "kontrastu wzmacnia tekst, obramowania i elementy sterujące.",
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text("Baza gotowa na dalszy rozwój", fontWeight = FontWeight.Bold)
-                    Text(
-                        "Istniejąca historia jest automatycznie przenoszona do dołączonego " +
-                            "silnika SQLite z obsługą FTS5. Wyszukiwarka nie jest jeszcze " +
-                            "włączona — jej interfejs i opisy materiałów są planowane na " +
-                            "następne wydanie.",
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text("Pewniejsze działanie w tle", fontWeight = FontWeight.Bold)
-                    Text(
-                        "Pierwsza synchronizacja uruchamia się automatycznie, a kolejka " +
-                            "dokładnych alarmów, krótki WakeLock i watchdog pomagają " +
-                            "kontynuować sprawdzanie przy wygaszonym ekranie. Podczas trybu " +
-                            "Nie przeszkadzać aplikacja wstrzymuje sieć i nadrabia zaległy termin.",
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text("Linki otwierane po Twojemu", fontWeight = FontWeight.Bold)
-                    Text(
-                        "Jedno ustawienie wybiera aplikację dla filmów i kanałów: " +
-                            "system, pytanie za każdym razem, YouTube, NewPipe albo " +
-                            "przeglądarka. Długie przytrzymanie materiału w Historii lub " +
-                            "Powiadomieniach kopiuje jego link zamiast go otwierać.",
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text("Trwalsze ustawienia wyglądu", fontWeight = FontWeight.Bold)
-                    Text(
-                        "Wybrany kolor akcentu ma dodatkową lokalną kopię awaryjną, " +
-                            "dlatego aktualizacja nie powinna przywracać domyślnej czerwieni.",
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text("Więcej informacji znajduje się na stronie projektu.")
+                    TextButton(
+                        onClick = { whatsNewUriHandler.openUri("https://emmunioo.github.io/lewicowyt") },
+                    ) {
+                        Text("Pełna lista zmian na stronie projektu")
+                    }
                 }
             },
             confirmButton = {
@@ -607,6 +571,12 @@ private fun HistoryScreen(
     openYouTubeLink: (String) -> Unit,
 ) {
     var rangeMenuOpen by remember { mutableStateOf(false) }
+    var olderSearchVisible by rememberSaveable { mutableStateOf(false) }
+    var olderCreatorMenuOpen by remember { mutableStateOf(false) }
+    var olderQuery by rememberSaveable { mutableStateOf("") }
+    var olderCreatorId by rememberSaveable {
+        mutableStateOf(state.selectedCreatorIds.firstOrNull().orEmpty())
+    }
     val listState = rememberLazyListState()
     val availableHistoryFilters = HistoryFilter.entries.filter {
         it in state.settings.globalHistoryTypes
@@ -643,34 +613,74 @@ private fun HistoryScreen(
                 modifier = Modifier.semantics { heading() },
                 fontWeight = FontWeight.SemiBold,
             )
-            Box {
-                OutlinedButton(
-                    onClick = { rangeMenuOpen = true },
-                    modifier = Modifier.semantics {
-                        contentDescription = "Zakres historii"
-                        stateDescription = historyRangeLabel(
-                            state.settings.historyWindowDays,
-                        )
-                    },
-                ) {
-                    Text(historyRangeLabel(state.settings.historyWindowDays))
-                }
-                DropdownMenu(
-                    expanded = rangeMenuOpen,
-                    onDismissRequest = { rangeMenuOpen = false },
-                ) {
-                    HISTORY_RANGES.forEach { days ->
-                        DropdownMenuItem(
-                            text = { Text(historyRangeLabel(days)) },
-                            onClick = {
-                                rangeMenuOpen = false
-                                viewModel.setHistoryWindowDays(days)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                if (state.isLoadingDescriptions) {
+                    Text(
+                        "📓",
+                        modifier = Modifier
+                            .semantics {
+                                contentDescription = descriptionLoadingLabel(
+                                    state.descriptionLoadingSource,
+                                )
                             },
-                        )
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                } else if (state.pendingDescriptionCount > 0) {
+                    Text(
+                        "📓",
+                        modifier = Modifier.semantics {
+                            contentDescription =
+                                "Opisy oczekujące na pobranie: " +
+                                state.pendingDescriptionCount
+                        },
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                Box {
+                    OutlinedButton(
+                        onClick = { rangeMenuOpen = true },
+                        modifier = Modifier.semantics {
+                            contentDescription = "Zakres historii"
+                            stateDescription = historyRangeLabel(
+                                state.settings.historyWindowDays,
+                            )
+                        },
+                    ) {
+                        Text(historyRangeLabel(state.settings.historyWindowDays))
+                    }
+                    DropdownMenu(
+                        expanded = rangeMenuOpen,
+                        onDismissRequest = { rangeMenuOpen = false },
+                    ) {
+                        HISTORY_RANGES.forEach { days ->
+                            DropdownMenuItem(
+                                text = { Text(historyRangeLabel(days)) },
+                                onClick = {
+                                    rangeMenuOpen = false
+                                    viewModel.setHistoryWindowDays(days)
+                                },
+                            )
+                        }
                     }
                 }
             }
         }
+        OutlinedTextField(
+            value = state.historySearchQuery,
+            onValueChange = viewModel::setHistorySearchQuery,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            singleLine = true,
+            label = { Text("Szukaj w lokalnej historii") },
+            supportingText = {
+                Text("Tytuły, twórcy i pobrane opisy — wyszukiwanie działa offline.")
+            },
+        )
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -695,6 +705,9 @@ private fun HistoryScreen(
                 onClick = { viewModel.setFavoritesOnly(!state.favoritesOnly) },
                 label = { Text("Ulubione") },
             )
+            OutlinedButton(onClick = { olderSearchVisible = true }) {
+                Text("Znajdź starszy")
+            }
         }
 
         if (state.history.isEmpty()) {
@@ -720,7 +733,9 @@ private fun HistoryScreen(
                     }
                 } else {
                     Text(
-                        if (state.favoritesOnly) {
+                        if (state.historySearchQuery.isNotBlank()) {
+                            "Brak wyników w lokalnej historii."
+                        } else if (state.favoritesOnly) {
                             "Brak ulubionych materiałów pasujących do aktywnych filtrów."
                         } else if (state.selectedCreatorIds.isEmpty()) {
                             "Zaznacz co najmniej jednego twórcę. Historia pokazuje tylko " +
@@ -795,6 +810,129 @@ private fun HistoryScreen(
             }
         }
     }
+
+    if (olderSearchVisible) {
+        val selectableCreators = state.catalogCreators.filter {
+            it.id in state.selectedCreatorIds
+        }
+        LaunchedEffect(selectableCreators, olderCreatorId) {
+            if (selectableCreators.none { it.id == olderCreatorId }) {
+                olderCreatorId = selectableCreators.firstOrNull()?.id.orEmpty()
+            }
+        }
+        AlertDialog(
+            onDismissRequest = {
+                olderSearchVisible = false
+                viewModel.clearOlderMaterialSearch()
+            },
+            title = { Text("Znajdź starszy materiał") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 520.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        "Wyniki pochodzą z YouTube Web. Materiał zostanie dodany " +
+                            "dopiero po osobnym potwierdzeniu kanału i danych.",
+                    )
+                    Box {
+                        OutlinedButton(
+                            onClick = { olderCreatorMenuOpen = true },
+                            enabled = selectableCreators.isNotEmpty(),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                selectableCreators.firstOrNull { it.id == olderCreatorId }
+                                    ?.name ?: "Wybierz obserwowanego twórcę",
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = olderCreatorMenuOpen,
+                            onDismissRequest = { olderCreatorMenuOpen = false },
+                        ) {
+                            selectableCreators.forEach { creator ->
+                                DropdownMenuItem(
+                                    text = { Text(creator.name) },
+                                    onClick = {
+                                        olderCreatorId = creator.id
+                                        olderCreatorMenuOpen = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = olderQuery,
+                        onValueChange = { olderQuery = it.take(100) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Tytuł lub słowa kluczowe") },
+                    )
+                    Button(
+                        onClick = {
+                            viewModel.searchOlderMaterials(olderCreatorId, olderQuery)
+                        },
+                        enabled = olderCreatorId.isNotBlank() &&
+                            olderQuery.trim().length >= 2 &&
+                            !state.olderMaterialSearch.isLoading,
+                    ) {
+                        Text("Szukaj na YouTube")
+                    }
+                    if (state.olderMaterialSearch.isLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.semantics {
+                                contentDescription = "Weryfikowanie materiału"
+                            },
+                        )
+                    }
+                    state.olderMaterialSearch.error?.let { error ->
+                        Text(error, color = MaterialTheme.colorScheme.error)
+                    }
+                    state.olderMaterialSearch.results.forEach { candidate ->
+                        Card(Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Text(candidate.creatorName, fontWeight = FontWeight.SemiBold)
+                                Text(candidate.title)
+                                OutlinedButton(
+                                    onClick = { viewModel.confirmOlderMaterial(candidate) },
+                                ) {
+                                    Text("Sprawdź przed dodaniem")
+                                }
+                            }
+                        }
+                    }
+                    state.olderMaterialSearch.confirmed?.let { confirmed ->
+                        HorizontalDivider()
+                        Text("Potwierdzony materiał", fontWeight = FontWeight.Bold)
+                        Text(confirmed.creatorName)
+                        Text(confirmed.title)
+                        Text(formatTime(confirmed.publishedAtMillis))
+                        Button(
+                            onClick = viewModel::addConfirmedOlderMaterial,
+                            enabled = !state.olderMaterialSearch.isLoading,
+                        ) {
+                            Text("Potwierdź dodanie do Ulubionych")
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        olderSearchVisible = false
+                        viewModel.clearOlderMaterialSearch()
+                    },
+                ) {
+                    Text("Zamknij")
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -852,6 +990,15 @@ private fun MaterialHistoryCard(
     onFavoriteChange: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
+    val nowMillis = System.currentTimeMillis()
+    val displayKind = item.displayKindAt(nowMillis)
+    val statusBadges = item.statusBadgesAt(nowMillis).map { badge ->
+        when (badge) {
+            MaterialStatusBadge.SCHEDULED -> "🗓️" to "Zaplanowana transmisja"
+            MaterialStatusBadge.DESCRIPTION -> "📓" to "Opis materiału został pobrany"
+            MaterialStatusBadge.MEMBERS_ONLY -> "💵" to "Materiał tylko dla wspierających"
+        }
+    }
     Card(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(10.dp),
@@ -895,15 +1042,35 @@ private fun MaterialHistoryCard(
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "${kindLabel(item.kind)} · ${formatTime(item.publishedAtMillis)}",
+                        "${kindLabel(displayKind)} · ${formatTime(item.publishedAtMillis)}",
                         style = MaterialTheme.typography.bodySmall,
+                    )
+                    item.descriptionSnippet?.takeIf(String::isNotBlank)?.let { snippet ->
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            snippet,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                FavoriteToggle(
+                    item = item,
+                    onFavoriteChange = onFavoriteChange,
+                )
+                statusBadges.forEach { (icon, label) ->
+                    Text(
+                        text = icon,
+                        modifier = Modifier.semantics {
+                            contentDescription = label
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
                     )
                 }
             }
-            FavoriteToggle(
-                item = item,
-                onFavoriteChange = onFavoriteChange,
-            )
         }
     }
 }
@@ -1475,6 +1642,13 @@ private fun SettingsScreen(
             item {
                 DiagnosticLogSettings(
                     state = diagnosticState,
+                    descriptionStatus = if (state.isLoadingDescriptions) {
+                        descriptionLoadingLabel(state.descriptionLoadingSource)
+                    } else if (state.pendingDescriptionCount > 0) {
+                        "Opisy oczekujące na pobranie: ${state.pendingDescriptionCount}"
+                    } else {
+                        "Pobieranie opisów: bezczynne"
+                    },
                     message = diagnosticMessage,
                     onEnabledChange = { enabled ->
                         DiagnosticLogStore.setEnabled(enabled)
@@ -1589,6 +1763,7 @@ private fun PrivacyDnsNote(
 @Composable
 private fun DiagnosticLogSettings(
     state: DiagnosticLogState,
+    descriptionStatus: String,
     message: String?,
     onEnabledChange: (Boolean) -> Unit,
     onExport: () -> Unit,
@@ -1609,11 +1784,22 @@ private fun DiagnosticLogSettings(
                 onCheckedChange = onEnabledChange,
             )
             Text(
-                "Dziennik zapisuje tylko uruchomienia synchronizacji, jej wynik, " +
+                "Dziennik zapisuje uruchomienia synchronizacji, jej wynik, " +
                     "problemy harmonogramu, niedostępną sieć oraz krótkie błędy. " +
+                    "Dla opisów zapisuje źródło API/Web, czas oraz rozmiar przed i po " +
+                    "kompresji. Zapisuje też treść lokalnych wyszukiwań i pokazane wyniki. " +
                     "Nie zapisuje klucza API, nagłówków autoryzacji, pełnych odpowiedzi " +
                     "HTTP ani powtarzających się komunikatów HTTP 200.",
                 style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                descriptionStatus,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (descriptionStatus.endsWith("bezczynne")) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.primary
+                },
             )
             Text(
                 "W pamięci telefonu rekordy mają skrócony format binarny i są " +
@@ -2288,6 +2474,12 @@ private fun historyRangeLabel(days: Int): String = when (days) {
     else -> "Ostatnie $days dni"
 }
 
+private fun descriptionLoadingLabel(source: String?): String = when (source) {
+    "DATA_API" -> "Pobieranie opisów: YouTube Data API"
+    "WEB" -> "Pobieranie opisów: YouTube Web"
+    else -> "Pobieranie opisów"
+}
+
 internal fun youtubeLinkTargetLabel(target: YouTubeLinkTarget): String = when (target) {
     YouTubeLinkTarget.SYSTEM_DEFAULT -> "Domyślna aplikacja systemowa"
     YouTubeLinkTarget.ALWAYS_ASK -> "Pytaj za każdym razem"
@@ -2333,7 +2525,8 @@ private fun formatTime(epochMillis: Long): String =
     DATE_FORMATTER.format(Instant.ofEpochMilli(epochMillis))
 
 private fun historyItemDescription(item: HistoryItem): String =
-    "${item.creatorName}. ${item.title}. ${kindLabel(item.kind)}. " +
+    "${item.creatorName}. ${item.title}. " +
+        "${kindLabel(item.displayKindAt(System.currentTimeMillis()))}. " +
         formatTime(item.publishedAtMillis)
 
 private fun youtubeWatchUrl(videoId: String): String? =

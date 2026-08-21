@@ -35,6 +35,54 @@ Uprawnienie `REQUEST_INSTALL_PACKAGES` pozwala wywołać instalator, ale nie
 pozwala samodzielnie zatwierdzić instalacji. Zwykła aplikacja musi otrzymać
 potwierdzenie użytkownika w systemowym oknie Androida.
 
+## Opcjonalne aktualizacje różnicowe Xdelta3/VCDIFF
+
+Od 1.7-beta wydanie może dodatkowo zawierać małą poprawkę różnicową. Pełny APK
+pozostaje zawsze obowiązkowym i nadrzędnym artefaktem wydania. Aplikacja użyje
+delty wyłącznie wtedy, gdy manifest, dokładna wersja oraz SHA-256 zainstalowanego
+bazowego APK pasują, poprawka oszczędza co najmniej 20%, a wszystkie metadane
+zasobów GitHub są spójne. W każdym innym przypadku bez komunikatu dla
+użytkownika pobiera pełny APK.
+
+Po rekonstrukcji aplikacja wymaga dokładnej sumy SHA-256 oficjalnego pełnego
+APK, a następnie wykonuje istniejącą kontrolę pakietu, `versionName`,
+`versionCode` i certyfikatu podpisującego. Manifest wydania nigdy nie zastępuje
+tych kontroli. Pliki tymczasowe są przechowywane tylko w prywatnym cache.
+
+Generator `Generate-Xdelta.ps1`/`Generate-Xdelta.bat`:
+
+- przyjmuje wyłącznie dwa wcześniej zbudowane i podpisane APK;
+- nie uruchamia Gradle i niczego nie podpisuje;
+- pobiera przypięte Xdelta3 3.2.0 strumieniowo z limitem 1 MiB, maksymalnie
+  pięcioma przekierowaniami HTTPS:443 i allowlistą `github.com` →
+  `release-assets.githubusercontent.com`;
+- sprawdza SHA-256 oficjalnego ZIP i rozpakowanego EXE przed uruchomieniem;
+- sprawdza oba APK przez `apksigner` i `apkanalyzer`;
+- świadomie tworzy prosty VCDIFF bez armor, Adler-32, secondary compression
+  i application header; zaufanie opiera na SHA-256 source, patcha i dokładnego
+  finalnego targetu, a nie na niekryptograficznym Adler-32;
+- wykonuje rekonstrukcję kontrolną bit po bicie i ponowną walidację pakietu,
+  `versionName`, `versionCode` oraz aktywnego certyfikatu;
+- tworzy patch pod nazwą `.tmp`, a finalną nazwę nadaje dopiero po self-teście;
+- zapisuje manifest UTF-8 do `.tmp`, zamyka go, ponownie parsuje i sprawdza
+  wszystkie wymagane pola przed atomowym zastąpieniem finalnego JSON;
+- po awarii usuwa pliki tymczasowe oraz zachowuje poprzedni poprawny manifest
+  i poprzednie finalne delty.
+
+Opcje `-a` i `-n` pozostają świadomym elementem formatu mobilnego. Armor Xdelta
+używałby application header i BLAKE3, których mobilny dekoder nie potrzebuje,
+ponieważ updater przed dekodowaniem sprawdza SHA-256 source i patcha, a po nim
+wymaga dokładnego SHA-256 oficjalnego pełnego APK. `-P 0` dotyczy wyszukiwania
+duplikatów podczas kompresji i nie jest przełącznikiem `VCD_TARGET`.
+
+Generator delty 1.7 wymaga tego samego aktywnego certyfikatu OLD i NEW. Różny
+signer powoduje bezpieczne przerwanie; legalna rotacja może zostać obsłużona
+osobno w przyszłości.
+
+Nie wolno generować publicznej delty z APK debug ani ze wstępnego APK do
+analizy. Gdy finalny podpisany wariant 1.7-beta jest gotowy, generator należy
+uruchomić względem finalnego, publicznego APK wersji bazowej.
+
 ## Awaryjne wycofanie wydania
 
 Jeśli na liście GitHub Releases nie ma wydania z APK odpowiadającego
@@ -70,7 +118,7 @@ Przed pierwszym wysłaniem wykonaj w głównym folderze projektu:
 git init
 git add .
 git status
-git commit -m "Wydanie 1.6.1-beta"
+git commit -m "Wydanie 1.7-beta"
 git branch -M main
 git remote add origin https://github.com/emmunioo/lewicowyt.git
 git push -u origin main
@@ -132,8 +180,8 @@ oraz w osobnej, zaszyfrowanej kopii awaryjnej.
 Plik `app/build.gradle.kts` powinien zawierać:
 
 ```kotlin
-versionCode = 17
-versionName = "1.6.1-beta"
+versionCode = 18
+versionName = "1.7-beta"
 ```
 
 Każda kolejna publikacja musi zwiększyć `versionCode`, nawet jeśli zmienia się
@@ -161,8 +209,8 @@ nie plikiem przeznaczonym do publikacji.
 W Android Studio użyj `Build → Analyze APK` i sprawdź:
 
 - nazwę pakietu `pl.lewicowyt.notifier`;
-- `versionName` równe `1.6.1-beta`;
-- `versionCode` równe `17`;
+- `versionName` równe `1.7-beta`;
+- `versionCode` równe `18`;
 - brak klucza YouTube API, haseł i pliku klucza podpisu.
 
 Jeżeli przekazujesz APK do MobSF lub innego skanera, wybierz podpisany wariant
@@ -174,37 +222,67 @@ problemy wysokiego poziomu.
 Podpis można zweryfikować narzędziem z Android SDK:
 
 ```powershell
-apksigner verify --verbose --print-certs .\lewicowYT-1.6.1-beta.apk
+apksigner verify --verbose --print-certs .\lewicowYT-1.7-beta.apk
 ```
 
 Zapisz również sumę kontrolną:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\lewicowYT-1.6.1-beta.apk
+Get-FileHash -Algorithm SHA256 .\lewicowYT-1.7-beta.apk
 ```
 
-## Publikowanie wersji 1.6.1-beta
+## Publikowanie wersji 1.7-beta
 
 1. Poczekaj, aż kontrole GitHub Actions zakończą się powodzeniem.
 2. W repozytorium otwórz `Releases → Draft a new release`.
 3. Utwórz tag:
 
 ```text
-v1.6.1-beta
+v1.7-beta
 ```
 
 4. Zaznacz wydanie jako **pre-release**.
-5. Dołącz dokładnie jeden podpisany APK, np.:
+5. Zawsze dołącz finalny podpisany APK, np.:
 
 ```text
-lewicowYT-1.6.1-beta.apk
+lewicowYT-1.7-beta.apk
 ```
 
-6. W opisie podaj SHA-256 APK oraz najważniejsze znane ograniczenia.
-7. Opublikuj wydanie i sprawdź w aplikacji przycisk `Sprawdź aktualizacje`.
+6. Opcjonalnie wygeneruj i dołącz do tego samego wydania:
 
-Historyczne artefakty 1.5-beta i 1.6-beta nie mogą być źródłem SHA-256 ani
-raportów dla nowego APK 1.6.1-beta.
+```text
+lewicowYT-1.6.1-beta-to-1.7-beta.xdelta
+lewicowYT-update.json
+```
+
+Jeżeli poprawka nie daje co najmniej 20% oszczędności albo generator zgłosi
+błąd, opublikuj wyłącznie pełny APK. Nie twórz ręcznie manifestu.
+
+7. W opisie podaj SHA-256 APK oraz najważniejsze znane ograniczenia.
+8. Opublikuj wydanie i sprawdź w aplikacji przycisk `Sprawdź aktualizacje`.
+
+Historyczne artefakty 1.5-beta, 1.6-beta i 1.6.1-beta nie mogą być źródłem
+SHA-256 ani raportów dla nowego APK 1.7-beta.
+
+### Zakres zmian 1.7-beta
+
+- lokalna wyszukiwarka Historii oparta na FTS5, z filtrami i paginowanym
+  limitem wyników;
+- pobieranie opisów wyłącznie dla już zapisanych materiałów, jako ostatni
+  niekrytyczny etap partii: partiami z `snippet.description` Data API przy
+  aktywnym kluczu, z fallbackiem YouTube Web, oraz magazyn Zstd level 5/UTF-8;
+- ręczne wyszukiwanie starszych materiałów obserwowanego twórcy z YouTube Web
+  i obowiązkowe potwierdzenie kanału przed dodaniem do Ulubionych;
+- opcjonalna mniejsza aktualizacja różnicowa Xdelta3/VCDIFF zamiast pełnego
+  APK, z bezwarunkowym cichym powrotem do pełnego pliku (patrz sekcja
+  „Opcjonalne aktualizacje różnicowe Xdelta3/VCDIFF” wyżej);
+- prywatna, zanonimizowana wersja powiadomień na ekranie blokady;
+- kontrola poprawnej linii następstwa certyfikatu aktualizacji;
+- przypięte SHA-256 narzędzi `cjxl.exe` i `yt-dlp.exe` oraz bezpieczny generator
+  archiwum źródłowego bez lokalnych danych środowiska.
+
+Pełny, techniczny opis wszystkich zmian: strona projektu
+<https://emmunioo.github.io/lewicowyt> po publikacji wydania.
 
 ### Zakres zmian 1.6.1-beta
 
@@ -224,61 +302,27 @@ Historyczny zweryfikowany artefakt bazowej wersji 1.5-beta:
 - [MobSF 1.5-beta](https://emmunioo.github.io/lewicowyt/lewicowYT-1.5-beta-MobSF.pdf):
   A, 69/100 (`LOW RISK`), 0 ustaleń wysokiego poziomu.
 
-### Zakres zmian 1.6-beta
+### Zakres zmian 1.6-beta (historyczne, już opublikowane)
 
-W opisie wydania należy uwzględnić:
+Skrót: bezpieczne przekierowania GitHub Release Assets, czytelniejszy ekran
+aktualizacji, lokalne Ulubione, wysoki kontrast i pełny audyt dostępności,
+migracja na AndroidX SQLite Bundled, automatyczna pierwsza synchronizacja z
+kolejką alarmów/WakeLock/watchdog i wstrzymaniem sieci w trybie Nie
+przeszkadzać, trwała kopia awaryjna koloru akcentu, jedno wspólne ustawienie
+otwierania linków YouTube, kopiowanie URL długim przytrzymaniem oraz
+rozszerzona prywatna diagnostyka. **1.6-beta tylko potwierdza dostępność FTS5
+w silniku bazy — produkcyjna wyszukiwarka, indeks i magazyn opisów Zstd BLOB
+zostały dopiero wprowadzone w 1.7-beta.** Pełny opis znajduje się na stronie
+projektu <https://emmunioo.github.io/lewicowyt>.
 
-- bezpieczne śledzenie przekierowań GitHub Release Assets oraz zachowanie
-  dotychczasowej weryfikacji pobranego APK;
-- czytelniejszy ekran aktualizacji z rozmiarem i opisem zmian oraz awaryjny
-  przycisk otwierający stronę właściwego wydania po błędzie pobierania;
-- lokalne Ulubione w Historii i Powiadomieniach, chronione przed automatyczną
-  retencją razem z używaną miniaturą;
-- tryb wysokiego kontrastu z minimalnym kontrastem tekstu 4,5:1 oraz poprawki
-  TalkBack/powiększonego tekstu;
-- migrację zachowującą dane do schematu 24 i AndroidX SQLite Bundled. Należy
-  jasno napisać, że 1.6-beta tylko potwierdza dostępność FTS5, a produkcyjny
-  indeks, wyszukiwarka i magazyn opisów Zstd BLOB należą do 1.7-beta;
-- automatyczną pierwszą synchronizację, kolejkę przyszłych alarmów,
-  WakeLock, watchdog oraz wstrzymanie sieci w trybie Nie przeszkadzać;
-- trwałą kopię awaryjną koloru akcentu i poprawione mapowanie kanału oraz
-  awatara Myśleć Głębiej;
-- jedno ustawienie aplikacji otwierającej wszystkie linki YouTube: system,
-  chooser, YouTube, NewPipe albo przeglądarka, z bezpiecznym fallbackiem;
-- kopiowanie URL po długim przytrzymaniu materiału w Historii lub
-  Powiadomieniach;
-- rozszerzoną prywatną diagnostykę synchronizacji z `syncId`, stabilnymi
-  `reasonCode`, kontekstem twórcy/źródła, czasami etapów i snapshotami stanu,
-  bez sekretów oraz danych prywatnych.
+### Zakres zmian bazowej wersji 1.5-beta (historyczne, już opublikowane)
 
-Przed publikacją zastąp informacje historyczne 1.5 wynikami dotyczącymi
-dokładnie finalnego, podpisanego APK 1.6-beta. Nie wolno przepisywać starego
-SHA-256, VirusTotal ani MobSF do nowego wydania.
-
-### Zakres zmian bazowej wersji 1.5-beta
-
-W informacji o bazowej wersji 1.5-beta uwzględniono:
-
-- globalne i indywidualne ustawienia historii oraz powiadomień osobno dla
-  filmów, streamów i Shortów;
-- ukrywanie globalnie wyłączonych filtrów i pomijanie wyłączonych kart Web;
-- nową obsługę kafelka twórcy: checkbox wyboru, rozwijane ustawienia i długie
-  przytrzymanie otwierające kanał;
-- RSS-first, pięć równoległych kanałów historii i etapy po 14 dni w kolejności
-  Filmy, Shorty, Streamy;
-- poprawione daty, kursory, rozpoznawanie kart i klasyfikację zgodną między
-  Data API oraz YouTube Web;
-- wykrywanie powiadomień bez API przez różnicę stabilnych identyfikatorów RSS;
-- sześć równoległych źródeł synchronizacji i lokalną adaptacyjną kolejność;
-- tekstowy, ograniczony klient YouTube Web bez pobierania obrazów i zasobów
-  strony;
-- współdzielenie identycznych miniatur po SHA-256 oraz zachowanie JXL przy
-  aktualizacji;
-- dołączone awatary 176×176 JXL i cotygodniową kontrolę ich SHA-256;
-- rozszerzone zabezpieczenia, migracje bazy i testy regresji;
-- pominięte w poprzednim skrócie 1.4-beta poprawki aktualizatora: kontrolę
-  wydań co 2 godziny, prywatne pobieranie APK, pełną walidację pliku,
-  obowiązkowe wydanie bezpieczeństwa i 15-minutowy cache ręcznego sprawdzenia.
+Skrót: osobne ustawienia historii/powiadomień per typ materiału i twórca,
+RSS-first z pięcioma równoległymi kanałami i etapami 14-dniowymi, poprawiona
+klasyfikacja i daty zgodne między Data API a YouTube Web, powiadomienia bez
+API przez różnicę identyfikatorów RSS, współdzielone miniatury po SHA-256,
+dołączone awatary JXL oraz rozszerzone zabezpieczenia i migracje bazy. Pełny
+opis znajduje się na stronie projektu <https://emmunioo.github.io/lewicowyt>.
 
 Android nie pozwala zwykłej aplikacji zatwierdzić instalacji bez działania
 użytkownika. „Automatyczna aktualizacja” oznacza automatyczne wykrycie,

@@ -819,6 +819,8 @@ class YouTubeHistoryClient(
         const val MAX_PUBLISHED_TEXT_CHARS = 200
         const val TAB_MEMORY_CACHE_MILLIS = 15L * 60L * 1_000L
         const val BROWSE_ENDPOINT = "https://www.youtube.com/youtubei/v1/browse"
+        // Publiczny identyfikator klienta YouTube Web obecny w odpowiedziach
+        // strony. Nie jest kluczem Data API użytkownika ani sekretem projektu.
         const val PUBLIC_WEB_API_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
         const val DEFAULT_CLIENT_VERSION = "2.20260727.10.00"
         const val LOCKUP_VIDEO_CONTENT_TYPE = "LOCKUP_CONTENT_TYPE_VIDEO"

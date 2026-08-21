@@ -62,6 +62,9 @@ class DiagnosticRunTest {
             "ALREADY_DELIVERED",
             "RETRY_SCHEDULED",
             "HOST_NOT_ALLOWED",
+            "DESCRIPTION_FETCH_FAILED",
+            "OLDER_SEARCH_FAILED",
+            "OLDER_MATERIAL_CHANNEL_MISMATCH",
         )
 
         assertTrue(DiagnosticReasonCode.entries.map { it.name }.toSet().containsAll(expected))

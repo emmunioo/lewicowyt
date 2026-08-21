@@ -8,6 +8,28 @@ import pl.lewicowyt.notifier.model.VideoKindEvidence
 
 class YouTubeDataApiVideoKindTest {
     @Test
+    fun `api descriptions keep empty values and ignore unexpected videos`() {
+        val expectedId = "mZCZR2JuFlM"
+        val emptyId = "dQw4w9WgXcQ"
+        val response = JSONObject(
+            """
+            {
+              "items":[
+                {"id":"$expectedId","snippet":{"description":"Opis z Data API"}},
+                {"id":"$emptyId","snippet":{"description":""}},
+                {"id":"abcdefghijk","snippet":{"description":"Obcy wynik"}}
+              ]
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals(
+            mapOf(expectedId to "Opis z Data API", emptyId to ""),
+            parseDataApiVideoDescriptions(response, setOf(expectedId, emptyId)),
+        )
+    }
+
+    @Test
     fun `completed premiere remains ambiguous instead of becoming stream`() {
         val item = video(
             duration = "PT10M41S",

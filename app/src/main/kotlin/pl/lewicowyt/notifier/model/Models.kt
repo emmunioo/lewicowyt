@@ -143,6 +143,16 @@ enum class HistoryFilter {
     SHORTS,
 }
 
+enum class DescriptionAvailability {
+    NONE,
+    DOWNLOADED,
+    MEMBERS_ONLY,
+    SCHEDULED_STREAM,
+}
+
+internal const val MEMBERS_ONLY_DESCRIPTION_MARKER = "Tylko dla wspierających"
+internal const val SCHEDULED_STREAM_DESCRIPTION_MARKER = "Zaplanowana transmisja"
+
 data class VideoEntry(
     val id: String,
     val title: String,
@@ -164,6 +174,56 @@ data class HistoryItem(
     val notified: Boolean,
     val origin: VideoOrigin = VideoOrigin.YOUTUBE,
     val isFavorite: Boolean = false,
+    val descriptionSnippet: String? = null,
+    val descriptionAvailability: DescriptionAvailability = DescriptionAvailability.NONE,
+)
+
+enum class MaterialStatusBadge {
+    SCHEDULED,
+    DESCRIPTION,
+    MEMBERS_ONLY,
+}
+
+/**
+ * UPCOMING jest stanem chwilowym. Po nadejściu zapisanego terminu nie opisujemy
+ * materiału jako nadal zaplanowanego, nawet jeżeli kolejna synchronizacja nie
+ * zdążyła jeszcze zastąpić starej klasyfikacji YouTube.
+ */
+fun HistoryItem.displayKindAt(nowMillis: Long): VideoKind =
+    if (kind == VideoKind.UPCOMING && publishedAtMillis <= nowMillis) {
+        VideoKind.STREAM_ARCHIVE
+    } else {
+        kind
+    }
+
+/** Status transmisji i dostępność opisu są niezależne, dlatego karta może pokazać dwie ikony. */
+fun HistoryItem.statusBadgesAt(nowMillis: Long): List<MaterialStatusBadge> = buildList {
+    val isStillScheduled = publishedAtMillis > nowMillis &&
+        (kind == VideoKind.UPCOMING || descriptionAvailability == DescriptionAvailability.SCHEDULED_STREAM)
+    if (isStillScheduled) add(MaterialStatusBadge.SCHEDULED)
+    when (descriptionAvailability) {
+        DescriptionAvailability.DOWNLOADED -> add(MaterialStatusBadge.DESCRIPTION)
+        DescriptionAvailability.MEMBERS_ONLY -> add(MaterialStatusBadge.MEMBERS_ONLY)
+        DescriptionAvailability.NONE,
+        DescriptionAvailability.SCHEDULED_STREAM -> Unit
+    }
+}
+
+data class OlderMaterialCandidate(
+    val videoId: String,
+    val title: String,
+    val creatorId: String,
+    val creatorName: String,
+)
+
+data class ConfirmedOlderMaterial(
+    val videoId: String,
+    val title: String,
+    val creatorId: String,
+    val creatorName: String,
+    val publishedAtMillis: Long,
+    val kind: VideoKind,
+    val description: String?,
 )
 
 data class SyncOutcome(

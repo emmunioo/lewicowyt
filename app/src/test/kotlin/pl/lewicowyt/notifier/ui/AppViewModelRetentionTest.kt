@@ -35,4 +35,47 @@ class AppViewModelRetentionTest {
             ),
         )
     }
+
+    @Test
+    fun activeSearchIncludesOlderNonFavoriteHistory() {
+        assertEquals(
+            true,
+            shouldIncludeHistoryItem(
+                favoritesOnly = false,
+                isFavorite = false,
+                searchActive = true,
+                publishedAtMillis = 1_000L,
+                cutoffMillis = 9_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun normalHistoryStillUsesVisibleTimeWindow() {
+        assertEquals(
+            false,
+            shouldIncludeHistoryItem(
+                favoritesOnly = false,
+                isFavorite = false,
+                searchActive = false,
+                publishedAtMillis = 1_000L,
+                cutoffMillis = 9_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun favoritesModeStillRejectsNonFavoriteSearchResult() {
+        assertEquals(
+            false,
+            shouldIncludeHistoryItem(
+                favoritesOnly = true,
+                isFavorite = false,
+                searchActive = true,
+                publishedAtMillis = 10_000L,
+                cutoffMillis = 9_000L,
+            ),
+        )
+    }
+
 }

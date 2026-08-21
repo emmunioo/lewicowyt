@@ -191,6 +191,34 @@ class YouTubeDataApiHistoryClient(
     fun fetchVideoKinds(videoIds: Collection<String>, apiKey: String): Map<String, VideoKind> =
         fetchVideoKindDecisions(videoIds, apiKey).mapValues { it.value.kind }
 
+    /**
+     * Pobiera `snippet.description` dla maksymalnie 50 filmów na jedno żądanie
+     * videos.list. Puste opisy pozostają w mapie, aby nie uruchamiać dla nich
+     * zbędnego fallbacku Web.
+     */
+    fun fetchVideoDescriptions(
+        videoIds: Collection<String>,
+        apiKey: String,
+    ): Map<String, String> = videoIds
+        .asSequence()
+        .filter(YOUTUBE_VIDEO_ID::matches)
+        .distinct()
+        .chunked(MAX_VIDEO_IDS_PER_REQUEST)
+        .fold(emptyMap()) { result, chunk ->
+            if (chunk.isEmpty()) return@fold result
+            val url = buildString {
+                append("$API_BASE/videos")
+                append("?part=snippet")
+                append("&id=${chunk.joinToString(",").urlEncode()}")
+                append("&key=${apiKey.urlEncode()}")
+            }
+            val json = JSONObject(
+                http.getText(url, maxChars = 1_500_000, headers = apiRequestHeaders),
+            )
+            throwApiErrorIfPresent(json)
+            result + parseDataApiVideoDescriptions(json, chunk.toSet())
+        }
+
     fun fetchVideoKindDecisions(
         videoIds: Collection<String>,
         apiKey: String,
@@ -276,6 +304,20 @@ class YouTubeDataApiHistoryClient(
     }
 }
 
+internal fun parseDataApiVideoDescriptions(
+    response: JSONObject,
+    expectedVideoIds: Set<String>,
+): Map<String, String> = buildMap {
+    val items = response.optJSONArray("items") ?: return@buildMap
+    for (index in 0 until items.length()) {
+        val item = items.optJSONObject(index) ?: continue
+        val videoId = item.optString("id")
+        if (videoId !in expectedVideoIds) continue
+        val snippet = item.optJSONObject("snippet") ?: continue
+        put(videoId, snippet.optString("description").take(MAX_DATA_API_DESCRIPTION_CHARS))
+    }
+}
+
 /**
  * Data API podaje bieżący stan transmisji, ale po jej zakończeniu nie
  * rozróżnia wystarczająco pewnie archiwalnego streamu od filmu opublikowanego
@@ -317,6 +359,7 @@ private fun parseDataApiDurationSeconds(value: String): Long =
     runCatching { Duration.parse(value).seconds }.getOrDefault(0L)
 
 private const val MAX_SHORT_SECONDS = 180L
+private const val MAX_DATA_API_DESCRIPTION_CHARS = 200_000
 
 internal fun interpretApiKeyValidationResponse(
     statusCode: Int,

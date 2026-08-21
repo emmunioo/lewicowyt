@@ -28,21 +28,31 @@ import pl.lewicowyt.notifier.AppGraph
 import pl.lewicowyt.notifier.AppLog
 import pl.lewicowyt.notifier.BuildConfig
 import pl.lewicowyt.notifier.data.AppSettings
+import pl.lewicowyt.notifier.data.HistorySearchEngine
 import pl.lewicowyt.notifier.data.ThemeMode
 import pl.lewicowyt.notifier.data.YouTubeLinkTarget
 import pl.lewicowyt.notifier.data.hasEnabledContentForSelectedCreators
 import pl.lewicowyt.notifier.data.isHistoryEnabledFor
 import pl.lewicowyt.notifier.data.isNotificationEnabledFor
 import pl.lewicowyt.notifier.images.JxlImageCache
+import pl.lewicowyt.notifier.diagnostics.DiagnosticCategory
+import pl.lewicowyt.notifier.diagnostics.DiagnosticLevel
+import pl.lewicowyt.notifier.diagnostics.DiagnosticLogStore
+import pl.lewicowyt.notifier.diagnostics.DiagnosticReasonCode
 import pl.lewicowyt.notifier.diagnostics.DiagnosticSyncRun
 import pl.lewicowyt.notifier.diagnostics.DiagnosticSyncTrigger
+import pl.lewicowyt.notifier.diagnostics.diagnosticYouTubeVideoUrl
 import pl.lewicowyt.notifier.model.Creator
+import pl.lewicowyt.notifier.model.ConfirmedOlderMaterial
 import pl.lewicowyt.notifier.model.HistoryFilter
 import pl.lewicowyt.notifier.model.HistoryItem
+import pl.lewicowyt.notifier.model.OlderMaterialCandidate
 import pl.lewicowyt.notifier.model.VideoKind
 import pl.lewicowyt.notifier.network.YouTubeApiKeyValidation
 import pl.lewicowyt.notifier.network.normalizeYouTubeAvatarUrl
 import pl.lewicowyt.notifier.images.BundledAvatarStore
+import pl.lewicowyt.notifier.sync.DescriptionBackfillStatus
+import pl.lewicowyt.notifier.sync.DescriptionBackfillLoader
 import pl.lewicowyt.notifier.updates.AvailableUpdate
 import pl.lewicowyt.notifier.updates.UpdateCheckResult
 import pl.lewicowyt.notifier.worker.isNotificationInterruptionSuppressed
@@ -57,6 +67,8 @@ private const val MAX_SEARCH_QUERY_CHARS = 200
 private const val MAX_VISIBLE_SYNC_ERRORS = 5
 private const val MAX_VISIBLE_ERROR_CHARS = 500
 private const val MAX_PARALLEL_AVATARS = 6
+private const val MAX_FOREGROUND_DESCRIPTION_BATCHES = 16
+private const val DESCRIPTION_BATCH_YIELD_MILLIS = 100L
 
 sealed interface UpdateUiState {
     data object Idle : UpdateUiState
@@ -81,6 +93,7 @@ sealed interface ApiKeyUiState {
 
 data class AppUiState(
     val creators: List<Creator> = emptyList(),
+    val catalogCreators: List<Creator> = emptyList(),
     val allCreatorCount: Int = 0,
     val selectedCreatorIds: Set<String> = emptySet(),
     val creatorAvatars: Map<String, String> = emptyMap(),
@@ -88,6 +101,8 @@ data class AppUiState(
     val history: List<HistoryItem> = emptyList(),
     val notifications: List<HistoryItem> = emptyList(),
     val query: String = "",
+    val historySearchQuery: String = "",
+    val olderMaterialSearch: OlderMaterialSearchUiState = OlderMaterialSearchUiState(),
     val isRefreshing: Boolean = false,
     val actionMessage: String? = null,
     val apiKeyState: ApiKeyUiState = ApiKeyUiState.Idle,
@@ -95,32 +110,53 @@ data class AppUiState(
     val favoritesOnly: Boolean = false,
     val historyHasMore: Boolean = true,
     val isLoadingHistory: Boolean = false,
+    val isLoadingDescriptions: Boolean = false,
+    val descriptionLoadingSource: String? = null,
+    val pendingDescriptionCount: Int = 0,
     val historyLoadError: String? = null,
     val notificationNavigationRequest: Long = 0L,
+)
+
+data class OlderMaterialSearchUiState(
+    val creatorId: String? = null,
+    val query: String = "",
+    val results: List<OlderMaterialCandidate> = emptyList(),
+    val confirmed: ConfirmedOlderMaterial? = null,
+    val isLoading: Boolean = false,
+    val error: String? = null,
 )
 
 private data class UiContent(
     val settings: AppSettings,
     val query: String,
     val history: List<HistoryItem>,
+    val historySearchResults: List<HistoryItem>,
+    val historySearchLimit: Int,
     val notifications: List<HistoryItem>,
     val avatars: Map<String, String>,
     val historyLimit: Int,
     val notificationNavigationRequest: Long,
     val apiKeyState: ApiKeyUiState,
     val favoritesOnly: Boolean,
+    val historySearchQuery: String,
+    val olderMaterialSearch: OlderMaterialSearchUiState,
 )
 
 private data class HistoryLoadState(
     val isLoading: Boolean,
     val endReached: Boolean,
     val error: String?,
+    val descriptionStatus: DescriptionBackfillStatus,
 )
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val graph = AppGraph.apply { initialize(application) }
     private val query = MutableStateFlow("")
     private val history = MutableStateFlow<List<HistoryItem>>(emptyList())
+    private val historySearchQuery = MutableStateFlow("")
+    private val historySearchResults = MutableStateFlow<List<HistoryItem>>(emptyList())
+    private val historySearchLimit = MutableStateFlow(HISTORY_SEARCH_PAGE_SIZE)
+    private val olderMaterialSearch = MutableStateFlow(OlderMaterialSearchUiState())
     private val notificationInbox = MutableStateFlow<List<HistoryItem>>(emptyList())
     private val storedAvatarSnapshot = graph.database.getCreatorAvatars()
     private val avatars = MutableStateFlow(
@@ -139,6 +175,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val notificationNavigationRequest = MutableStateFlow(0L)
     private val favoritesOnly = MutableStateFlow(false)
     private var historyLoadJob: Job? = null
+    private var descriptionBackfillJob: Job? = null
+    private var historySearchJob: Job? = null
     private var syncJob: Job? = null
     private var initialSyncCheckRunning = false
     private var lastManualUpdateCheckAtMillis = 0L
@@ -146,6 +184,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private data class StoredItems(
         val history: List<HistoryItem>,
         val notifications: List<HistoryItem>,
+        val historySearchResults: List<HistoryItem>,
+        val historySearchLimit: Int,
+        val olderMaterialSearch: OlderMaterialSearchUiState,
     )
 
     private data class ViewControls(
@@ -153,11 +194,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val notificationNavigationRequest: Long,
         val apiKeyState: ApiKeyUiState,
         val favoritesOnly: Boolean,
+        val historySearchQuery: String,
     )
 
-    private val storedItems = combine(history, notificationInbox) {
-            currentHistory, currentNotifications ->
-        StoredItems(currentHistory, currentNotifications)
+    private val storedItems = combine(
+        history,
+        notificationInbox,
+        historySearchResults,
+        historySearchLimit,
+        olderMaterialSearch,
+    ) { currentHistory, currentNotifications, currentSearchResults, currentSearchLimit,
+        currentOlderSearch ->
+        StoredItems(
+            currentHistory,
+            currentNotifications,
+            currentSearchResults,
+            currentSearchLimit,
+            currentOlderSearch,
+        )
     }
 
     private val viewControls = combine(
@@ -165,12 +219,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         notificationNavigationRequest,
         apiKeyStatus,
         favoritesOnly,
-    ) { currentHistoryLimit, navigationRequest, currentApiKeyState, currentFavoritesOnly ->
+        historySearchQuery,
+    ) { currentHistoryLimit, navigationRequest, currentApiKeyState, currentFavoritesOnly,
+        currentHistorySearchQuery ->
         ViewControls(
             currentHistoryLimit,
             navigationRequest,
             currentApiKeyState,
             currentFavoritesOnly,
+            currentHistorySearchQuery,
         )
     }
 
@@ -191,12 +248,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             settings,
             currentQuery,
             currentItems.history,
+            currentItems.historySearchResults,
+            currentItems.historySearchLimit,
             currentItems.notifications,
             currentAvatars,
             controls.historyLimit,
             controls.notificationNavigationRequest,
             controls.apiKeyState,
             controls.favoritesOnly,
+            controls.historySearchQuery,
+            currentItems.olderMaterialSearch,
         )
     }
 
@@ -204,8 +265,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         loadingHistory,
         historyEndReached,
         historyLoadError,
-    ) { isLoading, endReached, error ->
-        HistoryLoadState(isLoading, endReached, error)
+        graph.descriptionBackfill.status,
+    ) { isLoading, endReached, error, descriptionStatus ->
+        HistoryLoadState(isLoading, endReached, error, descriptionStatus)
     }
 
     val uiState = combine(
@@ -220,50 +282,80 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             contentState.settings.historyWindowDays.toLong() * DAY_MILLIS
         val activeHistoryFilters = contentState.settings.historyFilters
             .intersect(contentState.settings.globalHistoryTypes)
-        val filteredHistory = contentState.history
+        val historySource = if (contentState.historySearchQuery.isBlank()) {
+            contentState.history
+        } else {
+            contentState.historySearchResults
+        }
+        val filteredHistory = historySource
             .asSequence()
             .filter {
-                if (contentState.favoritesOnly) it.isFavorite
-                else it.publishedAtMillis >= cutoff
+                shouldIncludeHistoryItem(
+                    favoritesOnly = contentState.favoritesOnly,
+                    isFavorite = it.isFavorite,
+                    searchActive = contentState.historySearchQuery.isNotBlank(),
+                    publishedAtMillis = it.publishedAtMillis,
+                    cutoffMillis = cutoff,
+                )
             }
             .filter { it.creatorId in contentState.settings.selectedCreatorIds }
             .filter {
                 contentState.settings.isHistoryEnabledFor(it.creatorId, it.kind)
             }
             .filter { it.matches(activeHistoryFilters) }
-            .sortedWith(
-                compareByDescending<HistoryItem> { it.publishedAtMillis }
-                    .thenByDescending { it.detectedAtMillis },
-            )
+            .let { sequence ->
+                if (contentState.historySearchQuery.isBlank()) {
+                    sequence.sortedWith(
+                        compareByDescending<HistoryItem> { it.publishedAtMillis }
+                            .thenByDescending { it.detectedAtMillis },
+                    )
+                } else sequence
+            }
             .toList()
         AppUiState(
             creators = graph.catalog.creators.filter {
                 normalized.isBlank() || it.name.lowercase(POLISH_LOCALE).contains(normalized)
             },
+            catalogCreators = graph.catalog.creators,
             allCreatorCount = graph.catalog.creators.size,
             selectedCreatorIds = contentState.settings.selectedCreatorIds,
             creatorAvatars = contentState.avatars,
             settings = contentState.settings,
-            history = filteredHistory.take(contentState.historyLimit),
+            history = filteredHistory.take(
+                if (contentState.historySearchQuery.isBlank()) {
+                    contentState.historyLimit
+                } else {
+                    contentState.historySearchLimit
+                },
+            ),
             notifications = contentState.notifications.filter {
                 it.creatorId in contentState.settings.selectedCreatorIds &&
                     contentState.settings.isNotificationEnabledFor(it.creatorId, it.kind)
             },
             query = contentState.query,
+            historySearchQuery = contentState.historySearchQuery,
+            olderMaterialSearch = contentState.olderMaterialSearch,
             isRefreshing = isRefreshing,
             actionMessage = message,
             apiKeyState = contentState.apiKeyState,
             updateState = currentUpdateState,
             favoritesOnly = contentState.favoritesOnly,
-            historyHasMore =
+            historyHasMore = if (contentState.historySearchQuery.isNotBlank()) {
+                contentState.historySearchLimit < MAX_HISTORY_SEARCH_RESULTS &&
+                    filteredHistory.size > contentState.historySearchLimit
+            } else {
                 activeHistoryFilters.isNotEmpty() &&
                     if (contentState.favoritesOnly) {
                         filteredHistory.size > contentState.historyLimit
                     } else {
                         filteredHistory.size > contentState.historyLimit ||
                             (!loadState.endReached && loadState.error == null)
-                    },
+                    }
+            },
             isLoadingHistory = loadState.isLoading,
+            isLoadingDescriptions = loadState.descriptionStatus.active,
+            descriptionLoadingSource = loadState.descriptionStatus.source,
+            pendingDescriptionCount = loadState.descriptionStatus.pendingCount,
             historyLoadError = loadState.error,
             notificationNavigationRequest = contentState.notificationNavigationRequest,
         )
@@ -272,6 +364,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = AppUiState(
             creators = graph.catalog.creators,
+            catalogCreators = graph.catalog.creators,
             allCreatorCount = graph.catalog.creators.size,
             creatorAvatars = avatars.value,
         ),
@@ -291,9 +384,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         query.value = value.take(MAX_SEARCH_QUERY_CHARS)
     }
 
+    fun setHistorySearchQuery(value: String) {
+        val normalized = value.take(MAX_SEARCH_QUERY_CHARS)
+        if (normalized != historySearchQuery.value) {
+            historySearchLimit.value = HISTORY_SEARCH_PAGE_SIZE
+            historySearchResults.value = emptyList()
+        }
+        historySearchQuery.value = normalized
+        refreshHistorySearch(debounce = true)
+    }
+
     fun setFavoritesOnly(enabled: Boolean) {
         favoritesOnly.value = enabled
         historyLimit.value = HISTORY_PAGE_SIZE
+        refreshHistorySearch()
     }
 
     fun setFavorite(videoId: String, favorite: Boolean) {
@@ -356,6 +460,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             graph.preferences.setHistoryWindowDays(days)
             resetHistoryPaging()
+            refreshHistorySearch()
         }
     }
 
@@ -366,6 +471,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             // więc zmiana widoku nie może kasować postępu sieciowego. Zerujemy
             // tylko stronicowanie ekranu; rozpoczęty backfill zostanie wznowiony.
             resetHistoryPaging(resetBackfill = false)
+            refreshHistorySearch()
         }
     }
 
@@ -374,6 +480,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             graph.preferences.setGlobalHistoryType(type, enabled)
             graph.scheduler.schedule(graph.preferences.current())
             resetHistoryPaging()
+            refreshHistorySearch()
         }
     }
 
@@ -388,6 +495,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             graph.preferences.setCreatorHistoryType(creatorId, type, enabled)
             graph.scheduler.schedule(graph.preferences.current())
             resetHistoryPaging()
+            refreshHistorySearch()
         }
     }
 
@@ -645,11 +753,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refreshHistory() {
-        viewModelScope.launch { refreshHistoryNow() }
+        viewModelScope.launch {
+            refreshHistoryNow()
+            requestDescriptionBackfill()
+        }
     }
 
     fun loadMoreHistory() {
         if (loadingHistory.value) return
+        if (historySearchQuery.value.isNotBlank()) {
+            if (historySearchLimit.value >= MAX_HISTORY_SEARCH_RESULTS) return
+            loadingHistory.value = true
+            historySearchLimit.value =
+                (historySearchLimit.value + HISTORY_SEARCH_PAGE_SIZE)
+                    .coerceAtMost(MAX_HISTORY_SEARCH_RESULTS)
+            refreshHistorySearch(markLoading = true)
+            return
+        }
         loadingHistory.value = true
         historyLoadJob = viewModelScope.launch {
             try {
@@ -683,10 +803,73 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             "Nie udało się pobrać dalszej historii: ${result.error}"
                     }
                     refreshHistoryNow()
+                    requestDescriptionBackfill()
                     avatars.value = graph.database.getCreatorAvatars().normalizedAvatarUrls()
                 }
             } finally {
                 loadingHistory.value = false
+            }
+        }
+    }
+
+    /**
+     * Opisy mają własny, nieblokujący przebieg. Dzięki temu zakończenie
+     * stronicowania Historii nie odbiera im wyzwalacza, a równoległy sync i UI
+     * nie uruchamiają dwóch partii sieciowych jednocześnie.
+     */
+    private fun requestDescriptionBackfill() {
+        if (descriptionBackfillJob?.isActive == true) return
+        descriptionBackfillJob = viewModelScope.launch {
+            try {
+                var batches = 0
+                var totalSaved = 0
+                var savedInBatch: Int
+                do {
+                    savedInBatch = graph.descriptionBackfill.enrichExistingHistory(
+                        settings = graph.preferences.current(),
+                        maxItems = DescriptionBackfillLoader.FOREGROUND_BATCH_SIZE,
+                    )
+                    batches += 1
+                    totalSaved += savedInBatch
+                    if (savedInBatch > 0) {
+                        // Odświeżamy wspólne modele Historii i Powiadomień po każdej
+                        // partii, aby znaczniki 📓 pojawiały się stopniowo.
+                        refreshHistoryNow()
+                        delay(DESCRIPTION_BATCH_YIELD_MILLIS)
+                    }
+                } while (
+                    savedInBatch > 0 &&
+                    batches < MAX_FOREGROUND_DESCRIPTION_BATCHES
+                )
+                DiagnosticLogStore.event(
+                    category = DiagnosticCategory.HISTORY,
+                    level = DiagnosticLevel.INFO,
+                    name = "DESCRIPTION_FOREGROUND_DRAIN",
+                    fields = mapOf(
+                        "batches" to batches,
+                        "saved" to totalSaved,
+                        "batchSize" to DescriptionBackfillLoader.FOREGROUND_BATCH_SIZE,
+                        "stoppedAtSafetyLimit" to (
+                            savedInBatch > 0 &&
+                                batches >= MAX_FOREGROUND_DESCRIPTION_BATCHES
+                            ),
+                    ),
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                DiagnosticLogStore.event(
+                    category = DiagnosticCategory.HISTORY,
+                    level = DiagnosticLevel.WARNING,
+                    name = "DESCRIPTION_STAGE_FAILED",
+                    reason = DiagnosticReasonCode.DESCRIPTION_STAGE_FAILED,
+                    fields = mapOf("errorType" to error.javaClass.simpleName),
+                )
+                AppLog.warning(
+                    "DescriptionBackfill",
+                    "Nie udało się uruchomić uzupełniania opisów",
+                    error,
+                )
             }
         }
     }
@@ -751,7 +934,172 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         history.value = refreshed.first
         notificationInbox.value = refreshed.second
+        refreshHistorySearch()
         graph.preferences.removeDeselectionRecords(expiredCreatorIds)
+    }
+
+    private fun refreshHistorySearch(
+        debounce: Boolean = false,
+        markLoading: Boolean = false,
+    ) {
+        historySearchJob?.cancel()
+        val rawQuery = historySearchQuery.value.trim()
+        if (rawQuery.isBlank()) {
+            historySearchResults.value = emptyList()
+            if (markLoading) loadingHistory.value = false
+            return
+        }
+        historySearchJob = viewModelScope.launch {
+            try {
+                if (debounce) delay(HISTORY_SEARCH_DEBOUNCE_MILLIS)
+                val settings = graph.preferences.current()
+                val kinds = settings.historyFilters
+                    .intersect(settings.globalHistoryTypes)
+                    .flatMapTo(mutableSetOf(), HistoryFilter::videoKinds)
+                val visibleLimit = historySearchLimit.value
+                val searchResult = withContext(Dispatchers.IO) {
+                    graph.database.searchHistory(
+                        query = rawQuery,
+                        selectedCreatorIds = settings.selectedCreatorIds,
+                        kinds = kinds,
+                        // Wyszukiwanie obejmuje całą historię zachowaną lokalnie
+                        // (maksymalnie 60 dni), a nie tylko aktualny filtr czasu UI.
+                        cutoffMillis = 0L,
+                        favoritesOnly = favoritesOnly.value,
+                        // Jeden dodatkowy rekord pozwala UI jednoznacznie ustalić,
+                        // czy istnieje następna strona, bez ładowania całej tabeli.
+                        limit = (historySearchLimit.value + 1)
+                            .coerceAtMost(MAX_HISTORY_SEARCH_RESULTS + 1),
+                    )
+                }
+                val results = searchResult.items
+                historySearchResults.value = results
+                recordLocalSearchDiagnostic(
+                    query = rawQuery,
+                    results = results
+                        .filter { settings.isHistoryEnabledFor(it.creatorId, it.kind) }
+                        .take(visibleLimit),
+                    favoritesOnly = favoritesOnly.value,
+                    kinds = kinds,
+                    engine = searchResult.engine,
+                    strategy = searchResult.strategy.name,
+                )
+            } finally {
+                if (markLoading) loadingHistory.value = false
+            }
+        }
+    }
+
+    private fun recordLocalSearchDiagnostic(
+        query: String,
+        results: List<HistoryItem>,
+        favoritesOnly: Boolean,
+        kinds: Set<VideoKind>,
+        engine: HistorySearchEngine,
+        strategy: String,
+    ) {
+        if (!DiagnosticLogStore.isEnabled()) return
+        DiagnosticLogStore.event(
+            category = DiagnosticCategory.DATABASE,
+            level = DiagnosticLevel.INFO,
+            name = "LOCAL_SEARCH",
+            fields = mapOf(
+                "query" to query,
+                "resultCount" to results.size,
+                "engine" to engine.name,
+                "strategy" to strategy,
+                "favoritesOnly" to favoritesOnly,
+                "kinds" to kinds.joinToString(",", transform = VideoKind::name),
+            ),
+        )
+        results.forEachIndexed { index, item ->
+            DiagnosticLogStore.event(
+                category = DiagnosticCategory.DATABASE,
+                level = DiagnosticLevel.INFO,
+                name = "LOCAL_SEARCH_RESULT",
+                fields = mapOf(
+                    "rank" to index + 1,
+                    "engine" to engine.name,
+                    "creatorId" to item.creatorId,
+                    "creator" to item.creatorName,
+                    "title" to item.title,
+                    "video" to diagnosticYouTubeVideoUrl(item.videoId),
+                ),
+            )
+        }
+    }
+
+    fun searchOlderMaterials(creatorId: String, value: String) {
+        val creator = graph.catalog.creators.firstOrNull { it.id == creatorId }
+            ?: return
+        val queryValue = value.trim().take(MAX_OLDER_SEARCH_QUERY_CHARS)
+        olderMaterialSearch.value = OlderMaterialSearchUiState(
+            creatorId = creatorId,
+            query = queryValue,
+            isLoading = true,
+        )
+        viewModelScope.launch {
+            olderMaterialSearch.value = try {
+                val results = graph.olderMaterialSearch.search(creator, queryValue)
+                OlderMaterialSearchUiState(
+                    creatorId = creatorId,
+                    query = queryValue,
+                    results = results,
+                    error = if (results.isEmpty()) "Nie znaleziono materiałów." else null,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                OlderMaterialSearchUiState(
+                    creatorId = creatorId,
+                    query = queryValue,
+                    error = error.displayMessage(),
+                )
+            }
+        }
+    }
+
+    fun confirmOlderMaterial(candidate: OlderMaterialCandidate) {
+        val creator = graph.catalog.creators.firstOrNull { it.id == candidate.creatorId }
+            ?: return
+        val previous = olderMaterialSearch.value
+        olderMaterialSearch.value = previous.copy(isLoading = true, error = null, confirmed = null)
+        viewModelScope.launch {
+            olderMaterialSearch.value = try {
+                previous.copy(
+                    isLoading = false,
+                    confirmed = graph.olderMaterialSearch.confirm(creator, candidate),
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                previous.copy(isLoading = false, error = error.displayMessage())
+            }
+        }
+    }
+
+    fun addConfirmedOlderMaterial() {
+        val material = olderMaterialSearch.value.confirmed ?: return
+        olderMaterialSearch.update { it.copy(isLoading = true, error = null) }
+        viewModelScope.launch {
+            try {
+                val saved = graph.olderMaterialSearch.addConfirmedFavorite(material)
+                if (!saved) error("Nie udało się zapisać materiału.")
+                actionMessage.value = "Dodano materiał do Ulubionych."
+                olderMaterialSearch.value = OlderMaterialSearchUiState()
+                refreshHistoryNow()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                olderMaterialSearch.update {
+                    it.copy(isLoading = false, error = error.displayMessage())
+                }
+            }
+        }
+    }
+
+    fun clearOlderMaterialSearch() {
+        olderMaterialSearch.value = OlderMaterialSearchUiState()
     }
 
     private suspend fun resetHistoryPaging(resetBackfill: Boolean = true) {
@@ -827,6 +1175,20 @@ private fun Map<String, String>.normalizedAvatarUrls(): Map<String, String> =
 
 private val MANUAL_UPDATE_CHECK_INTERVAL_MILLIS = TimeUnit.MINUTES.toMillis(15)
 private const val CACHED_CHECK_INDICATOR_MILLIS = 550L
+private const val HISTORY_SEARCH_DEBOUNCE_MILLIS = 300L
+private const val HISTORY_SEARCH_PAGE_SIZE = 40
+private const val MAX_HISTORY_SEARCH_RESULTS = 100
+private const val MAX_OLDER_SEARCH_QUERY_CHARS = 100
+
+private fun HistoryFilter.videoKinds(): Set<VideoKind> = when (this) {
+    HistoryFilter.VIDEOS -> setOf(VideoKind.VIDEO)
+    HistoryFilter.STREAMS -> setOf(
+        VideoKind.LIVE,
+        VideoKind.UPCOMING,
+        VideoKind.STREAM_ARCHIVE,
+    )
+    HistoryFilter.SHORTS -> setOf(VideoKind.SHORT)
+}
 
 internal fun expiredDeselectedCreatorIds(
     deselectedAtMillis: Map<String, Long>,
@@ -839,3 +1201,15 @@ internal fun expiredDeselectedCreatorIds(
             deselectedAt <= nowMillis - retentionMillis
     }
     .keys
+
+internal fun shouldIncludeHistoryItem(
+    favoritesOnly: Boolean,
+    isFavorite: Boolean,
+    searchActive: Boolean,
+    publishedAtMillis: Long,
+    cutoffMillis: Long,
+): Boolean = when {
+    favoritesOnly -> isFavorite
+    searchActive -> true
+    else -> publishedAtMillis >= cutoffMillis
+}

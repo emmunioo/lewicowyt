@@ -52,6 +52,7 @@ import pl.lewicowyt.notifier.network.YouTubeHistoryTab
 import pl.lewicowyt.notifier.network.YouTubePageClassifier
 import pl.lewicowyt.notifier.network.YouTubeSourceResolver
 import pl.lewicowyt.notifier.network.rssVideoKindDecision
+import pl.lewicowyt.notifier.network.InvalidYouTubeFeedIdentityException
 
 data class BackfillResult(
     val insertedCount: Int,
@@ -263,6 +264,29 @@ class HistoryBackfillLoader(
                     apiKey.isBlank() && resolved.type == SourceType.PLAYLIST,
                 enabledHistoryTypes = enabledHistoryTypes,
                 diagnosticRun = diagnosticRun,
+            )
+        }
+        val identityError = rssResult.exceptionOrNull() as? InvalidYouTubeFeedIdentityException
+        if (identityError != null) {
+            diagnosticRun.sourceError(DiagnosticYouTubeSource.RSS)
+            diagnosticRun.youtubeIssue(
+                name = "SOURCE_ERROR",
+                level = DiagnosticLevel.ERROR,
+                creatorId = firstTarget.creator.id,
+                source = firstTarget.source,
+                resolved = resolved,
+                operation = DiagnosticYouTubeOperation.RSS_FEED,
+                fallbackReason = DiagnosticReasonCode.INVALID_SOURCE_RESULT,
+                error = identityError,
+                extra = mapOf("area" to "HISTORY"),
+                text = "RSS historii ma inną tożsamość; całe źródło odrzucono",
+            )
+            return ChannelResult(
+                insertedCount = 0,
+                errors = listOf(
+                    "${firstTarget.creator.name}: ${identityError.message.orEmpty()}"
+                        .take(MAX_ERROR_DETAIL_CHARS),
+                ),
             )
         }
         if (rssResult.isFailure) {

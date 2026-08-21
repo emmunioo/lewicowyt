@@ -67,6 +67,33 @@ internal enum class DiagnosticReasonCode {
     NO_LINK_HANDLER,
     INVALID_LINK,
     LINK_LAUNCH_FAILED,
+    DESCRIPTION_EMPTY,
+    DESCRIPTION_STAGE_FAILED,
+    DESCRIPTION_FETCH_FAILED,
+    DESCRIPTION_SAVE_FAILED,
+    OLDER_SEARCH_FAILED,
+    OLDER_MATERIAL_UNAVAILABLE,
+    OLDER_MATERIAL_CHANNEL_MISMATCH,
+    OLDER_FAVORITE_SAVE_FAILED,
+    FTS_QUERY_FAILED,
+    DELTA_NOT_AVAILABLE,
+    DELTA_MANIFEST_INVALID,
+    DELTA_NOT_WORTH_IT,
+    DELTA_SOURCE_HASH_MISMATCH,
+    DELTA_DOWNLOAD_FAILED,
+    DELTA_HTTP_ERROR,
+    DELTA_PATCH_HASH_MISMATCH,
+    DELTA_FORMAT_INVALID,
+    DELTA_APPLY_FAILED,
+    DELTA_TARGET_HASH_MISMATCH,
+    DELTA_TARGET_SIGNATURE_INVALID,
+    DELTA_TARGET_PACKAGE_INVALID,
+    DELTA_TARGET_VERSION_INVALID,
+    DELTA_NO_SPACE,
+    DELTA_IO_ERROR,
+    DELTA_DECODER_UNAVAILABLE,
+    DELTA_CANCELLED,
+    DELTA_PREVIOUSLY_REJECTED,
 }
 
 internal enum class DiagnosticNotificationResult {
@@ -88,6 +115,7 @@ internal enum class DiagnosticSyncStage {
     INBOX,
     NOTIFICATIONS,
     UPDATE,
+    DESCRIPTION,
     FINISHED,
 }
 
@@ -113,6 +141,7 @@ internal class DiagnosticSyncRun private constructor(
     private val webErrors = AtomicInteger()
     private val started = AtomicBoolean(false)
     private val finished = AtomicBoolean(false)
+    private val networkStarted = DiagnosticNetworkUsage.snapshot()
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
@@ -232,6 +261,17 @@ internal class DiagnosticSyncRun private constructor(
                 "webErrors" to webErrors.get(),
             ),
         )
+        val network = DiagnosticNetworkUsage.snapshot().deltaSince(networkStarted)
+        event(
+            "NETWORK_USAGE",
+            category = DiagnosticCategory.NETWORK,
+            fields = mapOf(
+                "uploadedHttpBodyBytes" to network.uploadedBytes,
+                "downloadedHttpBodyBytes" to network.downloadedBytes,
+                "totalHttpBodyBytes" to network.totalBytes,
+                "scope" to "HTTP_BODY_ONLY",
+            ),
+        )
         event("END", fields = fields + ("durationMs" to totalNanos / 1_000_000L))
     }
 
@@ -307,6 +347,7 @@ internal fun formatDiagnosticEvent(
 private fun slowOperationThresholdMillis(stage: DiagnosticSyncStage): Long = when (stage) {
     DiagnosticSyncStage.WEB,
     DiagnosticSyncStage.HISTORY,
+    DiagnosticSyncStage.DESCRIPTION,
     -> 15_000L
     DiagnosticSyncStage.IMAGES -> 5_000L
     else -> 10_000L

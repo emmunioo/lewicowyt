@@ -12,6 +12,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import pl.lewicowyt.notifier.model.VideoKind
 
 @RunWith(AndroidJUnit4::class)
 class BundledDatabaseMigrationTest {
@@ -31,25 +32,56 @@ class BundledDatabaseMigrationTest {
     fun cleanUp() = deleteTestDatabases()
 
     @Test
-    fun completeSchema22MigrationPreservesEveryTableAndKeepsSearchDeferred() {
+    fun completeSchema22MigrationPreservesDataAndEnablesFtsAndCompressedDescriptions() {
         val database = LocalDatabase(context, DATABASE_NAME)
         try {
-            assertEquals(24, scalarInt(database, "PRAGMA user_version"))
+            assertEquals(25, scalarInt(database, "PRAGMA user_version"))
             assertEquals("ok", scalarText(database, "PRAGMA integrity_check"))
             LEGACY_TABLES.forEach { table ->
                 assertEquals("Brak danych po migracji w $table", 1, tableRows(database, table))
             }
             assertTrue(database.containsVideo(VIDEO_ID))
             assertFalse(hasColumn(database, "video_history", "description"))
-            assertFalse(hasObject(database, "table", "video_history_fts"))
-            assertFalse(hasObject(database, "trigger", "video_history_fts_insert"))
-
-            // 1.6 dowodzi dostępności FTS5 w Bundled SQLite, ale nie tworzy
-            // jeszcze produkcyjnego indeksu ani magazynu opisów.
-            database.writableDatabase.execSQL(
-                "CREATE VIRTUAL TABLE temp.fts5_probe USING fts5(value)",
+            assertTrue(hasColumn(database, "video_history", "description_data"))
+            assertTrue(hasObject(database, "table", "video_history_fts"))
+            assertTrue(hasObject(database, "trigger", "video_history_fts_insert"))
+            val creatorSearch = database.searchHistory(
+                query = "ral",
+                selectedCreatorIds = setOf("creator"),
+                kinds = setOf(VideoKind.VIDEO),
+                cutoffMillis = 0L,
+                favoritesOnly = false,
             )
-            database.writableDatabase.execSQL("DROP TABLE temp.fts5_probe")
+            assertEquals(HistorySearchEngine.FTS5, creatorSearch.engine)
+            assertEquals(VIDEO_ID, creatorSearch.items.single().videoId)
+            val description = "Szczegółowy opis o sprawiedliwości społecznej. ".repeat(80)
+            assertTrue(database.saveDescription(VIDEO_ID, description))
+            val search = database.searchHistory(
+                query = "sprawiedliwość",
+                selectedCreatorIds = setOf("creator"),
+                kinds = setOf(VideoKind.VIDEO),
+                cutoffMillis = 0L,
+                favoritesOnly = false,
+            )
+            assertEquals(HistorySearchEngine.FTS5, search.engine)
+            assertEquals(VIDEO_ID, search.items.single().videoId)
+            assertTrue(
+                search.items.single().descriptionSnippet.orEmpty()
+                    .contains("sprawiedliwości"),
+            )
+
+            database.writableDatabase.execSQL(
+                "DELETE FROM video_history_fts WHERE video_id = '$VIDEO_ID'",
+            )
+            val fallbackSearch = database.searchHistory(
+                query = "ral",
+                selectedCreatorIds = setOf("creator"),
+                kinds = setOf(VideoKind.VIDEO),
+                cutoffMillis = 0L,
+                favoritesOnly = false,
+            )
+            assertEquals(HistorySearchEngine.SQL_FALLBACK, fallbackSearch.engine)
+            assertEquals(VIDEO_ID, fallbackSearch.items.single().videoId)
 
             assertTrue(database.setFavorite(VIDEO_ID, true))
             database.pruneExpiredData(nowMillis = 100L * DAY_MILLIS)
@@ -106,12 +138,13 @@ class BundledDatabaseMigrationTest {
 
         val database = LocalDatabase(context, SCHEMA_23_DATABASE_NAME)
         try {
-            assertEquals(24, scalarInt(database, "PRAGMA user_version"))
+            assertEquals(25, scalarInt(database, "PRAGMA user_version"))
             assertTrue(database.containsVideo(VIDEO_ID))
             assertTrue(database.recentHistory(limit = 1).single().isFavorite)
             assertFalse(hasColumn(database, "video_history", "description"))
-            assertFalse(hasObject(database, "table", "video_history_fts"))
-            assertFalse(hasObject(database, "trigger", "video_history_fts_insert"))
+            assertTrue(hasColumn(database, "video_history", "description_data"))
+            assertTrue(hasObject(database, "table", "video_history_fts"))
+            assertTrue(hasObject(database, "trigger", "video_history_fts_insert"))
             assertEquals("ok", scalarText(database, "PRAGMA integrity_check"))
         } finally {
             database.close()
@@ -138,7 +171,7 @@ class BundledDatabaseMigrationTest {
 
         val database = LocalDatabase(context, WAL_TARGET_DATABASE_NAME)
         try {
-            assertEquals(24, scalarInt(database, "PRAGMA user_version"))
+            assertEquals(25, scalarInt(database, "PRAGMA user_version"))
             assertTrue(database.containsVideo(VIDEO_ID))
             LEGACY_TABLES.forEach { table ->
                 assertEquals("WAL nie zachował $table", 1, tableRows(database, table))
@@ -313,7 +346,7 @@ class BundledDatabaseMigrationTest {
         db.execSQL(
             """
             INSERT INTO video_history VALUES (
-                '$VIDEO_ID', 'creator', 'Twórca testowy', 'Testowy materiał',
+                '$VIDEO_ID', 'creator', 'Ralindel', 'Testowy materiał',
                 'https://www.youtube.com/watch?v=$VIDEO_ID', 1, 1, 'VIDEO',
                 0, 1, 'YOUTUBE', 1, 0, 0, 50, 40
             )

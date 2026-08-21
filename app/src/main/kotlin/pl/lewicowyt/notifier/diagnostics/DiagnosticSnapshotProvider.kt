@@ -74,6 +74,7 @@ internal class DiagnosticSnapshotProvider(
             val schedulerState = scheduler.diagnosticSnapshot()
             val db = database.diagnosticState()
             val images = JxlImageCache.diagnosticState(appContext)
+            val transfer = DiagnosticNetworkUsage.snapshot()
 
             DiagnosticLogStore.event(
                 DiagnosticCategory.APP,
@@ -126,11 +127,24 @@ internal class DiagnosticSnapshotProvider(
                     "conversions" to images.conversionsInProgress,
                 ),
             )
+            DiagnosticLogStore.event(
+                DiagnosticCategory.NETWORK,
+                DiagnosticLevel.INFO,
+                "NETWORK_USAGE_PROCESS",
+                syncId = syncId,
+                fields = mapOf(
+                    "uploadedHttpBodyBytes" to transfer.uploadedBytes,
+                    "downloadedHttpBodyBytes" to transfer.downloadedBytes,
+                    "totalHttpBodyBytes" to transfer.totalBytes,
+                    "scope" to "PROCESS_HTTP_BODY_ONLY",
+                ),
+            )
             DiagnosticLogStore.updateExportSummary(
                 listOf(
                     "SYSTEM | sdk=${Build.VERSION.SDK_INT} | exactAlarm=$exactAlarm | notifications=$notificationsAllowed | dnd=$dnd | network=${network.type.name}",
                     "SCHEDULERS | regular=${schedulerState.regularPresent}/${schedulerState.regularExpected} | retry=${schedulerState.retryPresent} | watchdog=${schedulerState.watchdogPresent} | dndProbe=${schedulerState.dndProbePresent}",
                     "DATABASE | engine=BUNDLED_SQLITE | sqlite=${db.sqliteVersion} | schema=${db.userVersion} | journal=${db.journalMode} | fts5=${db.fts5Available}",
+                    "NETWORK_USAGE | uploadedHttpBodyBytes=${transfer.uploadedBytes} | downloadedHttpBodyBytes=${transfer.downloadedBytes} | totalHttpBodyBytes=${transfer.totalBytes} | scope=PROCESS_HTTP_BODY_ONLY",
                     "LAST_SYNC | completed=${settings.lastCompletedSyncAtMillis}",
                 ),
             )

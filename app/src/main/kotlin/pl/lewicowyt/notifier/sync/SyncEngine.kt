@@ -66,6 +66,7 @@ import pl.lewicowyt.notifier.network.YouTubeHistoryTab
 import pl.lewicowyt.notifier.network.YouTubePageClassifier
 import pl.lewicowyt.notifier.network.YouTubeSourceResolver
 import pl.lewicowyt.notifier.network.rssVideoKindDecision
+import pl.lewicowyt.notifier.network.requireNoFeedIdentityFailure
 import pl.lewicowyt.notifier.notifications.NotificationHelper
 import pl.lewicowyt.notifier.notifications.NotificationDeliveryResult
 import pl.lewicowyt.notifier.notifications.toNotificationCandidate
@@ -82,6 +83,7 @@ class SyncEngine(
     private val historyClient: YouTubeHistoryClient,
     private val sourcePriorityScheduler: SourcePriorityScheduler,
     private val avatarUpdater: CreatorAvatarUpdater,
+    private val descriptionBackfill: DescriptionBackfillLoader,
 ) {
     private val syncMutex = Mutex()
 
@@ -406,6 +408,30 @@ class SyncEngine(
                 )
             }
 
+            // Opisy są ostatnim, niekrytycznym etapem. Dotyczy to wyłącznie
+            // rekordów już zapisanych w Historii i nie opóźnia powiadomień.
+            runCatching {
+                diagnosticRun.measure(DiagnosticSyncStage.DESCRIPTION) {
+                    descriptionBackfill.enrichExistingHistory(
+                        settings = settings,
+                        diagnosticRun = diagnosticRun,
+                    )
+                }
+            }.onFailure { error ->
+                diagnosticRun.event(
+                    name = "DESCRIPTION_STAGE_FAILED",
+                    category = DiagnosticCategory.HISTORY,
+                    level = DiagnosticLevel.WARNING,
+                    reason = DiagnosticReasonCode.DESCRIPTION_STAGE_FAILED,
+                    fields = mapOf("errorType" to error.javaClass.simpleName),
+                )
+                AppLog.warning(
+                    "DescriptionBackfill",
+                    "Nie udało się uzupełnić części opisów",
+                    error,
+                )
+            }
+
             val outcome = SyncOutcome(
                 checkedSources = checkedSources,
                 detectedItems = detectedItems,
@@ -712,6 +738,10 @@ class SyncEngine(
         }
         val rssResult = rssRequest.await()
         val dataApiResult = dataApiRequest?.await()
+        // Sprzeczna tożsamość RSS unieważnia całe źródło. Nie wolno w tej
+        // sytuacji ratować wyniku API/Web, bo zostałby przypisany do twórcy,
+        // dla którego właśnie otrzymaliśmy niespójny dokument źródłowy.
+        requireNoFeedIdentityFailure(rssResult)
         if (rssResult.isFailure) diagnosticRun.sourceError(DiagnosticYouTubeSource.RSS)
         if (dataApiResult?.isFailure == true) {
             diagnosticRun.sourceError(DiagnosticYouTubeSource.DATA_API)

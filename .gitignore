@@ -14,11 +14,18 @@ app/build
 *.apk
 *.aab
 *.apks
+# Każdy ręczny ZIP w katalogu głównym (np. przez przypadkowe spakowanie całego
+# katalogu roboczego zamiast tools/New-SourceArchive.ps1) — nigdy nie
+# wersjonujemy takiej kopii, bo może zawierać local.properties i .idea.
+/*.zip
 *.inspect.ndjson
 /tools/input/*.xlsx
 /tmp/
 __pycache__/
 *.py[cod]
+
+# Stan sesji asystenta (blokada procesu, nie treść projektu)
+/.claude/
 
 # Nigdy nie publikuj kluczy podpisu ani haseł
 *.jks

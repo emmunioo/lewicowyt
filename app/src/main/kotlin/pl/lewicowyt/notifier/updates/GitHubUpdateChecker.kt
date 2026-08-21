@@ -30,6 +30,14 @@ data class AvailableUpdate(
     val sha256Digest: String?,
     val releaseNotes: String,
     val policy: UpdatePolicy = UpdatePolicy.OPTIONAL,
+    val releaseAssets: Map<String, ReleaseAsset> = emptyMap(),
+)
+
+data class ReleaseAsset(
+    val name: String,
+    val downloadUrl: String,
+    val sizeBytes: Long,
+    val sha256Digest: String?,
 )
 
 class GitHubUpdateChecker(
@@ -268,23 +276,41 @@ private fun installableReleaseCandidates(
                 }
 
                 val assets = release.optJSONArray("assets") ?: return@runCatching null
-                val apk = (0 until assets.length())
+                val releaseAssets = (0 until assets.length())
                     .mapNotNull(assets::optJSONObject)
-                    .firstOrNull { asset ->
+                    .mapNotNull { asset ->
                         val name = asset.optString("name").trim()
-                        name.length in 1..MAX_ASSET_NAME_CHARS &&
-                            name.endsWith(".apk", ignoreCase = true)
+                        val size = asset.optLong("size")
+                        if (!isSafeReleaseAssetName(name) || size !in 1..MAX_RELEASE_ASSET_BYTES) {
+                            return@mapNotNull null
+                        }
+                        val downloadUrl = requireSafeGitHubReleaseUrl(
+                            value = asset.getString("browser_download_url"),
+                            repository = repository,
+                        )
+                        ReleaseAsset(
+                            name = name,
+                            downloadUrl = downloadUrl,
+                            sizeBytes = size,
+                            sha256Digest = asset.optString("digest")
+                                .takeIf { it.startsWith("sha256:") }
+                                ?.removePrefix("sha256:")
+                                ?.takeIf(SHA256::matches)
+                                ?.lowercase(),
+                        )
                     }
+                    .associateBy(ReleaseAsset::name)
+                val apk = releaseAssets.values.firstOrNull { asset ->
+                    asset.name.endsWith(".apk", ignoreCase = true) &&
+                        asset.sizeBytes <= MAX_APK_SIZE_BYTES
+                }
                     ?: return@runCatching null
-                val apkName = apk.optString("name").trim()
+                val apkName = apk.name
                 val releasePageUrl = requireSafeGitHubReleaseUrl(
                     value = release.getString("html_url"),
                     repository = repository,
                 )
-                val apkDownloadUrl = requireSafeGitHubReleaseUrl(
-                    value = apk.getString("browser_download_url"),
-                    repository = repository,
-                )
+                val apkDownloadUrl = apk.downloadUrl
                 ReleaseCandidate(
                     version = version,
                     update = AvailableUpdate(
@@ -292,15 +318,12 @@ private fun installableReleaseCandidates(
                         releasePageUrl = releasePageUrl,
                         apkDownloadUrl = apkDownloadUrl,
                         apkName = apkName,
-                        apkSizeBytes = apk.optLong("size")
-                            .takeIf { it in 1..MAX_APK_SIZE_BYTES },
-                        sha256Digest = apk.optString("digest")
-                            .takeIf { it.startsWith("sha256:") }
-                            ?.removePrefix("sha256:")
-                            ?.takeIf(SHA256::matches),
+                        apkSizeBytes = apk.sizeBytes,
+                        sha256Digest = apk.sha256Digest,
                         releaseNotes = release.optString("body")
                             .trim()
                             .take(MAX_RELEASE_NOTES_CHARS),
+                        releaseAssets = releaseAssets,
                     ),
                 )
             }.getOrNull()
@@ -316,6 +339,17 @@ private const val MAX_VERSION_CHARS = 100
 private const val MAX_ASSET_NAME_CHARS = 200
 private const val MAX_RELEASE_NOTES_CHARS = 20_000
 private const val MAX_APK_SIZE_BYTES = 200L * 1024L * 1024L
+private const val MAX_RELEASE_ASSET_BYTES = 200L * 1024L * 1024L
+
+internal fun isSafeReleaseAssetName(value: String): Boolean =
+    value.length in 1..MAX_ASSET_NAME_CHARS &&
+        !value.contains("..") &&
+        '/' !in value &&
+        '\\' !in value &&
+        value.none(Char::isISOControl) &&
+        SAFE_ASSET_NAME.matches(value)
+
+private val SAFE_ASSET_NAME = Regex("""[A-Za-z0-9._-]+""")
 
 internal fun requireSafeGitHubReleaseUrl(value: String, repository: String): String {
     val uri = runCatching { URI(value) }.getOrNull()

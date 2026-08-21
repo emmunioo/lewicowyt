@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.StatFs
 import androidx.core.app.NotificationCompat
 import androidx.core.content.pm.PackageInfoCompat
 import java.io.File
@@ -15,6 +16,9 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
@@ -38,8 +42,17 @@ class AppUpdateManager(
     private val notificationManager = context.getSystemService(NotificationManager::class.java)
     private val updatesDirectory = File(context.cacheDir, UPDATE_CACHE_DIRECTORY)
     private val pendingApk = File(updatesDirectory, PENDING_APK_NAME)
+    private val deltaFailureStore = DeltaFailureStore(context)
+    private val patchDecoder: VcdiffPatchDecoder = StreamingVcdiffPatchDecoder()
 
-    fun prepare(update: AvailableUpdate): PreparedUpdate {
+    suspend fun prepare(update: AvailableUpdate): PreparedUpdate {
+        val apkFile = PROCESS_UPDATE_PREPARATION.run(update.preparationTargetKey()) {
+            prepareSerialized(update)
+        }
+        return PreparedUpdate(update, apkFile)
+    }
+
+    private suspend fun prepareSerialized(update: AvailableUpdate): File {
         DiagnosticLogStore.event(
             DiagnosticCategory.UPDATE,
             DiagnosticLevel.INFO,
@@ -52,10 +65,12 @@ class AppUpdateManager(
         if (pendingApk.isFile) {
             runCatching {
                 validateApk(pendingApk, update)
-                return PreparedUpdate(update, pendingApk)
+                return pendingApk
             }
             pendingApk.delete()
         }
+
+        prepareDeltaOrNull(update)?.let { return it }
 
         val temporaryApk = File(updatesDirectory, "$PENDING_APK_NAME.part")
         temporaryApk.delete()
@@ -75,14 +90,149 @@ class AppUpdateManager(
                 temporaryApk.copyTo(pendingApk, overwrite = true)
                 temporaryApk.delete()
             }
-            return PreparedUpdate(update, pendingApk)
+            return pendingApk
         } catch (error: Exception) {
             temporaryApk.delete()
             throw error
         }
     }
 
+    private suspend fun prepareDeltaOrNull(update: AvailableUpdate): File? {
+        val manifestAsset = update.releaseAssets[DELTA_MANIFEST_ASSET_NAME]
+            ?: return null
+        val manifestFile = File(updatesDirectory, DELTA_MANIFEST_ASSET_NAME)
+        val patchFile = File(updatesDirectory, DELTA_PATCH_TEMP_NAME)
+        val reconstructedApk = File(updatesDirectory, DELTA_TARGET_TEMP_NAME)
+        listOf(manifestFile, patchFile, reconstructedApk).forEach(File::delete)
+
+        var selected: SelectedDelta? = null
+        var patchVerified = false
+        try {
+            downloadAsset(
+                downloadUrl = manifestAsset.downloadUrl,
+                expectedName = manifestAsset.name,
+                expectedSha256 = manifestAsset.sha256Digest,
+                declaredSize = manifestAsset.sizeBytes,
+                maximumBytes = MAX_DELTA_MANIFEST_BYTES.toLong(),
+                target = manifestFile,
+                accept = "application/json",
+                kind = "manifest",
+            )
+            val manifest = DeltaUpdateManifestParser.parse(
+                manifestFile.readText(Charsets.UTF_8),
+            )
+            val installed = installedApkIdentity()
+            val selection = selectDeltaUpdate(
+                manifest = manifest,
+                update = update,
+                installed = installed,
+                rejectedFingerprint = deltaFailureStore.rejectedFingerprint(),
+            )
+            if (selection is DeltaSelectionResult.UseFullApk) {
+                diagnosticDelta("DELTA_SKIPPED", selection.reason)
+                return null
+            }
+            selected = (selection as DeltaSelectionResult.UseDelta).selected
+            deltaFailureStore.clearIfDifferent(selected.fingerprint)
+            diagnosticDelta(
+                event = "DELTA_ELIGIBLE",
+                fields = mapOf(
+                    "fromVersion" to selected.entry.fromVersionName,
+                    "patchBytes" to selected.entry.patchSize,
+                    "targetBytes" to selected.target.apkSize,
+                ),
+            )
+
+            downloadAsset(
+                downloadUrl = selected.asset.downloadUrl,
+                expectedName = selected.entry.patchName,
+                expectedSha256 = selected.entry.patchSha256,
+                declaredSize = selected.entry.patchSize,
+                maximumBytes = MAX_DELTA_PATCH_BYTES,
+                target = patchFile,
+                accept = "application/octet-stream",
+                kind = "delta",
+            )
+            patchVerified = true
+            diagnosticDelta("DELTA_PATCH_VERIFIED")
+
+            val requiredFreeBytes = selected.target.apkSize + MIN_DELTA_WORKSPACE_BYTES
+            if (StatFs(updatesDirectory.absolutePath).availableBytes < requiredFreeBytes) {
+                throw DeltaPreparationException(
+                    DeltaFallbackReason.DELTA_NO_SPACE,
+                    "Brak miejsca na bezpieczne odtworzenie APK.",
+                )
+            }
+
+            val coroutineContext = currentCoroutineContext()
+            try {
+                patchDecoder.apply(
+                    sourceApk = File(context.applicationInfo.sourceDir),
+                    patch = patchFile,
+                    targetApk = reconstructedApk,
+                    cancellationCheck = PatchCancellationCheck {
+                        coroutineContext.ensureActive()
+                    },
+                )
+            } catch (unavailable: LinkageError) {
+                throw DeltaPreparationException(
+                    DeltaFallbackReason.DELTA_DECODER_UNAVAILABLE,
+                    "Dekoder VCDIFF nie jest dostępny.",
+                    unavailable,
+                )
+            }
+            val actualTargetHash = sha256(reconstructedApk)
+            if (!actualTargetHash.equals(selected.target.apkSha256, ignoreCase = true)) {
+                throw DeltaPreparationException(
+                    DeltaFallbackReason.DELTA_TARGET_HASH_MISMATCH,
+                    "Suma SHA-256 odtworzonego APK jest nieprawidłowa.",
+                )
+            }
+            try {
+                validateApk(reconstructedApk, update)
+            } catch (error: ApkValidationException) {
+                throw DeltaPreparationException(error.deltaReason, error.message.orEmpty(), error)
+            }
+            moveToPending(reconstructedApk)
+            diagnosticDelta(
+                event = "DELTA_SUCCESS",
+                fields = mapOf(
+                    "patchBytes" to selected.entry.patchSize,
+                    "savedBytes" to (selected.target.apkSize - selected.entry.patchSize),
+                ),
+            )
+            return pendingApk
+        } catch (cancelled: CancellationException) {
+            diagnosticDelta("DELTA_FALLBACK_FULL", DeltaFallbackReason.DELTA_CANCELLED)
+            throw cancelled
+        } catch (error: Exception) {
+            val reason = when (error) {
+                is DeltaPreparationException -> error.reason
+                is SecurityException -> DeltaFallbackReason.DELTA_MANIFEST_INVALID
+                is IOException -> DeltaFallbackReason.DELTA_IO_ERROR
+                else -> DeltaFallbackReason.DELTA_APPLY_FAILED
+            }
+            if (patchVerified && selected != null && reason.deterministic) {
+                deltaFailureStore.reject(selected.fingerprint)
+            }
+            diagnosticDelta(
+                event = "DELTA_FALLBACK_FULL",
+                reason = reason,
+                fields = mapOf("error" to error.javaClass.simpleName),
+            )
+            return null
+        } finally {
+            listOf(manifestFile, patchFile, reconstructedApk).forEach(File::delete)
+        }
+    }
+
     fun removeStalePreparedUpdate() {
+        listOf(
+            File(updatesDirectory, DELTA_MANIFEST_ASSET_NAME),
+            File(updatesDirectory, DELTA_PATCH_TEMP_NAME),
+            File(updatesDirectory, DELTA_TARGET_TEMP_NAME),
+            File(updatesDirectory, "$PENDING_APK_NAME.part"),
+        ).forEach(File::delete)
         if (!pendingApk.isFile) return
         val packageManager = context.packageManager
         val archive = packageInfoFromArchive(packageManager, pendingApk)
@@ -191,10 +341,35 @@ class AppUpdateManager(
         )
     }
 
-    private fun downloadApk(update: AvailableUpdate, target: File) {
+    private suspend fun downloadApk(update: AvailableUpdate, target: File) {
+        downloadAsset(
+            downloadUrl = update.apkDownloadUrl,
+            expectedName = update.apkName,
+            expectedSha256 = update.sha256Digest,
+            declaredSize = update.apkSizeBytes,
+            maximumBytes = MAX_APK_BYTES,
+            target = target,
+            accept = "application/vnd.android.package-archive",
+            kind = "APK",
+        )
+    }
+
+    private suspend fun downloadAsset(
+        downloadUrl: String,
+        expectedName: String,
+        expectedSha256: String?,
+        declaredSize: Long?,
+        maximumBytes: Long,
+        target: File,
+        accept: String,
+        kind: String,
+    ) {
+        if (declaredSize != null && declaredSize !in 1..maximumBytes) {
+            throw IOException("Plik $kind ma niedozwolony rozmiar.")
+        }
         val request = Request.Builder()
-            .url(update.apkDownloadUrl)
-            .header("Accept", "application/vnd.android.package-archive")
+            .url(downloadUrl)
+            .header("Accept", accept)
             .header("User-Agent", "lewicowYT-updater")
             .build()
         val client = httpClient.newBuilder()
@@ -205,14 +380,17 @@ class AppUpdateManager(
             .callTimeout(5, TimeUnit.MINUTES)
             .build()
 
-        openApkResponse(client, request).use { response ->
+        openReleaseAssetResponse(client, request, expectedName).use { response ->
             if (!response.request.url.isHttps) {
                 throw IOException("Przekierowanie pobierania nie używa HTTPS.")
             }
             val body = response.body
             val declaredLength = body.contentLength()
-            if (declaredLength > MAX_APK_BYTES) {
-                throw IOException("Plik aktualizacji przekracza dozwolony rozmiar.")
+            if (
+                declaredLength > maximumBytes ||
+                (declaredSize != null && declaredLength >= 0L && declaredLength != declaredSize)
+            ) {
+                throw IOException("Rozmiar pliku $kind nie odpowiada metadanym wydania.")
             }
 
             val digest = MessageDigest.getInstance("SHA-256")
@@ -221,11 +399,12 @@ class AppUpdateManager(
                 FileOutputStream(target).use { output ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                     while (true) {
+                        currentCoroutineContext().ensureActive()
                         val count = input.read(buffer)
                         if (count < 0) break
                         copied += count
-                        if (copied > MAX_APK_BYTES) {
-                            throw IOException("Plik aktualizacji przekracza dozwolony rozmiar.")
+                        if (copied > maximumBytes) {
+                            throw IOException("Plik $kind przekracza dozwolony rozmiar.")
                         }
                         digest.update(buffer, 0, count)
                         output.write(buffer, 0, count)
@@ -233,9 +412,11 @@ class AppUpdateManager(
                     output.fd.sync()
                 }
             }
-            if (copied <= 0L) throw IOException("GitHub zwrócił pusty plik APK.")
+            if (declaredSize != null && copied != declaredSize) {
+                throw IOException("Pobrany rozmiar pliku $kind nie odpowiada metadanym wydania.")
+            }
 
-            update.sha256Digest?.let { expected ->
+            expectedSha256?.let { expected ->
                 val actual = digest.digest().joinToString("") { "%02x".format(it) }
                 if (!actual.equals(expected, ignoreCase = true)) {
                     DiagnosticLogStore.event(
@@ -244,7 +425,14 @@ class AppUpdateManager(
                         "SHA256_FAILED",
                         reason = DiagnosticReasonCode.SHA256_MISMATCH,
                     )
-                    throw SecurityException("Suma SHA-256 pobranego APK jest nieprawidłowa.")
+                    throw DeltaPreparationException(
+                        if (kind == "delta") {
+                            DeltaFallbackReason.DELTA_PATCH_HASH_MISMATCH
+                        } else {
+                            DeltaFallbackReason.DELTA_MANIFEST_INVALID
+                        },
+                        "Suma SHA-256 pobranego pliku $kind jest nieprawidłowa.",
+                    )
                 }
                 DiagnosticLogStore.event(
                     DiagnosticCategory.UPDATE,
@@ -255,10 +443,15 @@ class AppUpdateManager(
         }
     }
 
-    private fun openApkResponse(client: OkHttpClient, initialRequest: Request): Response {
-        var currentUrl = requireSafeApkDownloadUrl(
+    private fun openReleaseAssetResponse(
+        client: OkHttpClient,
+        initialRequest: Request,
+        expectedName: String,
+    ): Response {
+        var currentUrl = requireSafeReleaseAssetDownloadUrl(
             value = initialRequest.url.toString(),
             allowGitHubAssetHost = false,
+            expectedName = expectedName,
         )
         repeat(MAX_APK_REDIRECTS + 1) {
             val request = initialRequest.newBuilder().url(currentUrl).build()
@@ -271,9 +464,10 @@ class AppUpdateManager(
                     throw IOException("GitHub zwrócił nieprawidłowe przekierowanie APK.")
                 }
                 currentUrl = try {
-                    val accepted = requireSafeApkDownloadUrl(
+                    val accepted = requireSafeReleaseAssetDownloadUrl(
                         value = redirected.toString(),
                         allowGitHubAssetHost = true,
+                        expectedName = expectedName,
                     )
                     DiagnosticLogStore.event(
                         DiagnosticCategory.UPDATE,
@@ -304,13 +498,74 @@ class AppUpdateManager(
             }
             return response
         }
-        throw IOException("GitHub przekroczył limit przekierowań podczas pobierania APK.")
+        throw IOException("GitHub przekroczył limit przekierowań podczas pobierania pliku wydania.")
+    }
+
+    private fun installedApkIdentity(): InstalledApkIdentity {
+        val info = installedPackageInfo(context.packageManager)
+        val sourceApk = File(context.applicationInfo.sourceDir)
+        if (!sourceApk.isFile || sourceApk.length() !in 1..MAX_RECONSTRUCTED_APK_BYTES) {
+            throw DeltaPreparationException(
+                DeltaFallbackReason.DELTA_SOURCE_HASH_MISMATCH,
+                "Nie można bezpiecznie odczytać zainstalowanego bazowego APK.",
+            )
+        }
+        return InstalledApkIdentity(
+            versionName = normalizeVersion(info.versionName),
+            versionCode = PackageInfoCompat.getLongVersionCode(info),
+            apkSha256 = sha256(sourceApk),
+        )
+    }
+
+    private fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().buffered().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun moveToPending(source: File) {
+        if (pendingApk.exists() && !pendingApk.delete()) {
+            throw IOException("Nie można zastąpić poprzedniego pliku aktualizacji.")
+        }
+        if (!source.renameTo(pendingApk)) {
+            source.copyTo(pendingApk, overwrite = true)
+            source.delete()
+        }
+    }
+
+    private fun diagnosticDelta(
+        event: String,
+        reason: DeltaFallbackReason? = null,
+        fields: Map<String, Any?> = emptyMap(),
+    ) {
+        if (!DiagnosticLogStore.isEnabled()) return
+        DiagnosticLogStore.event(
+            DiagnosticCategory.UPDATE,
+            if (event == "DELTA_SUCCESS" || event == "DELTA_ELIGIBLE" || event == "DELTA_PATCH_VERIFIED") {
+                DiagnosticLevel.INFO
+            } else {
+                DiagnosticLevel.WARNING
+            },
+            event,
+            reason = reason?.toDiagnosticReasonCode(),
+            fields = fields,
+        )
     }
 
     private fun validateApk(file: File, update: AvailableUpdate) {
         val packageManager = context.packageManager
         val archiveInfo = packageInfoFromArchive(packageManager, file)
-            ?: throw SecurityException("Pobrany plik nie jest poprawnym APK.")
+            ?: throw ApkValidationException(
+                DeltaFallbackReason.DELTA_FORMAT_INVALID,
+                "Pobrany plik nie jest poprawnym APK.",
+            )
         val installedInfo = installedPackageInfo(packageManager)
 
         if (archiveInfo.packageName != context.packageName) {
@@ -320,21 +575,27 @@ class AppUpdateManager(
                 "PACKAGE_ID_FAILED",
                 reason = DiagnosticReasonCode.PACKAGE_ID_MISMATCH,
             )
-            throw SecurityException("APK ma inny identyfikator aplikacji.")
+            throw ApkValidationException(
+                DeltaFallbackReason.DELTA_TARGET_PACKAGE_INVALID,
+                "APK ma inny identyfikator aplikacji.",
+            )
         }
         DiagnosticLogStore.event(
             DiagnosticCategory.UPDATE,
             DiagnosticLevel.INFO,
             "PACKAGE_ID_OK",
         )
-        if (!signingCertificates(archiveInfo).any { it in signingCertificates(installedInfo) }) {
+        if (!hasCompatibleSigningLineage(installedInfo, archiveInfo)) {
             DiagnosticLogStore.event(
                 DiagnosticCategory.UPDATE,
                 DiagnosticLevel.ERROR,
                 "SIGNATURE_FAILED",
                 reason = DiagnosticReasonCode.SIGNATURE_MISMATCH,
             )
-            throw SecurityException("APK nie jest podpisany kluczem zainstalowanej aplikacji.")
+            throw ApkValidationException(
+                DeltaFallbackReason.DELTA_TARGET_SIGNATURE_INVALID,
+                "APK nie jest podpisany kluczem zainstalowanej aplikacji.",
+            )
         }
         DiagnosticLogStore.event(
             DiagnosticCategory.UPDATE,
@@ -356,7 +617,8 @@ class AppUpdateManager(
             } else {
                 ""
             }
-            throw SecurityException(
+            throw ApkValidationException(
+                DeltaFallbackReason.DELTA_TARGET_VERSION_INVALID,
                 "Android odrzuci APK, ponieważ jego versionCode nie jest wyższy.$rollbackHint",
             )
         }
@@ -367,7 +629,10 @@ class AppUpdateManager(
             fields = mapOf("versionCode" to archiveCode),
         )
         if (normalizeVersion(archiveInfo.versionName) != normalizeVersion(update.version)) {
-            throw SecurityException("Wersja wewnątrz APK nie odpowiada wydaniu GitHub.")
+            throw ApkValidationException(
+                DeltaFallbackReason.DELTA_TARGET_VERSION_INVALID,
+                "Wersja wewnątrz APK nie odpowiada wydaniu GitHub.",
+            )
         }
     }
 
@@ -395,17 +660,41 @@ class AppUpdateManager(
     }
 
     @Suppress("DEPRECATION")
-    private fun signingCertificates(info: PackageInfo): Set<String> {
+    private fun hasCompatibleSigningLineage(
+        installed: PackageInfo,
+        candidate: PackageInfo,
+    ): Boolean {
+        val installedActive = activeSigningCertificates(installed)
+        val candidateActive = activeSigningCertificates(candidate)
+        if (installedActive.isEmpty() || candidateActive.isEmpty()) return false
+        if (installedActive == candidateActive) return true
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
+        val installedMultiple = installed.signingInfo?.hasMultipleSigners() == true
+        val candidateMultiple = candidate.signingInfo?.hasMultipleSigners() == true
+        if (installedMultiple || candidateMultiple) return false
+        // Legalna rotacja: aktywny certyfikat zainstalowanej wersji musi należeć
+        // do kryptograficznie zweryfikowanej historii kandydata. Kandydat
+        // podpisany wyłącznie dawnym kluczem nie zawiera aktywnego nowego
+        // certyfikatu i zostanie odrzucony.
+        return candidateSigningHistory(candidate).containsAll(installedActive)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun activeSigningCertificates(info: PackageInfo): Set<String> {
         val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            val signingInfo = info.signingInfo ?: return emptySet()
-            if (signingInfo.hasMultipleSigners()) {
-                signingInfo.apkContentsSigners
-            } else {
-                signingInfo.signingCertificateHistory
-            }
-        } else {
-            info.signatures
-        }
+            info.signingInfo?.apkContentsSigners ?: return emptySet()
+        } else info.signatures
+        return certificateDigests(signatures)
+    }
+
+    private fun candidateSigningHistory(info: PackageInfo): Set<String> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return emptySet()
+        val signingInfo = info.signingInfo ?: return emptySet()
+        if (signingInfo.hasMultipleSigners()) return emptySet()
+        return certificateDigests(signingInfo.signingCertificateHistory)
+    }
+
+    private fun certificateDigests(signatures: Array<out android.content.pm.Signature>?): Set<String> {
         return signatures.orEmpty().mapTo(mutableSetOf()) { signature ->
             MessageDigest.getInstance("SHA-256")
                 .digest(signature.toByteArray())
@@ -430,6 +719,9 @@ class AppUpdateManager(
         value.orEmpty().trim().removePrefix("v").removePrefix("V")
 
     companion object {
+        private val PROCESS_UPDATE_PREPARATION =
+            UpdatePreparationSingleFlight<UpdatePreparationTargetKey, File>()
+
         const val UPDATE_CACHE_DIRECTORY = "updates"
         const val PENDING_APK_NAME = "lewicowyt-update.apk"
         const val SECURITY_ROLLBACK_MESSAGE =
@@ -443,6 +735,9 @@ class AppUpdateManager(
         private const val PROJECT_REQUEST_CODE = 0x5552
         private const val MAX_NOTIFICATION_TEXT_CHARS = 180
         private const val MAX_APK_BYTES = 200L * 1024L * 1024L
+        private const val DELTA_PATCH_TEMP_NAME = "lewicowyt-update.xdelta.part"
+        private const val DELTA_TARGET_TEMP_NAME = "lewicowyt-update-reconstructed.apk.part"
+        private const val MIN_DELTA_WORKSPACE_BYTES = 8L * 1024L * 1024L
         private const val MAX_APK_REDIRECTS = 5
         private val APK_REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
     }
@@ -451,7 +746,20 @@ class AppUpdateManager(
 internal fun requireSafeApkDownloadUrl(
     value: String,
     allowGitHubAssetHost: Boolean,
+): HttpUrl = requireSafeReleaseAssetDownloadUrl(
+    value = value,
+    allowGitHubAssetHost = allowGitHubAssetHost,
+    expectedName = value.substringAfterLast('/').substringBefore('?').takeIf {
+        it.endsWith(".apk", ignoreCase = true)
+    } ?: "update.apk",
+)
+
+internal fun requireSafeReleaseAssetDownloadUrl(
+    value: String,
+    allowGitHubAssetHost: Boolean,
+    expectedName: String,
 ): HttpUrl {
+    require(isSafeReleaseAssetName(expectedName)) { "Nieprawidłowa nazwa pliku wydania" }
     val url = value.toHttpUrlOrNull()
     require(
         url != null &&
@@ -466,7 +774,7 @@ internal fun requireSafeApkDownloadUrl(
     val isGitHubRelease =
         host == "github.com" &&
             "/releases/download/" in url.encodedPath &&
-            url.encodedPath.endsWith(".apk", ignoreCase = true)
+            url.encodedPath.endsWith("/$expectedName", ignoreCase = true)
     val isGitHubAsset = allowGitHubAssetHost &&
         (host == "objects.githubusercontent.com" || host.endsWith(".githubusercontent.com"))
     require(isGitHubRelease || isGitHubAsset) {
@@ -474,5 +782,19 @@ internal fun requireSafeApkDownloadUrl(
     }
     return url
 }
+
+private class DeltaPreparationException(
+    val reason: DeltaFallbackReason,
+    message: String,
+    cause: Throwable? = null,
+) : IOException(message, cause)
+
+private class ApkValidationException(
+    val deltaReason: DeltaFallbackReason,
+    message: String,
+) : SecurityException(message)
+
+private fun DeltaFallbackReason.toDiagnosticReasonCode(): DiagnosticReasonCode =
+    DiagnosticReasonCode.valueOf(name)
 
 private fun String.toUri(): android.net.Uri = android.net.Uri.parse(this)

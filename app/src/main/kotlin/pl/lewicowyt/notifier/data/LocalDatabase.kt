@@ -4,9 +4,18 @@ import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
 import androidx.sqlite.SQLiteStatement
+import pl.lewicowyt.notifier.AppLog
+import pl.lewicowyt.notifier.diagnostics.DiagnosticCategory
+import pl.lewicowyt.notifier.diagnostics.DiagnosticLevel
+import pl.lewicowyt.notifier.diagnostics.DiagnosticLogStore
+import pl.lewicowyt.notifier.diagnostics.DiagnosticReasonCode
 import pl.lewicowyt.notifier.model.Creator
+import pl.lewicowyt.notifier.model.ConfirmedOlderMaterial
+import pl.lewicowyt.notifier.model.DescriptionAvailability
 import pl.lewicowyt.notifier.model.HistoryItem
+import pl.lewicowyt.notifier.model.MEMBERS_ONLY_DESCRIPTION_MARKER
 import pl.lewicowyt.notifier.model.PublishedAtEvidence
+import pl.lewicowyt.notifier.model.SCHEDULED_STREAM_DESCRIPTION_MARKER
 import pl.lewicowyt.notifier.model.VideoEntry
 import pl.lewicowyt.notifier.model.VideoKind
 import pl.lewicowyt.notifier.model.VideoKindDecision
@@ -29,6 +38,23 @@ data class CreatorAvatarMetadata(
     val sha256: String?,
     val checkedAtMillis: Long,
     val lastAttemptAtMillis: Long,
+)
+
+data class PendingDescription(
+    val videoId: String,
+    val creatorId: String,
+    val title: String,
+    val kind: VideoKind,
+)
+
+internal data class DescriptionStorageResult(
+    val saved: Boolean,
+    val originalBytes: Int,
+    val storedBytes: Int,
+    val codec: StoredDescriptionCodec,
+    val compressionMethod: String,
+    val dictionaryId: String?,
+    val dictionaryVersion: Int?,
 )
 
 internal data class DatabaseDiagnosticState(
@@ -89,11 +115,20 @@ class LocalDatabase(
                 writableDatabase.endTransaction()
             }
         }
+        runCatching { ensureVideoHistoryFtsCoverage(writableDatabase) }
+            .onFailure { error ->
+                AppLog.warning(
+                    "DatabaseFTS",
+                    "Nie udało się sprawdzić pokrycia indeksu FTS; dostępny jest fallback SQL",
+                    error,
+                )
+            }
     }
 
     private fun onCreate(db: BundledDatabase) {
         createSourceStateTable(db)
         createVideoHistoryTable(db)
+        createVideoHistoryFts(db)
         createCreatorMetadataTable(db)
         createNotificationInboxTable(db)
         createNotificationIdsTable(db)
@@ -312,6 +347,37 @@ class LocalDatabase(
                 db.execSQL("ALTER TABLE video_history DROP COLUMN description")
             }
         }
+        if (oldVersion < 25) {
+            db.execSQL("ALTER TABLE video_history ADD COLUMN description_data BLOB")
+            db.execSQL(
+                "ALTER TABLE video_history ADD COLUMN description_codec INTEGER NOT NULL DEFAULT 0",
+            )
+            db.execSQL("ALTER TABLE video_history ADD COLUMN description_dictionary_id TEXT")
+            db.execSQL("ALTER TABLE video_history ADD COLUMN description_dictionary_version INTEGER")
+            db.execSQL(
+                "ALTER TABLE video_history ADD COLUMN description_original_size INTEGER NOT NULL DEFAULT 0",
+            )
+            db.execSQL(
+                "ALTER TABLE video_history ADD COLUMN description_state INTEGER NOT NULL DEFAULT 0",
+            )
+            db.execSQL(
+                "ALTER TABLE video_history ADD COLUMN description_attempts INTEGER NOT NULL DEFAULT 0",
+            )
+            db.execSQL(
+                "ALTER TABLE video_history ADD COLUMN description_last_attempt_ms INTEGER NOT NULL DEFAULT 0",
+            )
+            createVideoHistoryFts(db)
+            db.execSQL(
+                """
+                INSERT INTO video_history_fts(video_id, title, creator_name, description)
+                SELECT video_id,
+                       replace(replace(title, 'Ł', 'L'), 'ł', 'l'),
+                       replace(replace(creator_name, 'Ł', 'L'), 'ł', 'l'),
+                       ''
+                FROM video_history
+                """.trimIndent(),
+            )
+        }
     }
 
     private fun createSourceStateTable(db: BundledDatabase) {
@@ -352,7 +418,15 @@ class LocalDatabase(
                 kind_evidence INTEGER NOT NULL DEFAULT 0,
                 published_evidence INTEGER NOT NULL DEFAULT 0,
                 is_favorite INTEGER NOT NULL DEFAULT 0,
-                favorited_ms INTEGER
+                favorited_ms INTEGER,
+                description_data BLOB,
+                description_codec INTEGER NOT NULL DEFAULT 0,
+                description_dictionary_id TEXT,
+                description_dictionary_version INTEGER,
+                description_original_size INTEGER NOT NULL DEFAULT 0,
+                description_state INTEGER NOT NULL DEFAULT 0,
+                description_attempts INTEGER NOT NULL DEFAULT 0,
+                description_last_attempt_ms INTEGER NOT NULL DEFAULT 0
             )
             """.trimIndent(),
         )
@@ -375,6 +449,94 @@ class LocalDatabase(
         db.execSQL(
             "CREATE INDEX IF NOT EXISTS idx_video_history_favorite " +
                 "ON video_history(is_favorite, published_ms DESC)",
+        )
+    }
+
+    private fun createVideoHistoryFts(db: BundledDatabase) {
+        db.execSQL(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS video_history_fts USING fts5(
+                video_id UNINDEXED,
+                title,
+                creator_name,
+                description,
+                tokenize = 'unicode61 remove_diacritics 2'
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TRIGGER IF NOT EXISTS video_history_fts_insert
+            AFTER INSERT ON video_history BEGIN
+                INSERT INTO video_history_fts(video_id, title, creator_name, description)
+                VALUES (
+                    new.video_id,
+                    replace(replace(new.title, 'Ł', 'L'), 'ł', 'l'),
+                    replace(replace(new.creator_name, 'Ł', 'L'), 'ł', 'l'),
+                    ''
+                );
+            END
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TRIGGER IF NOT EXISTS video_history_fts_delete
+            AFTER DELETE ON video_history BEGIN
+                DELETE FROM video_history_fts WHERE video_id = old.video_id;
+            END
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TRIGGER IF NOT EXISTS video_history_fts_update
+            AFTER UPDATE OF title, creator_name ON video_history BEGIN
+                UPDATE video_history_fts
+                SET title = replace(replace(new.title, 'Ł', 'L'), 'ł', 'l'),
+                    creator_name = replace(replace(new.creator_name, 'Ł', 'L'), 'ł', 'l')
+                WHERE video_id = new.video_id;
+            END
+            """.trimIndent(),
+        )
+    }
+
+    /** Naprawia bazy schema 25 utworzone przez wcześniejsze kompilacje testowe. */
+    private fun ensureVideoHistoryFtsCoverage(db: BundledDatabase) {
+        createVideoHistoryFts(db)
+        val missingBefore = db.rawQuery(
+            """
+            SELECT COUNT(*)
+            FROM video_history h
+            WHERE NOT EXISTS (
+                SELECT 1 FROM video_history_fts f WHERE f.video_id = h.video_id
+            )
+            """.trimIndent(),
+            null,
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else 0L }
+        if (missingBefore <= 0L) return
+        db.beginTransaction()
+        try {
+            db.execSQL(
+                """
+                INSERT INTO video_history_fts(video_id, title, creator_name, description)
+                SELECT h.video_id,
+                       replace(replace(h.title, 'Ł', 'L'), 'ł', 'l'),
+                       replace(replace(h.creator_name, 'Ł', 'L'), 'ł', 'l'),
+                       ''
+                FROM video_history h
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM video_history_fts f WHERE f.video_id = h.video_id
+                )
+                """.trimIndent(),
+            )
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        DiagnosticLogStore.event(
+            category = DiagnosticCategory.DATABASE,
+            level = DiagnosticLevel.WARNING,
+            name = "FTS_INDEX_REPAIRED",
+            fields = mapOf("restoredRows" to missingBefore),
         )
     }
 
@@ -1605,7 +1767,8 @@ class LocalDatabase(
         return readableDatabase.queryRows(
             """
             SELECT video_id, creator_id, creator_name, title, url,
-                   published_ms, detected_ms, kind, notified, origin, is_favorite
+                   published_ms, detected_ms, kind, notified, origin, is_favorite,
+                   description_data, description_codec, description_original_size
             FROM video_history
             WHERE kind = ?
               AND notified = 0
@@ -1633,7 +1796,8 @@ class LocalDatabase(
         return readableDatabase.queryRows(
             """
             SELECT video_id, creator_id, creator_name, title, url,
-                   published_ms, detected_ms, kind, notified, origin, is_favorite
+                   published_ms, detected_ms, kind, notified, origin, is_favorite,
+                   description_data, description_codec, description_original_size
             FROM video_history
             WHERE notified = 0
               AND kind NOT IN (?, ?)
@@ -1747,7 +1911,8 @@ class LocalDatabase(
         return readableDatabase.queryRows(
             """
             SELECT video_id, creator_id, creator_name, title, url,
-                   published_ms, detected_ms, kind, notified, origin, is_favorite
+                   published_ms, detected_ms, kind, notified, origin, is_favorite,
+                   description_data, description_codec, description_original_size
             FROM video_history
             WHERE classification_version = 0
               AND published_ms >= ?
@@ -1973,6 +2138,407 @@ class LocalDatabase(
     }
 
     @Synchronized
+    fun pendingDescriptions(
+        selectedCreatorIds: Set<String>,
+        cutoffMillis: Long,
+        limit: Int,
+        retryBeforeMillis: Long,
+    ): List<PendingDescription> {
+        if (selectedCreatorIds.isEmpty()) return emptyList()
+        val nowMillis = System.currentTimeMillis()
+        requeueExpiredScheduledDescriptionMarkers(nowMillis)
+        val placeholders = selectedCreatorIds.joinToString(",") { "?" }
+        return readableDatabase.queryRows(
+            """
+            SELECT video_id, creator_id, title, kind
+            FROM video_history
+            WHERE creator_id IN ($placeholders)
+              AND published_ms >= ?
+              AND description_state <> 1
+              AND (description_state <> 3 OR published_ms <= ?)
+              AND description_attempts < ?
+              AND description_last_attempt_ms <= ?
+            -- Gotowe do ponowienia błędy są nieliczne i mają twardy limit
+            -- prób. Obsługujemy je przed dużą kolejką nowych rekordów, aby
+            -- pojedyncza chwilowa awaria nie blokowała opisu przez wiele dni.
+            ORDER BY CASE WHEN description_state = 2 THEN 0 ELSE 1 END,
+                     description_last_attempt_ms ASC,
+                     published_ms DESC
+            LIMIT ?
+            """.trimIndent(),
+            arrayOf<Any>(
+                *selectedCreatorIds.toTypedArray(),
+                *descriptionPendingNumericArguments(
+                    cutoffMillis = cutoffMillis,
+                    scheduledBeforeMillis = nowMillis,
+                    maxAttempts = MAX_DESCRIPTION_ATTEMPTS,
+                    retryBeforeMillis = retryBeforeMillis,
+                    limit = limit.coerceIn(1, MAX_DESCRIPTION_BATCH),
+                ).toTypedArray(),
+            ),
+        ) { row ->
+            PendingDescription(
+                videoId = row.getText(0),
+                creatorId = row.getText(1),
+                title = row.getText(2),
+                kind = runCatching { VideoKind.valueOf(row.getText(3)) }
+                    .getOrDefault(VideoKind.VIDEO),
+            )
+        }
+    }
+
+    /**
+     * Starsze wersje zapisywały tymczasowy marker planowanego streamu jako
+     * końcowy opis (state=1). Marker jest krótki, więc kodek przechowuje go jako
+     * UTF-8. Po nadejściu terminu zmieniamy wyłącznie dokładnie ten marker na
+     * stan odnawialny; prawdziwych opisów planowanych transmisji nie ruszamy.
+     */
+    private fun requeueExpiredScheduledDescriptionMarkers(nowMillis: Long) {
+        writableDatabase.execSQL(
+            """
+            UPDATE video_history
+            SET description_state = 3,
+                description_attempts = 0,
+                description_last_attempt_ms = 0
+            WHERE description_state = 1
+              AND published_ms <= ?
+              AND description_codec = ?
+              AND CAST(description_data AS TEXT) = ?
+            """.trimIndent(),
+            arrayOf<Any>(
+                nowMillis,
+                StoredDescriptionCodec.UTF8.databaseValue,
+                SCHEDULED_STREAM_DESCRIPTION_MARKER,
+            ),
+        )
+    }
+
+    @Synchronized
+    fun saveDescription(videoId: String, description: String): Boolean =
+        saveDescriptionWithStats(videoId, description)?.saved == true
+
+    @Synchronized
+    internal fun saveDescriptionWithStats(
+        videoId: String,
+        description: String,
+    ): DescriptionStorageResult? {
+        if (!YOUTUBE_VIDEO_ID.matches(videoId)) return null
+        val searchable = DescriptionCodec.searchableText(description)
+        val encoded = runCatching { DescriptionCodec.encode(description) }.getOrNull()
+            ?: run {
+                recordDescriptionFailure(videoId)
+                return null
+            }
+        val db = writableDatabase
+        db.beginTransaction()
+        return try {
+            val updated = db.update(
+                "video_history",
+                ContentValues().apply {
+                    put("description_data", encoded.data)
+                    put("description_codec", encoded.codec.databaseValue)
+                    put("description_original_size", encoded.originalSize)
+                    put("description_state", descriptionStorageState(description))
+                    put("description_attempts", 0)
+                    put("description_last_attempt_ms", System.currentTimeMillis())
+                    if (encoded.dictionaryId == null) putNull("description_dictionary_id")
+                    else put("description_dictionary_id", encoded.dictionaryId)
+                    if (encoded.dictionaryVersion == null) {
+                        putNull("description_dictionary_version")
+                    } else {
+                        put("description_dictionary_version", encoded.dictionaryVersion)
+                    }
+                },
+                "video_id = ?",
+                arrayOf(videoId),
+            ) == 1
+            if (updated) {
+                db.execSQL(
+                    """
+                    UPDATE video_history_fts
+                    SET description = ?
+                    WHERE video_id = ?
+                    """.trimIndent(),
+                    arrayOf<Any>(normalizePolishSearchText(searchable), videoId),
+                )
+            }
+            db.setTransactionSuccessful()
+            DescriptionStorageResult(
+                saved = updated,
+                originalBytes = encoded.originalSize,
+                storedBytes = encoded.data.size,
+                codec = encoded.codec,
+                compressionMethod = when (encoded.codec) {
+                    StoredDescriptionCodec.ZSTD_5 -> if (encoded.dictionaryId != null) {
+                        "ZSTD_LEVEL_5_WITH_DICTIONARY"
+                    } else {
+                        "ZSTD_LEVEL_5_WITHOUT_DICTIONARY"
+                    }
+                    StoredDescriptionCodec.UTF8 -> "UTF8_UNCOMPRESSED"
+                    StoredDescriptionCodec.NONE -> "NONE"
+                },
+                dictionaryId = encoded.dictionaryId,
+                dictionaryVersion = encoded.dictionaryVersion,
+            )
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun recordDescriptionFailure(videoId: String): Boolean {
+        if (!YOUTUBE_VIDEO_ID.matches(videoId)) return false
+        return writableDatabase.update(
+            "video_history",
+            ContentValues().apply {
+                put("description_state", 2)
+                put("description_last_attempt_ms", System.currentTimeMillis())
+            },
+            "video_id = ? AND description_attempts < ?",
+            arrayOf<Any>(videoId, MAX_DESCRIPTION_ATTEMPTS),
+        ).also { updated ->
+            if (updated == 1) {
+                writableDatabase.execSQL(
+                    "UPDATE video_history SET description_attempts = description_attempts + 1 " +
+                        "WHERE video_id = ?",
+                    arrayOf<Any>(videoId),
+                )
+            }
+        } == 1
+    }
+
+    @Synchronized
+    fun searchHistory(
+        query: String,
+        selectedCreatorIds: Set<String>,
+        kinds: Set<VideoKind>,
+        cutoffMillis: Long,
+        favoritesOnly: Boolean,
+        limit: Int = 40,
+        offset: Int = 0,
+    ): HistorySearchResult {
+        val searchPlan = buildHistorySearchPlan(query)
+            ?: return HistorySearchResult(emptyList(), HistorySearchEngine.FTS5)
+        if (selectedCreatorIds.isEmpty() || kinds.isEmpty()) {
+            return HistorySearchResult(emptyList(), HistorySearchEngine.FTS5)
+        }
+        val creatorPlaceholders = selectedCreatorIds.joinToString(",") { "?" }
+        val kindPlaceholders = kinds.joinToString(",") { "?" }
+        val safeLimit = limit.coerceIn(1, MAX_FTS_PAGE_SIZE)
+        val safeOffset = offset.coerceAtLeast(0)
+        val candidateLimit = ((safeOffset + safeLimit) * SEARCH_CANDIDATE_MULTIPLIER)
+            .coerceIn(safeLimit, MAX_FTS_PAGE_SIZE)
+
+        fun executeFts(ftsQuery: String): List<HistoryItem> = readableDatabase.queryRows(
+            """
+            SELECT h.video_id, h.creator_id, h.creator_name, h.title, h.url,
+                   h.published_ms, h.detected_ms, h.kind, h.notified, h.origin,
+                   h.is_favorite, h.description_data, h.description_codec,
+                   h.description_original_size
+            FROM video_history_fts f
+            JOIN video_history h ON h.video_id = f.video_id
+            WHERE video_history_fts MATCH ?
+              AND h.creator_id IN ($creatorPlaceholders)
+              AND h.kind IN ($kindPlaceholders)
+              AND (h.published_ms >= ? OR h.is_favorite = 1)
+              AND (? = 0 OR h.is_favorite = 1)
+            ORDER BY bm25(video_history_fts, 0.0, 12.0, 5.0, 1.0),
+                     h.published_ms DESC
+            LIMIT ? OFFSET ?
+            """.trimIndent(),
+            arrayOf<Any>(
+                ftsQuery,
+                *selectedCreatorIds.toTypedArray(),
+                *kinds.map(VideoKind::name).toTypedArray(),
+                *historySearchNumericArguments(
+                    cutoffMillis = cutoffMillis,
+                    favoritesOnly = favoritesOnly,
+                    limit = candidateLimit,
+                    offset = 0,
+                ).toTypedArray(),
+            ),
+            mapper = ::readSearchHistoryItem,
+        )
+
+        val ftsAttempts = runCatching {
+            val strict = executeFts(searchPlan.strictQuery)
+            if (strict.isNotEmpty()) {
+                Triple(strict, HistorySearchStrategy.STRICT, false)
+            } else {
+                val relaxed = searchPlan.relaxedQuery
+                    ?.takeUnless { it == searchPlan.strictQuery }
+                    ?.let(::executeFts)
+                    .orEmpty()
+                if (relaxed.isNotEmpty()) {
+                    Triple(relaxed, HistorySearchStrategy.RELAXED, false)
+                } else {
+                    val typoCandidates = searchPlan.typoCandidateQuery
+                        ?.takeUnless { it == searchPlan.strictQuery || it == searchPlan.relaxedQuery }
+                        ?.let(::executeFts)
+                        .orEmpty()
+                    Triple(typoCandidates, HistorySearchStrategy.TYPO_TOLERANT, true)
+                }
+            }
+        }.onFailure { error ->
+            DiagnosticLogStore.event(
+                category = DiagnosticCategory.DATABASE,
+                level = DiagnosticLevel.WARNING,
+                name = "FTS_SEARCH_FAILED",
+                reason = DiagnosticReasonCode.FTS_QUERY_FAILED,
+                fields = mapOf("errorType" to error.javaClass.simpleName),
+            )
+        }.getOrNull()
+        if (ftsAttempts != null) {
+            val (candidates, strategy, requireTypoMatch) = ftsAttempts
+            val ranked = rankHistorySearchItems(
+                items = candidates,
+                query = query,
+                requireTypoMatch = requireTypoMatch,
+            ).drop(safeOffset).take(safeLimit)
+            if (ranked.isNotEmpty()) {
+                return HistorySearchResult(
+                    items = ranked,
+                    engine = HistorySearchEngine.FTS5,
+                    strategy = strategy,
+                )
+            }
+        }
+
+        val fallback = searchHistoryByTitleOrCreator(
+            query = query,
+            selectedCreatorIds = selectedCreatorIds,
+            kinds = kinds,
+            cutoffMillis = cutoffMillis,
+            favoritesOnly = favoritesOnly,
+            limit = limit,
+            offset = offset,
+        )
+        DiagnosticLogStore.event(
+            category = DiagnosticCategory.DATABASE,
+            level = DiagnosticLevel.INFO,
+            name = "LOCAL_SEARCH_FALLBACK",
+            fields = mapOf("resultCount" to fallback.size),
+        )
+        return HistorySearchResult(
+            items = fallback,
+            engine = HistorySearchEngine.SQL_FALLBACK,
+            strategy = HistorySearchStrategy.SQL_FALLBACK,
+        )
+    }
+
+    private fun searchHistoryByTitleOrCreator(
+        query: String,
+        selectedCreatorIds: Set<String>,
+        kinds: Set<VideoKind>,
+        cutoffMillis: Long,
+        favoritesOnly: Boolean,
+        limit: Int,
+        offset: Int,
+    ): List<HistoryItem> {
+        val tokens = searchTokens(query)
+        if (tokens.isEmpty()) return emptyList()
+        val creatorPlaceholders = selectedCreatorIds.joinToString(",") { "?" }
+        val kindPlaceholders = kinds.joinToString(",") { "?" }
+        val normalizedTitle = "lower(replace(replace(h.title, 'Ł', 'L'), 'ł', 'l'))"
+        val normalizedCreator =
+            "lower(replace(replace(h.creator_name, 'Ł', 'L'), 'ł', 'l'))"
+        val normalizedUtf8Description =
+            "lower(replace(replace(CAST(h.description_data AS TEXT), 'Ł', 'L'), 'ł', 'l'))"
+        val tokenVariants = tokens.map(::polishSearchPrefixVariants)
+        val tokenWhere = tokenVariants.joinToString(" AND ") { variants ->
+            variants.joinToString(prefix = "(", postfix = ")", separator = " OR ") {
+                "($normalizedTitle LIKE ? OR $normalizedCreator LIKE ? OR " +
+                    "(h.description_codec = ${StoredDescriptionCodec.UTF8.databaseValue} " +
+                    "AND $normalizedUtf8Description LIKE ?))"
+            }
+        }
+        val tokenArguments = tokenVariants.flatten().flatMap { token ->
+            listOf("%$token%", "%$token%", "%$token%")
+        }
+        return readableDatabase.queryRows(
+            """
+            SELECT h.video_id, h.creator_id, h.creator_name, h.title, h.url,
+                   h.published_ms, h.detected_ms, h.kind, h.notified, h.origin,
+                   h.is_favorite, h.description_data, h.description_codec,
+                   h.description_original_size
+            FROM video_history h
+            WHERE $tokenWhere
+              AND h.creator_id IN ($creatorPlaceholders)
+              AND h.kind IN ($kindPlaceholders)
+              AND (h.published_ms >= ? OR h.is_favorite = 1)
+              AND (? = 0 OR h.is_favorite = 1)
+            ORDER BY h.published_ms DESC
+            LIMIT ? OFFSET ?
+            """.trimIndent(),
+            arrayOf<Any>(
+                *tokenArguments.toTypedArray(),
+                *selectedCreatorIds.toTypedArray(),
+                *kinds.map(VideoKind::name).toTypedArray(),
+                *historySearchNumericArguments(
+                    cutoffMillis = cutoffMillis,
+                    favoritesOnly = favoritesOnly,
+                    limit = limit.coerceIn(1, MAX_FTS_PAGE_SIZE),
+                    offset = offset.coerceAtLeast(0),
+                ).toTypedArray(),
+            ),
+            mapper = ::readSearchHistoryItem,
+        )
+    }
+
+    private fun readSearchHistoryItem(row: SQLiteStatement): HistoryItem {
+        val description = readStoredDescription(row)
+        return readHistoryItem(row, descriptionAvailability(description)).copy(
+            descriptionSnippet = description
+                ?.takeUnless(::isInternalDescriptionMarker)
+                ?.take(MAX_DESCRIPTION_SNIPPET_CHARS),
+        )
+    }
+
+    @Synchronized
+    fun insertConfirmedFavorite(material: ConfirmedOlderMaterial): Boolean {
+        if (!YOUTUBE_VIDEO_ID.matches(material.videoId)) return false
+        val now = System.currentTimeMillis()
+        val inserted = writableDatabase.insertWithOnConflict(
+            "video_history",
+            null,
+            ContentValues().apply {
+                put("video_id", material.videoId)
+                put("creator_id", material.creatorId)
+                put("creator_name", material.creatorName)
+                put("title", material.title.take(MAX_TITLE_CHARS))
+                put("url", "https://www.youtube.com/watch?v=${material.videoId}")
+                put("published_ms", material.publishedAtMillis)
+                put("detected_ms", now)
+                put("kind", material.kind.name)
+                put("notified", 1)
+                put("notification_checked", 1)
+                put("classification_version", CURRENT_CLASSIFIER_VERSION)
+                put("kind_evidence", VideoKindEvidence.PLAYER_METADATA.rank)
+                put("published_evidence", PublishedAtEvidence.WEB_DATE.rank)
+                put("origin", VideoOrigin.YOUTUBE.name)
+                put("is_favorite", 1)
+                put("favorited_ms", now)
+            },
+            BundledDatabase.CONFLICT_IGNORE,
+        ) != -1L
+        if (!inserted) {
+            setFavorite(material.videoId, true)
+        }
+        material.description?.takeIf(String::isNotBlank)?.let {
+            saveDescription(material.videoId, it)
+        }
+        return inserted || readableDatabase.query(
+            "video_history",
+            arrayOf("video_id"),
+            "video_id = ? AND is_favorite = 1",
+            arrayOf(material.videoId),
+            null,
+            null,
+            null,
+        ).use { it.moveToFirst() }
+    }
+
+    @Synchronized
     fun setFavorite(videoId: String, favorite: Boolean): Boolean {
         if (!YOUTUBE_VIDEO_ID.matches(videoId)) return false
         val values = ContentValues().apply {
@@ -2081,7 +2647,8 @@ class LocalDatabase(
         return readableDatabase.queryRows(
             """
             SELECT video_id, creator_id, creator_name, title, url,
-                   published_ms, detected_ms, kind, notified, origin, is_favorite
+                   published_ms, detected_ms, kind, notified, origin, is_favorite,
+                   description_data, description_codec, description_original_size
             FROM video_history
             WHERE published_ms >= ? OR is_favorite = 1
             ORDER BY published_ms DESC, detected_ms DESC
@@ -2125,7 +2692,8 @@ class LocalDatabase(
             """
             SELECT h.video_id, h.creator_id, h.creator_name, h.title, h.url,
                    h.published_ms, h.detected_ms, h.kind, h.notified, h.origin,
-                   h.is_favorite
+                   h.is_favorite, h.description_data, h.description_codec,
+                   h.description_original_size
             FROM notification_inbox n
             JOIN video_history h ON h.video_id = n.video_id
             WHERE n.created_ms >= ?
@@ -2186,7 +2754,15 @@ class LocalDatabase(
         }
     }
 
-    private fun readHistoryItem(row: SQLiteStatement): HistoryItem = HistoryItem(
+    private fun readHistoryItem(row: SQLiteStatement): HistoryItem {
+        val description = readStoredDescription(row)
+        return readHistoryItem(row, descriptionAvailability(description))
+    }
+
+    private fun readHistoryItem(
+        row: SQLiteStatement,
+        descriptionAvailability: DescriptionAvailability,
+    ): HistoryItem = HistoryItem(
         videoId = row.getText(0),
         creatorId = row.getText(1),
         creatorName = row.getText(2),
@@ -2200,7 +2776,22 @@ class LocalDatabase(
         origin = runCatching { VideoOrigin.valueOf(row.getText(9)) }
             .getOrDefault(VideoOrigin.YOUTUBE),
         isFavorite = row.getLong(10) == 1L,
+        descriptionAvailability = descriptionAvailability,
     )
+
+    private fun readStoredDescription(row: SQLiteStatement): String? = DescriptionCodec.decode(
+        data = if (row.isNull(11)) null else row.getBlob(11),
+        codecValue = row.getLong(12).toInt(),
+        originalSize = row.getLong(13).toInt(),
+    )
+
+    private fun descriptionAvailability(description: String?): DescriptionAvailability = when {
+        description == null -> DescriptionAvailability.NONE
+        description == MEMBERS_ONLY_DESCRIPTION_MARKER -> DescriptionAvailability.MEMBERS_ONLY
+        description == SCHEDULED_STREAM_DESCRIPTION_MARKER ->
+            DescriptionAvailability.SCHEDULED_STREAM
+        else -> DescriptionAvailability.DOWNLOADED
+    }
 
     private fun compactDatabaseIfWorthwhile(db: BundledDatabase) {
         val pageCount = db.rawQuery("PRAGMA page_count", null).use { cursor ->
@@ -2220,16 +2811,263 @@ class LocalDatabase(
 
     private companion object {
         const val DATABASE_NAME = "lewicowyt_notifier.db"
-        const val DATABASE_VERSION = 24
+        const val DATABASE_VERSION = 25
         const val CURRENT_CLASSIFIER_VERSION = 1
         const val MAX_CHANNEL_TAB_PARAMS_CHARS = 2_048
         const val MAX_EVIDENCE_QUERY_IDS = 900
         const val MAX_CLASSIFICATION_ATTEMPTS = 3
         const val MAX_CLASSIFICATION_QUERY_IDS = 100
         const val MAX_RSS_KNOWN_VIDEO_IDS = 60
+        const val MAX_DESCRIPTION_ATTEMPTS = 3
+        const val MAX_DESCRIPTION_BATCH = 200
+        const val MAX_FTS_PAGE_SIZE = 100
+        const val MAX_DESCRIPTION_SNIPPET_CHARS = 320
+        const val MAX_TITLE_CHARS = 300
         const val DAY_MILLIS = 24L * 60L * 60L * 1000L
         const val MIN_FREE_PAGES_FOR_VACUUM = 128L
         val SHA_256 = Regex("[0-9a-f]{64}")
         val YOUTUBE_VIDEO_ID = Regex("[A-Za-z0-9_-]{11}")
     }
 }
+
+enum class HistorySearchEngine {
+    FTS5,
+    SQL_FALLBACK,
+}
+
+enum class HistorySearchStrategy {
+    STRICT,
+    RELAXED,
+    TYPO_TOLERANT,
+    SQL_FALLBACK,
+}
+
+data class HistorySearchResult(
+    val items: List<HistoryItem>,
+    val engine: HistorySearchEngine,
+    val strategy: HistorySearchStrategy = HistorySearchStrategy.STRICT,
+)
+
+internal data class HistorySearchPlan(
+    val tokens: List<String>,
+    val strictQuery: String,
+    val relaxedQuery: String?,
+    val typoCandidateQuery: String?,
+)
+
+internal fun buildHistorySearchPlan(value: String): HistorySearchPlan? {
+    val allTokens = searchTokens(value)
+    if (allTokens.isEmpty()) return null
+    val meaningful = allTokens.filterNot(POLISH_SEARCH_STOP_WORDS::contains)
+        .ifEmpty { allTokens }
+    val groups = meaningful.map(::buildFtsTokenGroup)
+    val strict = groups.joinToString(" AND ")
+    val relaxed = groups.takeIf { it.size > 1 }?.joinToString(" OR ")
+    val typoPrefixes = meaningful
+        .filter { it.length >= MIN_TYPO_SEARCH_CHARS }
+        .map { it.take(TYPO_CANDIDATE_PREFIX_CHARS.coerceAtMost(it.length - 1)) }
+        .distinct()
+    val typoQuery = typoPrefixes.takeIf { it.isNotEmpty() }
+        ?.joinToString(" OR ") { prefix -> quoteFtsPrefix(prefix) }
+    return HistorySearchPlan(
+        tokens = meaningful,
+        strictQuery = strict,
+        relaxedQuery = relaxed,
+        typoCandidateQuery = typoQuery,
+    )
+}
+
+internal fun buildFtsQuery(value: String): String? = buildHistorySearchPlan(value)?.strictQuery
+
+private fun buildFtsTokenGroup(token: String): String = polishSearchPrefixVariants(token)
+    .joinToString(prefix = "(", postfix = ")", separator = " OR ", transform = ::quoteFtsPrefix)
+
+private fun quoteFtsPrefix(value: String): String = "\"${value.replace("\"", "\"\"")}\"*"
+
+/**
+ * Podczas wpisywania polskich nazw wykonawców/ról rdzeń `-nik` często przechodzi
+ * w `-nic-` (np. pełnomocnik/pełnomocniczka). Bez tej małej alternatywy wynik
+ * znikał dokładnie po dopisaniu `c`, dopóki opis filmu nie został pobrany.
+ * Ograniczenie do dłuższych tokenów zakończonych `-nik`/`-nic` nie zamienia
+ * wyszukiwarki w kosztowne ani nadmiernie szerokie wyszukiwanie rozmyte.
+ */
+internal fun polishSearchPrefixVariants(token: String): List<String> {
+    val normalized = normalizePolishSearchText(token).lowercase()
+    if (normalized.length < MIN_POLISH_STEM_VARIANT_CHARS) return listOf(normalized)
+    val variants = linkedSetOf(normalized)
+    when {
+        normalized.endsWith("nik") -> variants += normalized.dropLast(1) + "c"
+        normalized.endsWith("nic") -> variants += normalized.dropLast(1) + "k"
+    }
+    POLISH_SEARCH_SUFFIXES.firstOrNull { suffix ->
+        normalized.endsWith(suffix) && normalized.length - suffix.length >= MIN_POLISH_STEM_CHARS
+    }?.let { suffix -> variants += normalized.dropLast(suffix.length) }
+    return variants.take(MAX_POLISH_VARIANTS_PER_TOKEN)
+}
+
+internal fun searchTokens(value: String): List<String> = normalizePolishSearchText(value)
+    .lowercase()
+    .split(Regex("[^\\p{L}\\p{N}_-]+"))
+    .filter(String::isNotBlank)
+    .take(12)
+
+internal fun normalizePolishSearchText(value: String): String = java.text.Normalizer
+    .normalize(value.replace('Ł', 'L').replace('ł', 'l'), java.text.Normalizer.Form.NFD)
+    .replace(Regex("\\p{M}+"), "")
+
+internal fun rankHistorySearchItems(
+    items: List<HistoryItem>,
+    query: String,
+    requireTypoMatch: Boolean = false,
+): List<HistoryItem> {
+    if (items.size < 2 && !requireTypoMatch) return items
+    val plan = buildHistorySearchPlan(query) ?: return emptyList()
+    val normalizedQuery = normalizePolishSearchText(query).lowercase().trim()
+    val scored = items.mapIndexedNotNull { index, item ->
+        val title = SearchableField(item.title, weight = 5)
+        val creator = SearchableField(item.creatorName, weight = 3)
+        val description = SearchableField(item.descriptionSnippet.orEmpty(), weight = 1)
+        val fields = listOf(title, creator, description)
+        val tokenScores = plan.tokens.map { token ->
+            fields.maxOf { field -> field.matchScore(token) }
+        }
+        val matchedTokens = tokenScores.count { it > 0 }
+        val requiredMatches = ((plan.tokens.size * MIN_RELAXED_MATCH_PERCENT) + 99) / 100
+        if (requireTypoMatch && matchedTokens < requiredMatches.coerceAtLeast(1)) return@mapIndexedNotNull null
+
+        var score = tokenScores.sum()
+        if (title.normalized == normalizedQuery) score += 1_200
+        else if (normalizedQuery.length >= 3 && title.normalized.contains(normalizedQuery)) score += 600
+        if (creator.normalized == normalizedQuery) score += 900
+        else if (normalizedQuery.length >= 3 && creator.normalized.contains(normalizedQuery)) score += 400
+        if (matchedTokens == plan.tokens.size) score += 300
+        score += matchedTokens * 80
+        RankedHistoryItem(item = item, score = score, originalIndex = index)
+    }
+    return scored.sortedWith(
+        compareByDescending<RankedHistoryItem> { it.score }
+            .thenBy { it.originalIndex },
+    ).map(RankedHistoryItem::item)
+}
+
+private data class RankedHistoryItem(
+    val item: HistoryItem,
+    val score: Int,
+    val originalIndex: Int,
+)
+
+private class SearchableField(value: String, private val weight: Int) {
+    val normalized = normalizePolishSearchText(value).lowercase()
+    private val words = normalized
+        .split(Regex("[^\\p{L}\\p{N}_-]+"))
+        .filter(String::isNotBlank)
+
+    fun matchScore(token: String): Int {
+        val variants = polishSearchPrefixVariants(token)
+        if (words.any { it == token }) return 120 * weight
+        if (words.any { word -> variants.any { variant -> word.startsWith(variant) } }) return 90 * weight
+        if (token.length < MIN_TYPO_SEARCH_CHARS) return 0
+        val maximumDistance = if (token.length >= 9) 2 else 1
+        return if (words.any { word ->
+                kotlin.math.abs(word.length - token.length) <= maximumDistance &&
+                    damerauLevenshteinDistance(token, word, maximumDistance) <= maximumDistance
+            }
+        ) 55 * weight else 0
+    }
+}
+
+/** Ograniczona wersja Damerau-Levenshteina; kończy wiersz, gdy nie może już zmieścić się w limicie. */
+internal fun damerauLevenshteinDistance(left: String, right: String, limit: Int): Int {
+    if (left == right) return 0
+    if (kotlin.math.abs(left.length - right.length) > limit) return limit + 1
+    var previousPrevious = IntArray(right.length + 1)
+    var previous = IntArray(right.length + 1) { it }
+    for (leftIndex in left.indices) {
+        val current = IntArray(right.length + 1)
+        current[0] = leftIndex + 1
+        var rowMinimum = current[0]
+        for (rightIndex in right.indices) {
+            val substitution = previous[rightIndex] +
+                if (left[leftIndex] == right[rightIndex]) 0 else 1
+            current[rightIndex + 1] = minOf(
+                current[rightIndex] + 1,
+                previous[rightIndex + 1] + 1,
+                substitution,
+            )
+            if (
+                leftIndex > 0 && rightIndex > 0 &&
+                left[leftIndex] == right[rightIndex - 1] &&
+                left[leftIndex - 1] == right[rightIndex]
+            ) {
+                current[rightIndex + 1] = minOf(
+                    current[rightIndex + 1],
+                    previousPrevious[rightIndex - 1] + 1,
+                )
+            }
+            rowMinimum = minOf(rowMinimum, current[rightIndex + 1])
+        }
+        if (rowMinimum > limit) return limit + 1
+        previousPrevious = previous
+        previous = current
+    }
+    return previous[right.length]
+}
+
+private const val MIN_POLISH_STEM_VARIANT_CHARS = 6
+private const val MIN_POLISH_STEM_CHARS = 4
+private const val MAX_POLISH_VARIANTS_PER_TOKEN = 3
+private const val MIN_TYPO_SEARCH_CHARS = 5
+private const val TYPO_CANDIDATE_PREFIX_CHARS = 4
+private const val MIN_RELAXED_MATCH_PERCENT = 60
+private const val SEARCH_CANDIDATE_MULTIPLIER = 3
+private val POLISH_SEARCH_SUFFIXES = listOf(
+    "owego", "owych", "owej", "owie", "ami", "ach", "ego", "emu",
+    "owa", "owe", "owy", "ie", "ia", "iu", "om", "a", "y", "i", "e", "u",
+)
+private val POLISH_SEARCH_STOP_WORDS = setOf(
+    "a", "i", "oraz", "w", "we", "z", "ze", "na", "do", "od", "o", "u",
+    "po", "za", "dla", "jak", "co", "to", "ten", "ta", "te", "jest", "sa",
+)
+
+/**
+ * Parametry liczbowe muszą pozostać liczbami podczas bindowania SQLite.
+ * Tekstowe "0" nie jest równe liczbowemu 0 w wyrażeniu `? = 0`, przez co
+ * zwykłe (nieulubione) rekordy były odrzucane przez obie ścieżki wyszukiwania.
+ */
+internal fun historySearchNumericArguments(
+    cutoffMillis: Long,
+    favoritesOnly: Boolean,
+    limit: Int,
+    offset: Int,
+): List<Any> = listOf(
+    cutoffMillis,
+    if (favoritesOnly) 1 else 0,
+    limit,
+    offset,
+)
+
+/**
+ * Selekcja opisów porównuje kolumny INTEGER i używa liczbowego LIMIT.
+ * Bindowanie tych wartości jako tekst powoduje w SQLite odrzucenie poprawnych
+ * rekordów jeszcze przed pobraniem opisu i zasileniem indeksu FTS5.
+ */
+internal fun descriptionPendingNumericArguments(
+    cutoffMillis: Long,
+    scheduledBeforeMillis: Long,
+    maxAttempts: Int,
+    retryBeforeMillis: Long,
+    limit: Int,
+): List<Any> = listOf(
+    cutoffMillis,
+    scheduledBeforeMillis,
+    maxAttempts,
+    retryBeforeMillis,
+    limit,
+)
+
+internal fun descriptionStorageState(description: String): Int =
+    if (description == SCHEDULED_STREAM_DESCRIPTION_MARKER) 3 else 1
+
+private fun isInternalDescriptionMarker(description: String): Boolean =
+    description == SCHEDULED_STREAM_DESCRIPTION_MARKER ||
+        description == MEMBERS_ONLY_DESCRIPTION_MARKER

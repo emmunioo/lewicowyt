@@ -79,6 +79,10 @@ class PreferencesRepository(private val context: Context) {
         APPEARANCE_BACKUP_NAME,
         Context.MODE_PRIVATE,
     )
+    private val scheduleBackup = context.getSharedPreferences(
+        SCHEDULE_BACKUP_NAME,
+        Context.MODE_PRIVATE,
+    )
 
     private object Keys {
         val selectedCreators = stringSetPreferencesKey("selected_creators")
@@ -136,6 +140,24 @@ class PreferencesRepository(private val context: Context) {
                 ?.getLong(APPEARANCE_BACKUP_ACCENT_KEY, DEFAULT_ACCENT_COLOR_ARGB)
                 ?.takeIf(::isValidAccentColor)
             val resolvedAccent = resolveAccentColor(storedAccent, backupAccent)
+            val storedInterval = preferences[Keys.intervalMinutes]
+                ?.takeIf(::isValidIntervalMinutes)
+            val backupInterval = scheduleBackup
+                .takeIf { it.contains(SCHEDULE_BACKUP_INTERVAL_KEY) }
+                ?.getInt(SCHEDULE_BACKUP_INTERVAL_KEY, DEFAULT_INTERVAL_MINUTES)
+            val resolvedInterval = resolveIntervalMinutes(storedInterval, backupInterval)
+            val storedDailyHour = preferences[Keys.dailyHour]
+                ?.takeIf(::isValidDailyHour)
+            val storedDailyMinute = preferences[Keys.dailyMinute]
+                ?.takeIf(::isValidDailyMinute)
+            val backupDailyHour = scheduleBackup
+                .takeIf { it.contains(SCHEDULE_BACKUP_DAILY_HOUR_KEY) }
+                ?.getInt(SCHEDULE_BACKUP_DAILY_HOUR_KEY, DEFAULT_DAILY_HOUR)
+            val backupDailyMinute = scheduleBackup
+                .takeIf { it.contains(SCHEDULE_BACKUP_DAILY_MINUTE_KEY) }
+                ?.getInt(SCHEDULE_BACKUP_DAILY_MINUTE_KEY, DEFAULT_DAILY_MINUTE)
+            val resolvedDailyHour = resolveDailyHour(storedDailyHour, backupDailyHour)
+            val resolvedDailyMinute = resolveDailyMinute(storedDailyMinute, backupDailyMinute)
             if (
                 storedAccent != null &&
                 appearanceBackup.getLong(
@@ -149,14 +171,28 @@ class PreferencesRepository(private val context: Context) {
                     .putLong(APPEARANCE_BACKUP_ACCENT_KEY, storedAccent)
                     .apply()
             }
+            if (
+                scheduleBackup.getInt(SCHEDULE_BACKUP_INTERVAL_KEY, -1) != resolvedInterval ||
+                scheduleBackup.getInt(SCHEDULE_BACKUP_DAILY_HOUR_KEY, -1) != resolvedDailyHour ||
+                scheduleBackup.getInt(SCHEDULE_BACKUP_DAILY_MINUTE_KEY, -1) != resolvedDailyMinute
+            ) {
+                // AlarmManager jest odbudowywany po aktualizacji procesu. Osobna
+                // kopia chroni harmonogram, gdy pojedynczy klucz DataStore jest
+                // chwilowo niedostępny albo zniknie podczas migracji ustawień.
+                scheduleBackup.edit()
+                    .putInt(SCHEDULE_BACKUP_INTERVAL_KEY, resolvedInterval)
+                    .putInt(SCHEDULE_BACKUP_DAILY_HOUR_KEY, resolvedDailyHour)
+                    .putInt(SCHEDULE_BACKUP_DAILY_MINUTE_KEY, resolvedDailyMinute)
+                    .apply()
+            }
             AppSettings(
                 selectedCreatorIds = preferences[Keys.selectedCreators].orEmpty(),
                 deselectedCreatorAtMillis = decodeDeselectedCreators(
                     preferences[Keys.deselectedCreators].orEmpty(),
                 ),
-                intervalMinutes = preferences[Keys.intervalMinutes] ?: 60,
-                dailyHour = (preferences[Keys.dailyHour] ?: 9).coerceIn(0, 23),
-                dailyMinute = (preferences[Keys.dailyMinute] ?: 0).coerceIn(0, 59),
+                intervalMinutes = resolvedInterval,
+                dailyHour = resolvedDailyHour,
+                dailyMinute = resolvedDailyMinute,
                 historyWindowDays = normalizeHistoryDays(
                     preferences[Keys.historyWindowDays] ?: 14,
                 ),
@@ -255,13 +291,23 @@ class PreferencesRepository(private val context: Context) {
     }
 
     suspend fun setIntervalMinutes(value: Int) {
-        context.settingsDataStore.edit { it[Keys.intervalMinutes] = value.coerceAtLeast(15) }
+        val normalized = normalizeIntervalMinutes(value)
+        scheduleBackup.edit()
+            .putInt(SCHEDULE_BACKUP_INTERVAL_KEY, normalized)
+            .commit()
+        context.settingsDataStore.edit { it[Keys.intervalMinutes] = normalized }
     }
 
     suspend fun setDailyTime(hour: Int, minute: Int) {
+        val normalizedHour = hour.coerceIn(0, 23)
+        val normalizedMinute = minute.coerceIn(0, 59)
+        scheduleBackup.edit()
+            .putInt(SCHEDULE_BACKUP_DAILY_HOUR_KEY, normalizedHour)
+            .putInt(SCHEDULE_BACKUP_DAILY_MINUTE_KEY, normalizedMinute)
+            .commit()
         context.settingsDataStore.edit {
-            it[Keys.dailyHour] = hour.coerceIn(0, 23)
-            it[Keys.dailyMinute] = minute.coerceIn(0, 59)
+            it[Keys.dailyHour] = normalizedHour
+            it[Keys.dailyMinute] = normalizedMinute
         }
     }
 
@@ -516,6 +562,10 @@ class PreferencesRepository(private val context: Context) {
         const val MAX_SYNC_SUMMARY_CHARS = 1_000
         const val APPEARANCE_BACKUP_NAME = "lewicowyt_appearance_backup"
         const val APPEARANCE_BACKUP_ACCENT_KEY = "accent_color_argb"
+        const val SCHEDULE_BACKUP_NAME = "lewicowyt_schedule_backup"
+        const val SCHEDULE_BACKUP_INTERVAL_KEY = "interval_minutes"
+        const val SCHEDULE_BACKUP_DAILY_HOUR_KEY = "daily_hour"
+        const val SCHEDULE_BACKUP_DAILY_MINUTE_KEY = "daily_minute"
 
         fun normalizeHistoryDays(value: Int): Int =
         if (value in HISTORY_WINDOWS) value else 14
@@ -571,6 +621,35 @@ internal fun resolveAccentColor(stored: Long?, backup: Long?): Long =
         ?: backup?.takeIf(::isValidAccentColor)
         ?: DEFAULT_ACCENT_COLOR_ARGB
 
+internal fun isValidIntervalMinutes(value: Int): Boolean =
+    value in MIN_INTERVAL_MINUTES..MAX_INTERVAL_MINUTES
+
+internal fun normalizeIntervalMinutes(value: Int): Int =
+    value.coerceIn(MIN_INTERVAL_MINUTES, MAX_INTERVAL_MINUTES)
+
+internal fun resolveIntervalMinutes(stored: Int?, backup: Int?): Int =
+    stored?.takeIf(::isValidIntervalMinutes)
+        ?: backup?.takeIf(::isValidIntervalMinutes)
+        ?: DEFAULT_INTERVAL_MINUTES
+
+internal fun isValidDailyHour(value: Int): Boolean = value in 0..23
+internal fun isValidDailyMinute(value: Int): Boolean = value in 0..59
+
+internal fun resolveDailyHour(stored: Int?, backup: Int?): Int =
+    stored?.takeIf(::isValidDailyHour)
+        ?: backup?.takeIf(::isValidDailyHour)
+        ?: DEFAULT_DAILY_HOUR
+
+internal fun resolveDailyMinute(stored: Int?, backup: Int?): Int =
+    stored?.takeIf(::isValidDailyMinute)
+        ?: backup?.takeIf(::isValidDailyMinute)
+        ?: DEFAULT_DAILY_MINUTE
+
 const val DEFAULT_ACCENT_COLOR_ARGB = 0xFFFF0000L
+internal const val DEFAULT_INTERVAL_MINUTES = 60
+internal const val DEFAULT_DAILY_HOUR = 9
+internal const val DEFAULT_DAILY_MINUTE = 0
+private const val MIN_INTERVAL_MINUTES = 15
+private const val MAX_INTERVAL_MINUTES = 1440
 private const val MIN_ARGB = 0xFF000000L
 private const val MAX_ARGB = 0xFFFFFFFFL

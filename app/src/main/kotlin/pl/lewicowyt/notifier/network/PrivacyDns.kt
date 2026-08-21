@@ -10,6 +10,7 @@ import okhttp3.Dns
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.dnsoverhttps.DnsOverHttps
+import pl.lewicowyt.notifier.diagnostics.DiagnosticNetworkUsage
 
 /**
  * Respects Android Private DNS when it is active. Otherwise it uses AdGuard
@@ -130,6 +131,7 @@ internal object PrivacyHttpClient {
         )
         return OkHttpClient.Builder()
             .dns(privacyDns)
+            .eventListenerFactory(DiagnosticNetworkUsage.eventListenerFactory())
             // Klienci nie podążają automatycznie za odpowiedzią niezaufanego
             // serwera do dowolnego hosta. Obrazy mają własną, jawną obsługę
             // przekierowań z allowlistą domen.

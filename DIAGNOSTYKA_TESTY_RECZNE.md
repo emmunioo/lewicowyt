@@ -23,3 +23,14 @@ diagnostyką, a po każdym scenariuszu zapisz snapshot i eksport GZIP.
   `reason=API_PLAYLIST_ITEMS_NOT_FOUND`, `operation=API_PLAYLIST_ITEMS` i `httpStatus=404`.
 - [ ] Brak listy kart kanału zapisuje `reason=CHANNEL_TABS_UNAVAILABLE` wraz z
   `creatorId` i `channelId`; późniejszy fallback nie gubi wspólnego `syncId`.
+- [ ] Udane „Znajdź starszy” zapisuje `OLDER_SEARCH_SUCCESS`, liczbę wyników,
+  `creatorId`, czas i transfer, ale nigdy treść wyszukiwanego tekstu.
+- [ ] Awaria „Znajdź starszy” zapisuje `OLDER_SEARCH_FAILED` i stabilny
+  `reasonCode`; potwierdzenie obcego kanału ma `OLDER_MATERIAL_CHANNEL_MISMATCH`.
+- [ ] Każda próba pobrania opisu ma `DESCRIPTION_FETCH` z wynikiem `SAVED`,
+  `EMPTY`, `SAVE_FAILED` albo `ERROR`, publicznym linkiem filmu i `creatorId`,
+  ale bez treści opisu.
+- [ ] Koniec partii opisów zawiera `DESCRIPTION_SUMMARY`, a koniec synchronizacji
+  `NETWORK_USAGE` z bajtami ciał HTTP wysłanymi, pobranymi i łącznie.
+- [ ] Ręczny snapshot zawiera `NETWORK_USAGE_PROCESS`; wartości dotyczą tylko
+  bieżącego procesu i ciał HTTP, bez nagłówków, TLS oraz DNS.

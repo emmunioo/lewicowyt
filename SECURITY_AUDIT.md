@@ -1,8 +1,23 @@
 # Audyt bezpieczeństwa
 
-Data ostatniej aktualizacji przeglądu kodu: 8 sierpnia 2026 r.
+Data ostatniej aktualizacji przeglądu kodu: 21 sierpnia 2026 r. (audyt różnicowy
+binarny 1.6.1-beta→1.7-beta na finalnych podpisanych APK).
 
-Wersja kodu: `1.6.1-beta` (`versionCode 17`).
+Wersja kodu: `1.7-beta` (`versionCode 18`).
+
+Wersja 1.7-beta tworzy schemat 25 z osobnym indeksem FTS5 i magazynem opisów
+Zstd/UTF-8. Wyszukiwanie zwykłej Historii jest lokalne. Sieć jest używana tylko
+przy jawnym wyszukiwaniu starszych materiałów oraz niekrytycznym, limitowanym
+uzupełnianiu opisów już zapisanych rekordów. Przy aktywnym kluczu opisy pochodzą
+z oficjalnego `videos.list?part=snippet`; klucz pozostaje w zaszyfrowanym
+magazynie i nie trafia do logów. Błąd lub brak pozycji uruchamia dotychczasowy
+fallback publicznego odtwarzacza Web. Starszy materiał przed dodaniem do
+Ulubionych musi zostać ponownie powiązany z kanałem wybranego twórcy.
+
+Powiadomienia mają `VISIBILITY_PRIVATE` i zanonimizowaną wersję publiczną.
+Walidacja aktualizacji wymaga aktywnego podpisującego albo poprawnej linii
+następstwa, zamiast dowolnego przecięcia całych historii certyfikatów. Narzędzia
+`cjxl.exe` i `yt-dlp.exe` są uruchamiane tylko przy zgodności przypiętego SHA-256.
 
 Wersja 1.6.1-beta rozszerza wspólny launcher linków o ReVanced, inne klienty
 YouTube oraz aplikację wybraną przez użytkownika. Przekazywany jest wyłącznie
@@ -16,20 +31,15 @@ kroków i muszą prowadzić przez HTTPS na `github.com`,
 Nie są przesyłane dane uwierzytelniające, a końcowy APK nadal podlega kontroli
 rozmiaru, SHA-256, pakietu, wersji i certyfikatu podpisującego.
 
-W tej wersji baza przechodzi ze składnika SQLite dostarczanego przez system
-Android na dołączony AndroidX SQLite Bundled. Jeden silnik otwiera cały plik
-bazy; nie są mieszane równoległe połączenia systemowe i bundled. Migracja do
-schematu 24 zachowuje rekordy i Ulubione. W 1.6-beta sprawdzana jest dostępność
-FTS5, ale produkcyjny indeks oraz magazyn opisów nie są jeszcze tworzone.
-Migracja usuwa także przedwczesny testowy indeks/pole opisu ze schematu 23 bez
-utraty historii. Właściwy magazyn Zstd BLOB i niezależny indeks powstaną dopiero
-w 1.7-beta.
+Jeden dołączony silnik AndroidX SQLite Bundled otwiera cały plik bazy; nie są
+mieszane równoległe połączenia systemowe i bundled. Migracja do schematu 25
+zachowuje rekordy i Ulubione, tworzy produkcyjny indeks FTS5 oraz magazyn pełnych
+opisów jako BLOB Zstd level 5 albo UTF-8, zależnie od rzeczywistego zysku.
+FTS5 otrzymuje osobną oczyszczoną reprezentację tekstową, nigdy skompresowany BLOB.
 
-Kandydat źródłowy 1.6-beta jest przygotowany do finalnej walidacji i podpisania,
-ale raport dotyczący finalnego APK nie został jeszcze dostarczony. Poniższy wynik
-VirusTotal i MobSF pozostaje historycznym wynikiem bazowego APK 1.5-beta. Oba raporty
-dotyczą pliku o SHA-256
-`41bff61a26ddebf32f09064b4fa9e17a3b9a407b18c9d29316e98f3443995eac`.
+Kandydat źródłowy 1.7-beta jest przygotowany do dalszej walidacji i podpisania
+przez użytkownika w Android Studio, ale nie ma jeszcze finalnego APK ani raportów.
+Nie wolno przypisywać mu sum SHA-256, VirusTotal ani MobSF wcześniejszych wydań.
 
 ## Zakres
 
@@ -131,12 +141,18 @@ aplikacji:
 - odpowiedzi YouTube Web, RSS i Data API mają limity rozmiaru, a tytuły,
   autorzy, klucze klienta oraz tokeny kontynuacji są ograniczane i walidowane
   przed dalszym użyciem;
+- RSS potwierdza feed-level `channelId` albo `playlistId` względem oczekiwanego
+  `ResolvedSource`. Brak, zły format, sprzeczność lub obca tożsamość odrzuca całe
+  źródło przed zapisem Historii, kursora i powiadomień;
 - tekstowy klient odrzuca odpowiedzi binarne dla ścieżek metadanych. Integracja
   YouTube Web nie uruchamia WebView ani nie pobiera CSS, skryptów lub obrazów
   strony;
 - historia każdego źródła zapisuje najpierw małą odpowiedź RSS, a dopiero potem
   uruchamia stronicowanie Data API albo YouTube Web. Duplikaty są scalane po
   identyfikatorze filmu;
+- parser `ytInitialData` funkcji „Znajdź starszy” sprawdza strukturę przed
+  `JSONObject` i przechodzi drzewo iteracyjnym DFS z twardym limitem 64 poziomów,
+  50 000 węzłów, 2048 elementów kontenera i 100 kandydatów;
 - tryb YouTube Web wysyła od razu żądanie właściwej karty i przed parsowaniem
   sprawdza parametry faktycznie zaznaczonego `tabRenderer`. Jeżeli kanał nie ma
   karty transmisji albo Shortów, odpowiedź zastępcza strony głównej nie jest
@@ -147,18 +163,18 @@ aplikacji:
 - migracja bazy do wersji 15 ponawia klasyfikację bez zerowania `kind`.
   Nieudana klasyfikacja zachowuje dotychczasowy rodzaj, a potwierdzona karta lub
   odtwarzacz poprawia rekord w miejscu;
-- bieżący schemat bazy ma wersję 24 i przechowuje m.in. stan kart kanału,
+- bieżący schemat bazy ma wersję 25 i przechowuje m.in. stan kart kanału,
   model kolejności, metadane awatarów oraz stabilny snapshot RSS dla
   powiadomień. Migracje są wykonywane sekwencyjnie także przy aktualizacji
   bezpośrednio ze starszej instalacji;
 - SQLite Bundled zapewnia jednolity zestaw funkcji na wspieranych Androidach.
-  W 1.6-beta FTS5 jest tylko testowane tabelą tymczasową; nie istnieje
-  produkcyjna tabela FTS ani tekstowa kolumna opisu. Dane użytkownika nie są
-  składane do dynamicznych poleceń schematu;
+  W 1.7-beta FTS5 indeksuje tytuł, twórcę i oczyszczony opis. Pełny opis jest
+  osobnym BLOB z metadanymi kodeka, a dane użytkownika nie są składane do
+  dynamicznych poleceń schematu;
 - zapytania zwracające listy historii, skrzynki i statystyk mapują wiersze
   bezpośrednio ze `SQLiteStatement`, bez drugiej pełnej kopii w `MatrixCursor`.
-  Zapytania listowe mają limity; przyszłe wyniki FTS5 muszą pozostać
-  stronicowane i nie mogą ładować całej historii do pamięci;
+  Zapytania listowe mają limity; wyniki FTS5 są stronicowane po 40 pozycji,
+  mają twardy limit 100 i nie ładują całej historii do pamięci;
 - automatyczne czyszczenie historii pomija Ulubione, a czyszczenie cache obrazów
   zachowuje zawartość nadal wskazywaną przez ulubiony materiał;
 - migracja bazy do wersji 10 usuwa niepotwierdzone rekordy pozostawione przez
@@ -191,6 +207,17 @@ aplikacji:
   pierwszeństwo nad ustawieniem powiadomień i pomija odpowiednią kartę Web;
 - aplikacja nie ma WebView, dynamicznego wykonywania kodu, dostępu do plików
   użytkownika, lokalizacji, kontaktów, mikrofonu ani kamery;
+- audyt różnicowy binarny 1.6.1-beta→1.7-beta (21 sierpnia 2026) potwierdził,
+  że wszystkie natywne biblioteki JXL/Brotli/AndroidX Graphics Path/SQLite
+  Bundled mają pełne RELRO (RELRO+BIND_NOW) na czterech ABI. Wyjątkiem są nowe
+  biblioteki `libzstd-jni-1.5.7-6.so` (1.7-beta): arm64-v8a nie ma segmentu
+  `PT_GNU_RELRO` wcale, pozostałe trzy ABI mają RELRO bez `BIND_NOW`. Pliki są
+  bit-identyczne z oficjalnym AAR `com.github.luben:zstd-jni:1.5.7-6`
+  przypiętym w `verification-metadata.xml` — to właściwość builda upstream, nie
+  modyfikacja projektu. Ryzyko praktyczne niskie: zstd dekompresuje wyłącznie
+  BLOB-y opisów zapisane wcześniej lokalnie przez samą aplikację (patrz limit
+  1 MB i prealokowany bufor w `DescriptionCodec`), a osłabione RELRO ma
+  znaczenie dopiero przy już istniejącym prymitywie zapisu w pamięci;
 - Gradle pobiera zależności wyłącznie z Google Maven, Maven Central i
   Gradle Plugin Portal; sumy artefaktów używanych do kompilacji są zapisane w
   `gradle/verification-metadata.xml`, a suma dystrybucji i plik Wrapper są
@@ -202,7 +229,13 @@ aplikacji:
   testuje, lintuje i kompiluje zarówno wariant debug, jak i release;
 - aktualizator pomija szkice i wydania bez poprawnego APK, ogranicza adresy do
   skonfigurowanego repozytorium GitHub oraz nie proponuje bet użytkownikowi
-  przyszłej wersji stabilnej.
+  przyszłej wersji stabilnej. Przygotowanie APK/Xdelta jest objęte procesowym
+  single-flight: automatyczny i ręczny caller współdzielą pracę dla tego samego
+  targetu, a różne targety nie zapisują równolegle wspólnych plików `.part`;
+- release, testy, lint i kompilacja Kotlin konsumują zamrożony pakiet
+  `bundled_avatars` bez sieci i bez modyfikacji `src/main/assets`. Pobranie oraz
+  kompresję awatarów wykonuje wyłącznie jawne zadanie
+  `:app:refreshBundledAvatars`, niepowiązane z `preReleaseBuild`;
 - szczegółowe logi wyjątków sieciowych są kompilowane wyłącznie w wariancie
   debug. Wariant release nie zapisuje do `logcat` nazw wybranych twórców,
   adresów ich kanałów ani stosów wyjątków. Opcjonalny lokalny dziennik
@@ -249,7 +282,14 @@ aplikacji:
 
 ## Wynik automatycznej walidacji
 
-Końcowa walidacja źródeł kandydata 1.6-beta z 8 sierpnia 2026 r. objęła
+Celowana walidacja kandydata 1.7-beta z 9 sierpnia 2026 r. objęła kompilację
+Kotlin aplikacji i androidTest oraz 212/212 testów jednostkowych debug bez
+błędów i pominięć. Dwa nowe testy instrumentacyjne kodeka opisów i rozszerzony
+test migracji schematu 22/23→25 zostały skompilowane, lecz nie uruchomione bez
+podłączonego urządzenia. Nie generowano APK. Pełny lint, test release i test
+urządzeniowy pozostają do wykonania przed publikacją.
+
+Historyczna końcowa walidacja źródeł kandydata 1.6-beta z 8 sierpnia 2026 r. objęła
 210/210 testów jednostkowych osobno dla wariantu debug i release. Lint obu
 wariantów zakończył się bez błędów (44 ostrzeżenia niewstrzymujące), a APK
 debug oraz niepodpisany APK release zostały poprawnie złożone poza repozytorium
@@ -365,11 +405,11 @@ wolno używać go jako skrótu ani raportu dla 1.5-beta.
 - wyłączone globalnie lub dla twórcy typy są filtrowane przed zapisem. Przy
   selektywnych ustawieniach niejednoznaczny wpis RSS/API czeka na potwierdzenie
   właściwą kartą, zamiast przedostać się do włączonej kategorii;
-- harmonogram używa jednego jednorazowego alarmu `RTC_WAKEUP` o stałej
-  tożsamości `PendingIntent`. Odbiornik zapisuje następny zwykły termin przed
-  uruchomieniem sieci; ewentualne ponowienie zastępuje go tym samym alarmem,
-  więc nie powstają równoległe łańcuchy. Boot, zmiana czasu i strefy odtwarzają
-  termin;
+- harmonogram utrzymuje 15 regularnych alarmów `RTC_WAKEUP` z rozłącznymi,
+  niemutowalnymi `PendingIntent`. Retry, watchdog i DND probe/catch-up używają
+  osobnych requestCode, więc nie zastępują regularnej kolejki. Odbiornik
+  uzupełnia 15 przyszłych terminów przed uruchomieniem sieci; boot, zmiana czasu
+  i strefy odtwarzają harmonogram;
 - czyszczenie historii wymaga potwierdzenia, anuluje aktywne pobieranie oraz
   dokładny alarm, czeka na wyłączną sekcję synchronizacji, usuwa historię,
   skrzynkę, identyfikatory i kursory w jednej transakcji, czyści cache obrazów,

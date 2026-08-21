@@ -2,6 +2,7 @@ package pl.lewicowyt.notifier.notifications
 
 import android.Manifest
 import android.app.NotificationChannel
+import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
@@ -68,6 +69,7 @@ class NotificationHelper(
         ).apply {
             description =
                 "Powiadomienia o nowych filmach, Shortach i transmisjach wybranych twórców"
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         }
         context.getSystemService(NotificationManager::class.java)
             .createNotificationChannel(channel)
@@ -209,6 +211,8 @@ class NotificationHelper(
             .setAutoCancel(true)
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_SOCIAL)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicNotification(pendingIntent))
             .setGroup(GROUP_KEY)
             .setTimeoutAfter(NOTIFICATION_TIMEOUT_MILLIS)
 
@@ -237,10 +241,23 @@ class NotificationHelper(
             .setAutoCancel(true)
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_SOCIAL)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicNotification(pendingIntent))
             .setTimeoutAfter(NOTIFICATION_TIMEOUT_MILLIS)
             .build()
         return show(SUMMARY_NOTIFICATION_ID, notification)
     }
+
+    private fun publicNotification(pendingIntent: PendingIntent) =
+        NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("Nowy materiał w lewicowYT")
+            .setContentText("Odblokuj urządzenie, aby zobaczyć szczegóły")
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_SOCIAL)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .build()
 
     private fun loadThumbnail(videoId: String): Bitmap? {
         val urls = listOf(

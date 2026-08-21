@@ -18,6 +18,8 @@ import pl.lewicowyt.notifier.network.YouTubePageClassifier
 import pl.lewicowyt.notifier.network.YouTubeSourceResolver
 import pl.lewicowyt.notifier.network.androidApiRequestHeaders
 import pl.lewicowyt.notifier.notifications.NotificationHelper
+import pl.lewicowyt.notifier.search.OlderMaterialSearchService
+import pl.lewicowyt.notifier.sync.DescriptionBackfillLoader
 import pl.lewicowyt.notifier.sync.SyncEngine
 import pl.lewicowyt.notifier.sync.HistoryBackfillLoader
 import pl.lewicowyt.notifier.sync.SourcePriorityScheduler
@@ -48,6 +50,10 @@ object AppGraph {
     lateinit var syncEngine: SyncEngine
         private set
     lateinit var historyBackfill: HistoryBackfillLoader
+        private set
+    lateinit var descriptionBackfill: DescriptionBackfillLoader
+        private set
+    lateinit var olderMaterialSearch: OlderMaterialSearchService
         private set
     lateinit var scheduler: SyncScheduler
         private set
@@ -97,6 +103,19 @@ object AppGraph {
                 classifier = pageClassifier,
                 sourcePriorityScheduler = sourcePriorityScheduler,
             )
+            descriptionBackfill = DescriptionBackfillLoader(
+                database = database,
+                classifier = pageClassifier,
+                preferences = preferences,
+                dataApiClient = dataApiClient,
+                catalog = catalog,
+            )
+            olderMaterialSearch = OlderMaterialSearchService(
+                http = http,
+                resolver = resolver,
+                classifier = pageClassifier,
+                database = database,
+            )
             syncEngine = SyncEngine(
                 catalog = catalog,
                 preferences = preferences,
@@ -109,6 +128,7 @@ object AppGraph {
                 historyClient = historyClient,
                 sourcePriorityScheduler = sourcePriorityScheduler,
                 avatarUpdater = avatarUpdater,
+                descriptionBackfill = descriptionBackfill,
             )
             scheduler = SyncScheduler(appContext, preferences)
             diagnostics = DiagnosticSnapshotProvider(
