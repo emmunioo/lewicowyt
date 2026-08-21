@@ -133,17 +133,29 @@ class UpdatePreparationSingleFlightTest {
     fun `full apk fallback remains single flight after delta failure`() = withGate { gate ->
         val deltaAttempts = AtomicInteger()
         val fullDownloads = AtomicInteger()
-        val callers = List(2) {
-            async {
-                gate.run("release") {
-                    deltaAttempts.incrementAndGet()
-                    val delta = runCatching { error("bad patch") }.getOrNull()
-                    delta ?: fullDownloads.incrementAndGet().let { "full.apk" }
-                }
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val first = async {
+            gate.run("release") {
+                deltaAttempts.incrementAndGet()
+                started.complete(Unit)
+                release.await()
+                val delta = runCatching { error("bad patch") }.getOrNull()
+                delta ?: fullDownloads.incrementAndGet().let { "full.apk" }
             }
         }
+        started.await()
+        val second = async {
+            gate.run("release") {
+                deltaAttempts.incrementAndGet()
+                val delta = runCatching { error("bad patch") }.getOrNull()
+                delta ?: fullDownloads.incrementAndGet().let { "full.apk" }
+            }
+        }
+        yield()
+        release.complete(Unit)
 
-        assertEquals(listOf("full.apk", "full.apk"), callers.map { it.await() })
+        assertEquals(listOf("full.apk", "full.apk"), listOf(first, second).map { it.await() })
         assertEquals(1, deltaAttempts.get())
         assertEquals(1, fullDownloads.get())
     }
