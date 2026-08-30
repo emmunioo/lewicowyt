@@ -378,6 +378,38 @@ class LocalDatabase(
                 """.trimIndent(),
             )
         }
+        if (oldVersion < 26) {
+            // 1.8-beta (#13): description_availability przechowuje 4-stanowy
+            // wskaźnik dostępności opisu (NONE/DOWNLOADED/MEMBERS_ONLY/
+            // SCHEDULED_STREAM) wyliczany RAZ przy zapisie, zamiast dekompresować
+            // Zstd pełny opis przy każdym odczycie listy Historii. Backfill
+            // istniejących wierszy jest w czystym SQL: markery są krótkie i
+            // przechowywane jako UTF-8, więc rozpoznajemy je przez
+            // CAST(description_data AS TEXT) bez dekompresji. Wartości 0..3 są
+            // stabilnym odwzorowaniem DescriptionAvailability (patrz
+            // descriptionAvailabilityDatabaseValue), nie zależnym od ordinal.
+            db.execSQL(
+                "ALTER TABLE video_history ADD COLUMN " +
+                    "description_availability INTEGER NOT NULL DEFAULT 0",
+            )
+            db.execSQL(
+                """
+                UPDATE video_history
+                SET description_availability = CASE
+                    WHEN description_data IS NULL THEN 0
+                    WHEN description_codec = ? AND CAST(description_data AS TEXT) = ? THEN 2
+                    WHEN description_codec = ? AND CAST(description_data AS TEXT) = ? THEN 3
+                    ELSE 1
+                END
+                """.trimIndent(),
+                arrayOf<Any>(
+                    StoredDescriptionCodec.UTF8.databaseValue,
+                    MEMBERS_ONLY_DESCRIPTION_MARKER,
+                    StoredDescriptionCodec.UTF8.databaseValue,
+                    SCHEDULED_STREAM_DESCRIPTION_MARKER,
+                ),
+            )
+        }
     }
 
     private fun createSourceStateTable(db: BundledDatabase) {
@@ -426,7 +458,8 @@ class LocalDatabase(
                 description_original_size INTEGER NOT NULL DEFAULT 0,
                 description_state INTEGER NOT NULL DEFAULT 0,
                 description_attempts INTEGER NOT NULL DEFAULT 0,
-                description_last_attempt_ms INTEGER NOT NULL DEFAULT 0
+                description_last_attempt_ms INTEGER NOT NULL DEFAULT 0,
+                description_availability INTEGER NOT NULL DEFAULT 0
             )
             """.trimIndent(),
         )
@@ -2239,6 +2272,12 @@ class LocalDatabase(
                     put("description_codec", encoded.codec.databaseValue)
                     put("description_original_size", encoded.originalSize)
                     put("description_state", descriptionStorageState(description))
+                    put(
+                        "description_availability",
+                        descriptionAvailabilityDatabaseValue(
+                            descriptionAvailability(description),
+                        ),
+                    )
                     put("description_attempts", 0)
                     put("description_last_attempt_ms", System.currentTimeMillis())
                     if (encoded.dictionaryId == null) putNull("description_dictionary_id")
@@ -2644,18 +2683,27 @@ class LocalDatabase(
     @Synchronized
     fun recentHistory(days: Int = 60, limit: Int = 500): List<HistoryItem> {
         val cutoff = System.currentTimeMillis() - days.coerceIn(1, 365).toLong() * DAY_MILLIS
+        // `limit` ogranicza WYŁĄCZNIE okno najnowszych materiałów (pula rośnie w
+        // miarę przewijania — patrz refreshHistoryNow). Ulubione są zawsze
+        // zwracane w całości, niezależnie od `limit`, aby filtr Ulubionych nigdy
+        // nie gubił pozycji starszych niż okno (#5).
         return readableDatabase.queryRows(
             """
             SELECT video_id, creator_id, creator_name, title, url,
                    published_ms, detected_ms, kind, notified, origin, is_favorite,
-                   description_data, description_codec, description_original_size
+                   description_availability
             FROM video_history
-            WHERE published_ms >= ? OR is_favorite = 1
+            WHERE is_favorite = 1
+               OR video_id IN (
+                   SELECT video_id FROM video_history
+                   WHERE published_ms >= ?
+                   ORDER BY published_ms DESC
+                   LIMIT ?
+               )
             ORDER BY published_ms DESC, detected_ms DESC
-            LIMIT ?
             """.trimIndent(),
             arrayOf(cutoff.toString(), limit.coerceIn(1, 10_000).toString()),
-            mapper = ::readHistoryItem,
+            mapper = ::readHistoryListItem,
         )
     }
 
@@ -2692,8 +2740,7 @@ class LocalDatabase(
             """
             SELECT h.video_id, h.creator_id, h.creator_name, h.title, h.url,
                    h.published_ms, h.detected_ms, h.kind, h.notified, h.origin,
-                   h.is_favorite, h.description_data, h.description_codec,
-                   h.description_original_size
+                   h.is_favorite, h.description_availability
             FROM notification_inbox n
             JOIN video_history h ON h.video_id = n.video_id
             WHERE n.created_ms >= ?
@@ -2701,7 +2748,7 @@ class LocalDatabase(
             LIMIT ?
             """.trimIndent(),
             arrayOf(cutoff.toString(), limit.coerceIn(1, 2_000).toString()),
-            mapper = ::readHistoryItem,
+            mapper = ::readHistoryListItem,
         )
     }
 
@@ -2793,6 +2840,37 @@ class LocalDatabase(
         else -> DescriptionAvailability.DOWNLOADED
     }
 
+    // Stabilne wartości bazodanowe kolumny description_availability. Celowo NIE
+    // opieramy się na .ordinal, aby przyszła zmiana kolejności enuma nie
+    // uszkodziła zapisanych rekordów. Wartości muszą być zgodne z backfillem
+    // migracji 26 (CASE 0..3).
+    private fun descriptionAvailabilityDatabaseValue(
+        availability: DescriptionAvailability,
+    ): Int = when (availability) {
+        DescriptionAvailability.NONE -> 0
+        DescriptionAvailability.DOWNLOADED -> 1
+        DescriptionAvailability.MEMBERS_ONLY -> 2
+        DescriptionAvailability.SCHEDULED_STREAM -> 3
+    }
+
+    private fun descriptionAvailabilityFromDatabaseValue(
+        value: Int,
+    ): DescriptionAvailability = when (value) {
+        1 -> DescriptionAvailability.DOWNLOADED
+        2 -> DescriptionAvailability.MEMBERS_ONLY
+        3 -> DescriptionAvailability.SCHEDULED_STREAM
+        else -> DescriptionAvailability.NONE
+    }
+
+    // Tania ścieżka listy Historii (recentHistory/recentNotificationInbox):
+    // czyta gotowy wskaźnik dostępności z kolumny zamiast dekompresować Zstd
+    // pełny opis dla każdego z maks. 10 000 wierszy przy każdym odświeżeniu.
+    private fun readHistoryListItem(row: SQLiteStatement): HistoryItem =
+        readHistoryItem(
+            row,
+            descriptionAvailabilityFromDatabaseValue(row.getLong(11).toInt()),
+        )
+
     private fun compactDatabaseIfWorthwhile(db: BundledDatabase) {
         val pageCount = db.rawQuery("PRAGMA page_count", null).use { cursor ->
             if (cursor.moveToFirst()) cursor.getLong(0) else 0L
@@ -2811,7 +2889,7 @@ class LocalDatabase(
 
     private companion object {
         const val DATABASE_NAME = "lewicowyt_notifier.db"
-        const val DATABASE_VERSION = 25
+        const val DATABASE_VERSION = 26
         const val CURRENT_CLASSIFIER_VERSION = 1
         const val MAX_CHANNEL_TAB_PARAMS_CHARS = 2_048
         const val MAX_EVIDENCE_QUERY_IDS = 900
@@ -2905,15 +2983,21 @@ internal fun polishSearchPrefixVariants(token: String): List<String> {
     return variants.take(MAX_POLISH_VARIANTS_PER_TOKEN)
 }
 
+// Kompilowane raz. Wcześniej te wzorce powstawały na nowo przy każdym
+// wywołaniu — a normalizePolishSearchText/searchTokens są w gorącej ścieżce
+// rankingu wyszukiwarki (per kandydat i per token) (#10).
+private val SEARCH_TOKEN_SEPARATOR = Regex("[^\\p{L}\\p{N}_-]+")
+private val COMBINING_MARKS = Regex("\\p{M}+")
+
 internal fun searchTokens(value: String): List<String> = normalizePolishSearchText(value)
     .lowercase()
-    .split(Regex("[^\\p{L}\\p{N}_-]+"))
+    .split(SEARCH_TOKEN_SEPARATOR)
     .filter(String::isNotBlank)
     .take(12)
 
 internal fun normalizePolishSearchText(value: String): String = java.text.Normalizer
     .normalize(value.replace('Ł', 'L').replace('ł', 'l'), java.text.Normalizer.Form.NFD)
-    .replace(Regex("\\p{M}+"), "")
+    .replace(COMBINING_MARKS, "")
 
 internal fun rankHistorySearchItems(
     items: List<HistoryItem>,
@@ -2959,7 +3043,7 @@ private data class RankedHistoryItem(
 private class SearchableField(value: String, private val weight: Int) {
     val normalized = normalizePolishSearchText(value).lowercase()
     private val words = normalized
-        .split(Regex("[^\\p{L}\\p{N}_-]+"))
+        .split(SEARCH_TOKEN_SEPARATOR)
         .filter(String::isNotBlank)
 
     fun matchScore(token: String): Int {

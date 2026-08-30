@@ -2,6 +2,10 @@ package pl.lewicowyt.notifier
 
 import android.annotation.SuppressLint
 import android.content.Context
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import pl.lewicowyt.notifier.data.CreatorCatalog
 import pl.lewicowyt.notifier.data.LocalDatabase
 import pl.lewicowyt.notifier.data.PreferencesRepository
@@ -32,6 +36,13 @@ import pl.lewicowyt.notifier.worker.SyncScheduler
 object AppGraph {
     @Volatile
     private var initialized = false
+
+    // Osobny zakres tylko na seedowanie awatarów w tle - seedDatabase() otwiera
+    // zapisywalną bazę (uruchamia migracje) i robi ~50 upsertów, co blokowało
+    // wątek główny przy KAŻDYM zimnym starcie (initialize() jest wołane
+    // synchronicznie z Application.onCreate()). Wynik jest idempotentny i
+    // niekrytyczny dla pierwszej klatki - awatary i tak dopływają leniwie.
+    private val avatarSeedScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     lateinit var catalog: CreatorCatalog
         private set
@@ -75,7 +86,7 @@ object AppGraph {
             preferences = PreferencesRepository(appContext)
             database = LocalDatabase(appContext)
             youtubeLinks = YouTubeLinkLauncher(appContext)
-            BundledAvatarStore.seedDatabase(appContext, database)
+            avatarSeedScope.launch { BundledAvatarStore.seedDatabase(appContext, database) }
             notifications = NotificationHelper(appContext, database, youtubeLinks)
             val okHttp = PrivacyHttpClient.get(appContext)
             val http = HttpTextClient(okHttp)

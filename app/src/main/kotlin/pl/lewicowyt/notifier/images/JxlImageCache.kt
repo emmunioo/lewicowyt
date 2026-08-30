@@ -429,7 +429,11 @@ object JxlImageCache {
                                 bitmap,
                                 JxlChannelsConfiguration.RGB,
                                 JxlCompressionOption.LOSSY,
-                                JxlEffort.GLACIER,
+                                // O jeden poziom słabsza kompresja niż maksymalny
+                                // GLACIER (kolejność: …KITTEN, TORTOISE, GLACIER).
+                                // Znacząco tańsza dla CPU/baterii przy konwersji w
+                                // tle, plik jest tylko minimalnie większy (#2).
+                                JxlEffort.TORTOISE,
                                 JXL_QUALITY,
                             )
                         }.onFailure { error ->

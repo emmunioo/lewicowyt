@@ -12,6 +12,12 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -78,6 +84,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalUriHandler
@@ -188,7 +195,7 @@ fun LewicowYTApp(
     if (whatsNewVisible) {
         AlertDialog(
             onDismissRequest = acknowledgeWhatsNew,
-            title = { Text("Co nowego w lewicowYT 1.7-beta") },
+            title = { Text("Co nowego w lewicowYT 1.8-beta") },
             text = {
                 Column(
                     modifier = Modifier
@@ -196,28 +203,28 @@ fun LewicowYTApp(
                         .verticalScroll(whatsNewScrollState),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text("Nowości w 1.7-beta", fontWeight = FontWeight.Bold)
+                    Text("Nowości w 1.8-beta", fontWeight = FontWeight.Bold)
                     Text(
-                        "Historia ma teraz szybką lokalną wyszukiwarkę działającą offline: " +
-                            "przeszukuje tytuły, twórców i opisy, z uwzględnieniem filtrów i Ulubionych.",
+                        "Wydanie skupione na płynności: przewijanie i wyszukiwanie w Historii " +
+                            "nie liczy się już na tym samym wątku, który rysuje ekran, więc " +
+                            "aplikacja powinna mniej się zacinać, zwłaszcza przy większej historii.",
                     )
                     Text(
-                        "Opisy materiałów są pobierane stopniowo (Data API albo YouTube Web) " +
-                            "i przechowywane oszczędnie; ich brak nigdy nie blokuje Historii ani powiadomień.",
+                        "Odświeżanie Historii jest szybsze — usunięto zbędną pracę wykonywaną " +
+                            "wcześniej przy każdym odświeżeniu, niezależnie od tego, ile materiałów " +
+                            "faktycznie się zmieniło.",
                     )
                     Text(
-                        "Przycisk „Znajdź starszy” pozwala doszukać dawniejszy materiał " +
-                            "obserwowanego twórcy — przed dodaniem do Ulubionych aplikacja " +
-                            "ponownie potwierdza kanał, tytuł, datę i dostępność.",
+                        "Miniatury materiałów pobierają się w mniejszym rozmiarze dopasowanym do " +
+                            "wyświetlanego kafelka, a konwersja obrazów w tle zużywa mniej baterii " +
+                            "przy niemal niezmienionym rozmiarze pliku.",
                     )
                     Text(
-                        "Aktualizacje mogą teraz pobierać się jako mniejsza łatka różnicowa " +
-                            "zamiast całego pliku APK, z automatycznym powrotem do pełnego pliku, " +
-                            "gdy łatka się nie opłaca lub coś pójdzie nie tak.",
+                        "Dodano dwóch nowych twórców: Koroluk i PROsiaczek.",
                     )
                     Text(
-                        "Dodatkowo utwardzono prywatność ekranu blokady oraz kontrolę podpisu " +
-                            "i narzędzi używanych przy przygotowaniu wydania.",
+                        "Ikonka 🗓️ przy zaplanowanej transmisji kręci się teraz podczas pobierania " +
+                            "opisu materiału, żeby było widać, że coś się dzieje w tle.",
                     )
                     Spacer(Modifier.height(6.dp))
                     TextButton(
@@ -763,6 +770,7 @@ private fun HistoryScreen(
             items(state.history, key = HistoryItem::videoId) { item ->
                 MaterialHistoryCard(
                     item = item,
+                    isDescriptionDownloadActive = state.isLoadingDescriptions,
                     onOpen = {
                         youtubeWatchUrl(item.videoId)?.let(openYouTubeLink)
                     },
@@ -974,6 +982,7 @@ private fun NotificationsScreen(
         items(state.notifications, key = HistoryItem::videoId) { item ->
             MaterialHistoryCard(
                 item = item,
+                isDescriptionDownloadActive = state.isLoadingDescriptions,
                 onOpen = {
                     youtubeWatchUrl(item.videoId)?.let(openYouTubeLink)
                 },
@@ -986,6 +995,7 @@ private fun NotificationsScreen(
 @Composable
 private fun MaterialHistoryCard(
     item: HistoryItem,
+    isDescriptionDownloadActive: Boolean,
     onOpen: () -> Unit,
     onFavoriteChange: (Boolean) -> Unit,
 ) {
@@ -993,11 +1003,12 @@ private fun MaterialHistoryCard(
     val nowMillis = System.currentTimeMillis()
     val displayKind = item.displayKindAt(nowMillis)
     val statusBadges = item.statusBadgesAt(nowMillis).map { badge ->
-        when (badge) {
+        val (icon, label) = when (badge) {
             MaterialStatusBadge.SCHEDULED -> "🗓️" to "Zaplanowana transmisja"
             MaterialStatusBadge.DESCRIPTION -> "📓" to "Opis materiału został pobrany"
             MaterialStatusBadge.MEMBERS_ONLY -> "💵" to "Materiał tylko dla wspierających"
         }
+        Triple(badge, icon, label)
     }
     Card(modifier = Modifier.fillMaxWidth()) {
         Row(
@@ -1061,18 +1072,60 @@ private fun MaterialHistoryCard(
                     item = item,
                     onFavoriteChange = onFavoriteChange,
                 )
-                statusBadges.forEach { (icon, label) ->
-                    Text(
-                        text = icon,
-                        modifier = Modifier.semantics {
-                            contentDescription = label
-                        },
-                        style = MaterialTheme.typography.bodyMedium,
+                statusBadges.forEach { (badge, icon, label) ->
+                    StatusBadgeText(
+                        icon = icon,
+                        label = label,
+                        // Zaplanowana transmisja to jedyna odznaka, której stan
+                        // może się jeszcze zmienić w trakcie aktywnego pobierania
+                        // opisów (potwierdzenie/wygaśnięcie po nadejściu terminu),
+                        // więc tylko ona sygnalizuje trwającą pracę animacją.
+                        spinning = isDescriptionDownloadActive &&
+                            badge == MaterialStatusBadge.SCHEDULED,
                     )
                 }
             }
         }
     }
+}
+
+/**
+ * Odznaka statusu materiału. Gdy [spinning] jest aktywne, ikona wykonuje
+ * płynny, ciągły pełny obrót — sygnalizuje trwające w tle pobieranie opisów
+ * bez odrywania uwagi (tylko odznaka „🗓️” bywa nim objęta, patrz wywołanie).
+ */
+@Composable
+private fun StatusBadgeText(icon: String, label: String, spinning: Boolean) {
+    if (!spinning) {
+        Text(
+            text = icon,
+            modifier = Modifier.semantics { contentDescription = label },
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        return
+    }
+    val infiniteTransition = rememberInfiniteTransition(label = "statusBadgeSpin")
+    val angle by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            // Stała prędkość (LinearEasing) zamiast przyspieszania/hamowania na
+            // każdym okrążeniu — bez „zacinania” na złączeniu pętli, czyli
+            // satysfakcjonujący, płynny obrót jak u typowego wskaźnika ładowania.
+            animation = tween(durationMillis = 1100, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "statusBadgeSpinAngle",
+    )
+    Text(
+        text = icon,
+        modifier = Modifier
+            .graphicsLayer { rotationZ = angle }
+            .semantics {
+                contentDescription = "$label — trwa pobieranie opisu"
+            },
+        style = MaterialTheme.typography.bodyMedium,
+    )
 }
 
 private fun copyYouTubeLink(context: Context, url: String) {

@@ -553,5 +553,27 @@
         "externalId": "UCpCj2CFfVsnICeMaLAXl9uw"
       }
     ]
+  },
+  {
+    "id": "koroluk",
+    "name": "Koroluk",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@Koroluk",
+        "externalId": "UCYy-O0x1LzUVua1e2oGO-bg"
+      }
+    ]
+  },
+  {
+    "id": "prosiaczek",
+    "name": "PROsiaczek",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@PROsiaczekPRO",
+        "externalId": "UCQhjrIQpR7MkVDWdtktOuUg"
+      }
+    ]
   }
 ]

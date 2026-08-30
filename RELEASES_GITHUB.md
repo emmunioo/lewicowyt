@@ -80,8 +80,8 @@ signer powoduje bezpieczne przerwanie; legalna rotacja może zostać obsłużona
 osobno w przyszłości.
 
 Nie wolno generować publicznej delty z APK debug ani ze wstępnego APK do
-analizy. Gdy finalny podpisany wariant 1.7-beta jest gotowy, generator należy
-uruchomić względem finalnego, publicznego APK wersji bazowej.
+analizy. Gdy finalny podpisany wariant nowego wydania jest gotowy, generator
+należy uruchomić względem finalnego, publicznego APK wersji bazowej.
 
 ## Awaryjne wycofanie wydania
 
@@ -118,7 +118,7 @@ Przed pierwszym wysłaniem wykonaj w głównym folderze projektu:
 git init
 git add .
 git status
-git commit -m "Wydanie 1.7-beta"
+git commit -m "Wydanie 1.8-beta"
 git branch -M main
 git remote add origin https://github.com/emmunioo/lewicowyt.git
 git push -u origin main
@@ -180,8 +180,8 @@ oraz w osobnej, zaszyfrowanej kopii awaryjnej.
 Plik `app/build.gradle.kts` powinien zawierać:
 
 ```kotlin
-versionCode = 18
-versionName = "1.7-beta"
+versionCode = 19
+versionName = "1.8-beta"
 ```
 
 Każda kolejna publikacja musi zwiększyć `versionCode`, nawet jeśli zmienia się
@@ -209,8 +209,8 @@ nie plikiem przeznaczonym do publikacji.
 W Android Studio użyj `Build → Analyze APK` i sprawdź:
 
 - nazwę pakietu `pl.lewicowyt.notifier`;
-- `versionName` równe `1.7-beta`;
-- `versionCode` równe `18`;
+- `versionName` równe `1.8-beta`;
+- `versionCode` równe `19`;
 - brak klucza YouTube API, haseł i pliku klucza podpisu.
 
 Jeżeli przekazujesz APK do MobSF lub innego skanera, wybierz podpisany wariant
@@ -222,36 +222,36 @@ problemy wysokiego poziomu.
 Podpis można zweryfikować narzędziem z Android SDK:
 
 ```powershell
-apksigner verify --verbose --print-certs .\lewicowYT-1.7-beta.apk
+apksigner verify --verbose --print-certs .\lewicowYT-1.8-beta.apk
 ```
 
 Zapisz również sumę kontrolną:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\lewicowYT-1.7-beta.apk
+Get-FileHash -Algorithm SHA256 .\lewicowYT-1.8-beta.apk
 ```
 
-## Publikowanie wersji 1.7-beta
+## Publikowanie wersji 1.8-beta
 
 1. Poczekaj, aż kontrole GitHub Actions zakończą się powodzeniem.
 2. W repozytorium otwórz `Releases → Draft a new release`.
 3. Utwórz tag:
 
 ```text
-v1.7-beta
+v1.8-beta
 ```
 
 4. Zaznacz wydanie jako **pre-release**.
 5. Zawsze dołącz finalny podpisany APK, np.:
 
 ```text
-lewicowYT-1.7-beta.apk
+lewicowYT-1.8-beta.apk
 ```
 
 6. Opcjonalnie wygeneruj i dołącz do tego samego wydania:
 
 ```text
-lewicowYT-1.6.1-beta-to-1.7-beta.xdelta
+lewicowYT-1.7-beta-to-1.8-beta.xdelta
 lewicowYT-update.json
 ```
 
@@ -261,28 +261,48 @@ błąd, opublikuj wyłącznie pełny APK. Nie twórz ręcznie manifestu.
 7. W opisie podaj SHA-256 APK oraz najważniejsze znane ograniczenia.
 8. Opublikuj wydanie i sprawdź w aplikacji przycisk `Sprawdź aktualizacje`.
 
-Historyczne artefakty 1.5-beta, 1.6-beta i 1.6.1-beta nie mogą być źródłem
-SHA-256 ani raportów dla nowego APK 1.7-beta.
+Historyczne artefakty 1.5-beta, 1.6-beta, 1.6.1-beta i 1.7-beta nie mogą być
+źródłem SHA-256 ani raportów dla nowego APK 1.8-beta.
 
-### Zakres zmian 1.7-beta
+### Zakres zmian 1.8-beta
 
-- lokalna wyszukiwarka Historii oparta na FTS5, z filtrami i paginowanym
-  limitem wyników;
-- pobieranie opisów wyłącznie dla już zapisanych materiałów, jako ostatni
-  niekrytyczny etap partii: partiami z `snippet.description` Data API przy
-  aktywnym kluczu, z fallbackiem YouTube Web, oraz magazyn Zstd level 5/UTF-8;
-- ręczne wyszukiwanie starszych materiałów obserwowanego twórcy z YouTube Web
-  i obowiązkowe potwierdzenie kanału przed dodaniem do Ulubionych;
-- opcjonalna mniejsza aktualizacja różnicowa Xdelta3/VCDIFF zamiast pełnego
-  APK, z bezwarunkowym cichym powrotem do pełnego pliku (patrz sekcja
-  „Opcjonalne aktualizacje różnicowe Xdelta3/VCDIFF” wyżej);
-- prywatna, zanonimizowana wersja powiadomień na ekranie blokady;
-- kontrola poprawnej linii następstwa certyfikatu aktualizacji;
-- przypięte SHA-256 narzędzi `cjxl.exe` i `yt-dlp.exe` oraz bezpieczny generator
-  archiwum źródłowego bez lokalnych danych środowiska.
+Wydanie skupione głównie na wydajności, plus dwóch nowych twórców:
+
+- filtrowanie i sortowanie Historii przeniesione poza wątek interfejsu
+  (`flowOn(Dispatchers.Default)`) — płynniejsze przewijanie i wyszukiwanie
+  twórców, szczególnie przy większej historii;
+- migracja schematu bazy 25→26 (kolumna `description_availability` liczona
+  raz przy zapisie, backfill w czystym SQL bez dekompresji): odświeżanie
+  Historii nie dekompresuje już zbędnie pełnych opisów Zstd dla każdej
+  pozycji przy każdym wywołaniu;
+- pula materiałów trzymana w pamięci rośnie wraz z przewijaniem zamiast
+  ładować od razu do 10 000 pozycji; Ulubione są zawsze wczytywane w całości
+  niezależnie od tego okna;
+- seedowanie bazy awatarów i pierwszy odczyt awatarów przeniesione poza
+  wątek główny — mniejsze ryzyko ANR przy zimnym starcie, zwłaszcza przy
+  migracji schematu 25→26;
+- miniatury materiałów pobierane w rozmiarze dopasowanym do wyświetlanego
+  kafelka zamiast w pełnej rozdzielczości źródła;
+- nieco tańsza dla CPU i baterii konwersja obrazów w tle do formatu JXL, przy
+  niemal niezmienionym rozmiarze pliku;
+- `distinctUntilChanged` na strumieniu ustawień ogranicza zbędne przeliczenia
+  stanu ekranu; kilka wzorców tekstowych używanych w wyszukiwarce jest teraz
+  kompilowanych raz zamiast przy każdym wywołaniu;
+- dodano dwóch nowych twórców: Koroluk i PROsiaczek;
+- ikonka 🗓️ przy zaplanowanej transmisji kręci się teraz podczas pobierania
+  opisu materiału w tle.
 
 Pełny, techniczny opis wszystkich zmian: strona projektu
 <https://emmunioo.github.io/lewicowyt> po publikacji wydania.
+
+### Zakres zmian 1.7-beta (historyczne, już opublikowane)
+
+Skrót: lokalna wyszukiwarka Historii oparta na FTS5, etapowe pobieranie i
+oszczędny magazyn opisów materiałów (Zstd/UTF-8), ręczne wyszukiwanie
+starszych materiałów przez „Znajdź starszy”, opcjonalne mniejsze aktualizacje
+różnicowe Xdelta3/VCDIFF, prywatna wersja powiadomień na ekranie blokady oraz
+kontrola linii następstwa certyfikatu aktualizacji. Pełny opis znajduje się na
+stronie projektu <https://emmunioo.github.io/lewicowyt>.
 
 ### Zakres zmian 1.6.1-beta
 

@@ -12,6 +12,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import pl.lewicowyt.notifier.model.DescriptionAvailability
+import pl.lewicowyt.notifier.model.MEMBERS_ONLY_DESCRIPTION_MARKER
+import pl.lewicowyt.notifier.model.SCHEDULED_STREAM_DESCRIPTION_MARKER
 import pl.lewicowyt.notifier.model.VideoKind
 
 @RunWith(AndroidJUnit4::class)
@@ -35,7 +38,7 @@ class BundledDatabaseMigrationTest {
     fun completeSchema22MigrationPreservesDataAndEnablesFtsAndCompressedDescriptions() {
         val database = LocalDatabase(context, DATABASE_NAME)
         try {
-            assertEquals(25, scalarInt(database, "PRAGMA user_version"))
+            assertEquals(26, scalarInt(database, "PRAGMA user_version"))
             assertEquals("ok", scalarText(database, "PRAGMA integrity_check"))
             LEGACY_TABLES.forEach { table ->
                 assertEquals("Brak danych po migracji w $table", 1, tableRows(database, table))
@@ -43,6 +46,7 @@ class BundledDatabaseMigrationTest {
             assertTrue(database.containsVideo(VIDEO_ID))
             assertFalse(hasColumn(database, "video_history", "description"))
             assertTrue(hasColumn(database, "video_history", "description_data"))
+            assertTrue(hasColumn(database, "video_history", "description_availability"))
             assertTrue(hasObject(database, "table", "video_history_fts"))
             assertTrue(hasObject(database, "trigger", "video_history_fts_insert"))
             val creatorSearch = database.searchHistory(
@@ -96,6 +100,71 @@ class BundledDatabaseMigrationTest {
     }
 
     @Test
+    fun schema25BackfillsDescriptionAvailabilityWithoutDecompression() {
+        context.deleteDatabase(SCHEMA_25_DATABASE_NAME)
+        SQLiteDatabase.openOrCreateDatabase(
+            context.getDatabasePath(SCHEMA_25_DATABASE_NAME),
+            null,
+        ).use { db ->
+            createSchema25(db)
+            // Cztery warianty opisu istniejące przed migracją 26.
+            insertDescriptionRow(db, "none0000000", descriptionData = null, codec = 0)
+            insertDescriptionRow(
+                db,
+                "downloaded0",
+                descriptionData = "prawdziwy, skompresowany opis materiału",
+                codec = StoredDescriptionCodec.ZSTD_5.databaseValue,
+            )
+            insertDescriptionRow(
+                db,
+                "membersonly",
+                descriptionData = MEMBERS_ONLY_DESCRIPTION_MARKER,
+                codec = StoredDescriptionCodec.UTF8.databaseValue,
+            )
+            insertDescriptionRow(
+                db,
+                "scheduled00",
+                descriptionData = SCHEDULED_STREAM_DESCRIPTION_MARKER,
+                codec = StoredDescriptionCodec.UTF8.databaseValue,
+            )
+            db.version = 25
+        }
+
+        val database = LocalDatabase(context, SCHEMA_25_DATABASE_NAME)
+        try {
+            assertEquals(26, scalarInt(database, "PRAGMA user_version"))
+            assertEquals("ok", scalarText(database, "PRAGMA integrity_check"))
+            assertTrue(hasColumn(database, "video_history", "description_availability"))
+            // Backfill w czystym SQL nie dekompresuje żadnego BLOB-a, a mimo to
+            // poprawnie odwzorowuje markery i realne opisy na stany 0..3.
+            assertEquals(0, availabilityColumn(database, "none0000000"))
+            assertEquals(1, availabilityColumn(database, "downloaded0"))
+            assertEquals(2, availabilityColumn(database, "membersonly"))
+            assertEquals(3, availabilityColumn(database, "scheduled00"))
+            // Tania ścieżka listy Historii czyta gotowy stan wprost z kolumny.
+            val byId = database.recentHistory(limit = 50).associateBy { it.videoId }
+            assertEquals(
+                DescriptionAvailability.NONE,
+                byId.getValue("none0000000").descriptionAvailability,
+            )
+            assertEquals(
+                DescriptionAvailability.DOWNLOADED,
+                byId.getValue("downloaded0").descriptionAvailability,
+            )
+            assertEquals(
+                DescriptionAvailability.MEMBERS_ONLY,
+                byId.getValue("membersonly").descriptionAvailability,
+            )
+            assertEquals(
+                DescriptionAvailability.SCHEDULED_STREAM,
+                byId.getValue("scheduled00").descriptionAvailability,
+            )
+        } finally {
+            database.close()
+        }
+    }
+
+    @Test
     fun prematureSchema23IsCleanedWithoutLosingFavorite() {
         context.deleteDatabase(SCHEMA_23_DATABASE_NAME)
         SQLiteDatabase.openOrCreateDatabase(
@@ -138,7 +207,7 @@ class BundledDatabaseMigrationTest {
 
         val database = LocalDatabase(context, SCHEMA_23_DATABASE_NAME)
         try {
-            assertEquals(25, scalarInt(database, "PRAGMA user_version"))
+            assertEquals(26, scalarInt(database, "PRAGMA user_version"))
             assertTrue(database.containsVideo(VIDEO_ID))
             assertTrue(database.recentHistory(limit = 1).single().isFavorite)
             assertFalse(hasColumn(database, "video_history", "description"))
@@ -171,7 +240,7 @@ class BundledDatabaseMigrationTest {
 
         val database = LocalDatabase(context, WAL_TARGET_DATABASE_NAME)
         try {
-            assertEquals(25, scalarInt(database, "PRAGMA user_version"))
+            assertEquals(26, scalarInt(database, "PRAGMA user_version"))
             assertTrue(database.containsVideo(VIDEO_ID))
             LEGACY_TABLES.forEach { table ->
                 assertEquals("WAL nie zachował $table", 1, tableRows(database, table))
@@ -335,6 +404,73 @@ class BundledDatabaseMigrationTest {
         )
     }
 
+    private fun createSchema25(db: SQLiteDatabase) {
+        createCompleteSchema22(db)
+        db.execSQL(
+            "ALTER TABLE video_history ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
+        )
+        db.execSQL("ALTER TABLE video_history ADD COLUMN favorited_ms INTEGER")
+        db.execSQL("ALTER TABLE video_history ADD COLUMN description_data BLOB")
+        db.execSQL(
+            "ALTER TABLE video_history ADD COLUMN description_codec INTEGER NOT NULL DEFAULT 0",
+        )
+        db.execSQL("ALTER TABLE video_history ADD COLUMN description_dictionary_id TEXT")
+        db.execSQL("ALTER TABLE video_history ADD COLUMN description_dictionary_version INTEGER")
+        db.execSQL(
+            "ALTER TABLE video_history ADD COLUMN " +
+                "description_original_size INTEGER NOT NULL DEFAULT 0",
+        )
+        db.execSQL(
+            "ALTER TABLE video_history ADD COLUMN description_state INTEGER NOT NULL DEFAULT 0",
+        )
+        db.execSQL(
+            "ALTER TABLE video_history ADD COLUMN " +
+                "description_attempts INTEGER NOT NULL DEFAULT 0",
+        )
+        db.execSQL(
+            "ALTER TABLE video_history ADD COLUMN " +
+                "description_last_attempt_ms INTEGER NOT NULL DEFAULT 0",
+        )
+    }
+
+    private fun insertDescriptionRow(
+        db: SQLiteDatabase,
+        videoId: String,
+        descriptionData: String?,
+        codec: Int,
+    ) {
+        val now = System.currentTimeMillis()
+        db.insertOrThrow(
+            "video_history",
+            null,
+            ContentValues().apply {
+                put("video_id", videoId)
+                put("creator_id", "creator")
+                put("creator_name", "Twórca")
+                put("title", "Materiał $videoId")
+                put("url", "https://www.youtube.com/watch?v=$videoId")
+                put("published_ms", now)
+                put("detected_ms", now)
+                put("kind", "VIDEO")
+                put("description_codec", codec)
+                // Markery zapisujemy jako bajty UTF-8, dokładnie jak ścieżka
+                // produkcyjna (DescriptionCodec), aby CAST(... AS TEXT) w
+                // backfillu migracji porównał się do markera.
+                if (descriptionData == null) putNull("description_data")
+                else put("description_data", descriptionData.toByteArray(Charsets.UTF_8))
+            },
+        )
+    }
+
+    private fun availabilityColumn(database: LocalDatabase, videoId: String): Int =
+        database.readableDatabase.rawQuery(
+            "SELECT description_availability FROM video_history WHERE video_id = ?",
+            arrayOf(videoId),
+        ).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            cursor.getInt(0)
+        }
+
     private fun insertCompleteSample(db: SQLiteDatabase) {
         db.execSQL(
             """
@@ -401,6 +537,7 @@ class BundledDatabaseMigrationTest {
         listOf(
             DATABASE_NAME,
             SCHEMA_23_DATABASE_NAME,
+            SCHEMA_25_DATABASE_NAME,
             WAL_SOURCE_DATABASE_NAME,
             WAL_TARGET_DATABASE_NAME,
             CONTENT_VALUES_DATABASE_NAME,
@@ -410,6 +547,7 @@ class BundledDatabaseMigrationTest {
     private companion object {
         const val DATABASE_NAME = "bundled-migration-test.db"
         const val SCHEMA_23_DATABASE_NAME = "bundled-schema-23-test.db"
+        const val SCHEMA_25_DATABASE_NAME = "bundled-schema-25-test.db"
         const val WAL_SOURCE_DATABASE_NAME = "bundled-wal-source.db"
         const val WAL_TARGET_DATABASE_NAME = "bundled-wal-target.db"
         const val CONTENT_VALUES_DATABASE_NAME = "bundled-content-values-test.db"

@@ -1,13 +1,15 @@
-# lewicowYT 1.7-beta
+# lewicowYT 1.8-beta
 
 Natywna aplikacja dla Androida do lokalnego obserwowania wybranych kanałów
 YouTube. Porządkuje filmy, Shorty i transmisje, zachowuje historię oraz informuje
 o nowych publikacjach bez konta w aplikacji, Firebase i własnego serwera.
 
-Wersja 1.7-beta dodaje lokalną wyszukiwarkę FTS5, etapowe pobieranie
-skompresowanych opisów oraz bezpieczne wyszukiwanie starszych materiałów do
-Ulubionych. Rozszerza również zabezpieczenia procesu wydania i prywatność
-powiadomień na ekranie blokady.
+Wersja 1.8-beta to wydanie skupione na wydajności: filtrowanie i sortowanie
+Historii liczy się poza wątkiem interfejsu, odświeżanie historii nie
+dekompresuje już zbędnie pełnych opisów, a pula materiałów trzymana w pamięci
+rośnie wraz z przewijaniem zamiast ładować od razu tysiące pozycji. Miniatury
+pobierają się w rozmiarze dopasowanym do wyświetlanego kafelka, a konwersja
+obrazów w tle zużywa mniej CPU i baterii.
 
 > lewicowYT jest niezależnym, nieoficjalnym projektem. Nie jest produktem ani
 > oficjalnym klientem Google lub YouTube i nie jest przez nie wspierany.
@@ -118,7 +120,11 @@ awarii lewicowYT.
 
 - miniatury Historii i Powiadomień korzystają ze wspólnego cache;
 - SHA-256 zapobiega wielokrotnemu zapisaniu identycznego obrazu;
-- po poprawnej konwersji cache może używać JXL quality 69 / effort 10;
+- po poprawnej konwersji cache może używać JXL quality 69, z wysiłkiem
+  kompresji o jeden stopień poniżej maksimum biblioteki dla oszczędności
+  CPU i baterii przy niemal niezmienionym rozmiarze pliku;
+- miniatury materiałów pobierane są w rozmiarze dopasowanym do wyświetlanego
+  kafelka zamiast w pełnej rozdzielczości źródła;
 - systemowe powiadomienia zachowują format bitmapowy obsługiwany przez Androida;
 - awatary 176×176 są dołączone do APK i najwyżej raz w tygodniu sprawdzane
   pod kątem zmiany;

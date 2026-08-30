@@ -3,7 +3,15 @@
 Data ostatniej aktualizacji przeglądu kodu: 21 sierpnia 2026 r. (audyt różnicowy
 binarny 1.6.1-beta→1.7-beta na finalnych podpisanych APK).
 
-Wersja kodu: `1.7-beta` (`versionCode 18`).
+Wersja kodu: `1.8-beta` (`versionCode 19`).
+
+Wersja 1.8-beta tworzy schemat 26: nowa kolumna `description_availability`
+(dostępność opisu materiału) jest wypełniana wyłącznie zapytaniem SQL przy
+migracji istniejących rekordów (bez dekompresji zapisanych opisów Zstd) oraz
+przy każdym kolejnym zapisie opisu. Wydanie jest skupione na wydajności
+(wątek interfejsu, rozmiar puli historii w pamięci, rozmiar pobieranych
+miniatur, poziom kompresji obrazów konwertowanych w tle) i nie zmienia
+powierzchni bezpieczeństwa opisanej niżej dla 1.7-beta.
 
 Wersja 1.7-beta tworzy schemat 25 z osobnym indeksem FTS5 i magazynem opisów
 Zstd/UTF-8. Wyszukiwanie zwykłej Historii jest lokalne. Sieć jest używana tylko
@@ -37,9 +45,10 @@ zachowuje rekordy i Ulubione, tworzy produkcyjny indeks FTS5 oraz magazyn pełny
 opisów jako BLOB Zstd level 5 albo UTF-8, zależnie od rzeczywistego zysku.
 FTS5 otrzymuje osobną oczyszczoną reprezentację tekstową, nigdy skompresowany BLOB.
 
-Kandydat źródłowy 1.7-beta jest przygotowany do dalszej walidacji i podpisania
+Kandydat źródłowy 1.8-beta jest przygotowany do dalszej walidacji i podpisania
 przez użytkownika w Android Studio, ale nie ma jeszcze finalnego APK ani raportów.
-Nie wolno przypisywać mu sum SHA-256, VirusTotal ani MobSF wcześniejszych wydań.
+Nie wolno przypisywać mu sum SHA-256, VirusTotal ani MobSF wcześniejszych wydań
+(w tym opublikowanego już 1.7-beta).
 
 ## Zakres
 

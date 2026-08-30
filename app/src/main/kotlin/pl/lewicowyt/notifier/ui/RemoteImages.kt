@@ -57,7 +57,10 @@ fun VideoThumbnail(
     videoId: String,
     modifier: Modifier = Modifier,
 ) {
-    val url = "https://i.ytimg.com/vi/$videoId/sddefault.jpg"
+    // 360p pobierane wprost z CDN YouTube (hqdefault = 480×360), zamiast
+    // sddefault (640×480) zmniejszanego potem w procesie. Mniej transferu,
+    // pamięci i pracy dekodera dla kafelka 128×72dp.
+    val url = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
     val bitmap by rememberRemoteBitmap(url)
     if (bitmap != null) {
         Image(

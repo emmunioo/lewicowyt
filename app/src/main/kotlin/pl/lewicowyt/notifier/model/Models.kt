@@ -1,16 +1,24 @@
 package pl.lewicowyt.notifier.model
 
+import androidx.compose.runtime.Immutable
+
 enum class SourceType {
     CHANNEL,
     PLAYLIST,
 }
 
+@Immutable
 data class CreatorSource(
     val type: SourceType,
     val url: String,
     val externalId: String?,
 )
 
+// @Immutable: pole `sources` to lista, przez którą Compose domyślnie uznałby
+// Creator za niestabilny (a jest używany w items() listy twórców). Obiekt jest
+// budowany raz z katalogu i nigdy nie mutowany, więc adnotacja jest prawdziwa i
+// przywraca pomijalność wiersza (#3).
+@Immutable
 data class Creator(
     val id: String,
     val name: String,
@@ -162,6 +170,7 @@ data class VideoEntry(
     val origin: VideoOrigin = VideoOrigin.YOUTUBE,
 )
 
+@Immutable
 data class HistoryItem(
     val videoId: String,
     val creatorId: String,
@@ -209,6 +218,7 @@ fun HistoryItem.statusBadgesAt(nowMillis: Long): List<MaterialStatusBadge> = bui
     }
 }
 
+@Immutable
 data class OlderMaterialCandidate(
     val videoId: String,
     val title: String,

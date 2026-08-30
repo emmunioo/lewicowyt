@@ -18,6 +18,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -62,6 +63,9 @@ private const val MAX_HISTORY_DAYS = 60
 private const val DAY_MILLIS = 24L * 60L * 60L * 1000L
 private const val HISTORY_PAGE_SIZE = 20
 private const val HISTORY_PREFETCH_DISTANCE = 5
+// Podłoga rozmiaru puli historii trzymanej w pamięci (okno najnowszych; rośnie
+// przy przewijaniu). Zastępuje wcześniejsze stałe 10 000 (#5).
+private const val HISTORY_POOL_MIN = 50
 private const val DESELECTED_HISTORY_RETENTION_MILLIS = 7L * DAY_MILLIS
 private const val MAX_SEARCH_QUERY_CHARS = 200
 private const val MAX_VISIBLE_SYNC_ERRORS = 5
@@ -158,12 +162,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val historySearchLimit = MutableStateFlow(HISTORY_SEARCH_PAGE_SIZE)
     private val olderMaterialSearch = MutableStateFlow(OlderMaterialSearchUiState())
     private val notificationInbox = MutableStateFlow<List<HistoryItem>>(emptyList())
-    private val storedAvatarSnapshot = graph.database.getCreatorAvatars()
-    private val avatars = MutableStateFlow(
-        storedAvatarSnapshot.normalizedAvatarUrls(),
-    )
-    private val legacyAvatarIdsToRefresh =
-        storedAvatarSnapshot.keys - avatars.value.keys
+    // Odczyt startowy przeniesiony do init{} (Dispatchers.IO) - blokował wątek
+    // główny w konstruktorze ViewModelu przy KAŻDYM zimnym starcie. UI startuje
+    // z pustą mapą, awatary dopływają async (tak samo tolerowane jak leniwe
+    // odświeżanie przez produceState gdzie indziej).
+    private val avatars = MutableStateFlow<Map<String, String>>(emptyMap())
     private val refreshing = MutableStateFlow(false)
     private val actionMessage = MutableStateFlow<String?>(null)
     private val apiKeyStatus = MutableStateFlow<ApiKeyUiState>(ApiKeyUiState.Idle)
@@ -359,22 +362,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             historyLoadError = loadState.error,
             notificationNavigationRequest = contentState.notificationNavigationRequest,
         )
-    }.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5_000),
-        initialValue = AppUiState(
-            creators = graph.catalog.creators,
-            catalogCreators = graph.catalog.creators,
-            allCreatorCount = graph.catalog.creators.size,
-            creatorAvatars = avatars.value,
-        ),
-    )
+    }
+        // Ciężki potok (filtrowanie + sortowanie całej historii, lowercase
+        // nazw twórców) liczy się na puli Default, a nie na wątku UI
+        // (viewModelScope = Main.immediate). Wątek główny dostaje wyłącznie
+        // gotowy AppUiState. Redukuje jank przy pisaniu i scrollu (#1).
+        .flowOn(Dispatchers.Default)
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = AppUiState(
+                creators = graph.catalog.creators,
+                catalogCreators = graph.catalog.creators,
+                allCreatorCount = graph.catalog.creators.size,
+                creatorAvatars = avatars.value,
+            ),
+        )
 
     init {
         refreshHistory()
         syncOnFirstLaunchIfNeeded()
-        if (legacyAvatarIdsToRefresh.isNotEmpty()) {
-            viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
+            val storedAvatarSnapshot = graph.database.getCreatorAvatars()
+            val normalized = storedAvatarSnapshot.normalizedAvatarUrls()
+            avatars.value = normalized
+            val legacyAvatarIdsToRefresh = storedAvatarSnapshot.keys - normalized.keys
+            if (legacyAvatarIdsToRefresh.isNotEmpty()) {
                 refreshMissingAvatars(legacyAvatarIdsToRefresh)
             }
         }
@@ -924,12 +937,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             selectedCreatorIds = settings.selectedCreatorIds,
             nowMillis = System.currentTimeMillis(),
         )
+        // Pula w pamięci to okno najnowszych materiałów wielkości aktualnej
+        // głębokości przewinięcia (+ zapas na prefetch), z podłogą 50 — a nie
+        // stałe 10 000 wczytywane przy każdym odświeżeniu. Ulubione i tak są
+        // zawsze zwracane w całości przez recentHistory (#5).
+        val historyPoolLimit = (
+            historyLimit.value + HISTORY_PAGE_SIZE + HISTORY_PREFETCH_DISTANCE
+            ).coerceIn(HISTORY_POOL_MIN, 10_000)
         val refreshed = withContext(Dispatchers.IO) {
             graph.database.pruneExpiredData()
             if (expiredCreatorIds.isNotEmpty()) {
                 graph.database.deleteHistoryForCreators(expiredCreatorIds)
             }
-            graph.database.recentHistory(days = MAX_HISTORY_DAYS, limit = 10_000) to
+            graph.database.recentHistory(days = MAX_HISTORY_DAYS, limit = historyPoolLimit) to
                 graph.database.recentNotificationInbox(limit = 2_000)
         }
         history.value = refreshed.first

@@ -12,6 +12,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import java.io.IOException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import pl.lewicowyt.notifier.model.HistoryFilter
@@ -242,6 +243,11 @@ class PreferencesRepository(private val context: Context) {
                     ?: "Jeszcze nie synchronizowano",
             )
         }
+        // DataStore emituje przy każdym zapisie pliku preferencji, także gdy
+        // wynikowe AppSettings są identyczne (np. powtórny zapis tej samej
+        // wartości). Bez tego każda taka emisja niepotrzebnie odpalała cały
+        // potok stanu w AppViewModel (filtr+sort historii) (#4).
+        .distinctUntilChanged()
 
     suspend fun current(): AppSettings {
         val settings = settingsFlow.first()

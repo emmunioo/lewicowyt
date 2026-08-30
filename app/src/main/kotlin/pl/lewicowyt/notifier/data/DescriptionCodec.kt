@@ -65,12 +65,17 @@ internal object DescriptionCodec {
 
     fun searchableText(value: String): String = value
         .replace('\u0000', ' ')
-        .replace(Regex("<[^>]{1,500}>"), " ")
+        .replace(HTML_TAG, " ")
         .replace("&amp;", "&")
         .replace("&quot;", "\"")
-        .replace(Regex("\\s+"), " ")
+        .replace(WHITESPACE, " ")
         .trim()
         .take(MAX_SEARCHABLE_DESCRIPTION_CHARS)
+
+    // Kompilowane raz. Wcześniej te dwa wzorce powstawały na nowo przy każdym
+    // wywołaniu searchableText (raz na indeksowany opis) (#10).
+    private val HTML_TAG = Regex("<[^>]{1,500}>")
+    private val WHITESPACE = Regex("\\s+")
 
     private const val MAX_DESCRIPTION_CHARS = 200_000
     private const val MAX_SEARCHABLE_DESCRIPTION_CHARS = 20_000
