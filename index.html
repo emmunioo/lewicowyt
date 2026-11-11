@@ -9,7 +9,7 @@
   <meta property="og:type" content="website">
   <meta property="og:title" content="lewicowYT — obserwuj tylko wybranych twórców">
   <meta property="og:description" content="Historia do 60 dni, powiadomienia i lokalne dane. Bez konta i bez własnego serwera.">
-  <meta property="og:image" content="icone.png">
+  <meta property="og:image" content="https://emmunioo.github.io/lewicowyt/icone.png">
   <meta property="og:locale" content="pl_PL">
   <title>lewicowYT — wybrani twórcy, bez zbędnego szumu</title>
   <link rel="icon" href="icone.png" type="image/png">
@@ -883,6 +883,31 @@
       width: 100%;
     }
 
+    /* wariant APK dobrany do architektury urządzenia + mniejsza opcja „uniwersalna" */
+    .apk-variants {
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: .82rem;
+      line-height: 1.5;
+    }
+
+    .apk-variants a {
+      color: inherit;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+
+    .apk-variants a:hover,
+    .apk-variants a:focus-visible {
+      color: var(--text, #fff);
+    }
+
+    .apk-variants .apk-universal {
+      display: block;
+      margin-top: 6px;
+      font-size: .76rem;
+    }
+
     .checksum {
       margin-top: 20px;
       padding-top: 18px;
@@ -1381,6 +1406,8 @@
         <a href="#instalacja">Instalacja</a>
         <a href="#faq">FAQ</a>
         <a class="nav-github" href="https://github.com/emmunioo/lewicowyt" target="_blank" rel="noopener noreferrer">Kod na GitHubie ↗</a>
+        <a href="https://github.com/emmunioo/serwer-referencyjny-lewicowyt" target="_blank" rel="noopener noreferrer">Serwer referencyjny</a>
+        <a href="protokol-serwera.html">Protokół serwera</a>
       </nav>
     </div>
   </header>
@@ -1389,7 +1416,7 @@
     <section class="hero" id="top">
       <div class="shell hero-grid">
         <div>
-          <p class="eyebrow"><span class="eyebrow-dot"></span> Wersja 1.8-beta · Android 8.0+</p>
+          <p class="eyebrow"><span class="eyebrow-dot"></span> Wersja 1.9-beta · Android 8.0+</p>
           <h1>Lewicowi twórcy.<br><span class="hero-highlight">W jednym miejscu.</span></h1>
           <p class="hero-copy">
             lewicowYT zbiera nowe filmy, Shorty i transmisje wybranych kanałów w jednej,
@@ -1397,13 +1424,14 @@
             kontroli nad listą obserwowanych.
           </p>
           <div class="actions">
-            <a class="button button-primary" href="https://github.com/emmunioo/lewicowyt/releases/download/v1.8-beta/lewicowYT-1.8-beta.apk">
-              Pobierz APK <span class="button-arrow" aria-hidden="true">↓</span>
+            <a class="button button-primary" data-apk-primary href="https://github.com/emmunioo/lewicowyt/releases/download/v1.9-beta/lewicowYT-1.9-beta-arm64.apk">
+              Pobierz APK<span data-apk-abi></span> <span class="button-arrow" aria-hidden="true">↓</span>
             </a>
             <a class="button button-secondary" href="https://github.com/emmunioo/lewicowyt" target="_blank" rel="noopener noreferrer">
               Zobacz kod <span class="button-arrow" aria-hidden="true">↗</span>
             </a>
           </div>
+          <p class="apk-variants" data-apk-variants hidden></p>
           <ul class="hero-meta" aria-label="Najważniejsze informacje">
             <li>Bez logowania</li>
             <li>Dane lokalnie</li>
@@ -1528,13 +1556,15 @@
             <p class="section-kicker">Prywatność bez konta</p>
             <h2 class="privacy-title">Twoja lista zostaje na Twoim telefonie.</h2>
             <p class="privacy-copy">
-              Historia, obserwowani twórcy i ustawienia są przechowywane lokalnie.
-              Aplikacja nie potrzebuje Firebase, własnego serwera ani profilu użytkownika.
+              Historia, obserwowani twórcy i ustawienia są przechowywane lokalnie — bez konta i profilu użytkownika.
+              Powiadomienia o filmach dostarcza serwer domyślny lewicowYT działający w Google Cloud Run: widzi adres IP
+              i czas połączeń, ale nie Twoje ustawienia, a budziki są szyfrowane end-to-end. Możesz go zastąpić własnym
+              serwerem społeczności, także .onion przez Tor. Serwer domyślny nie używa push Google (FCM) — budziki idą wyłącznie przez UnifiedPush.
             </p>
           </div>
           <ul class="privacy-list">
             <li><span class="check" aria-hidden="true">✓</span><span>Brak dostępu do lokalizacji, kontaktów, mikrofonu, kamery i prywatnych plików.</span></li>
-            <li><span class="check" aria-hidden="true">✓</span><span>Połączenia wyłącznie przez HTTPS oraz obsługa szyfrowanego DNS.</span></li>
+            <li><span class="check" aria-hidden="true">✓</span><span>Połączenia przez HTTPS i szyfrowany DNS; zwykły HTTP tylko do serwerów w sieci lokalnej, adresy .onion wyłącznie przez wbudowany Tor.</span></li>
             <li><span class="check" aria-hidden="true">✓</span><span>Historia starsza niż 60 dni i powiadomienia starsze niż 14 dni są automatycznie usuwane.</span></li>
             <li><span class="check" aria-hidden="true">✓</span><span>Klucz YouTube API, jeśli go podasz, jest szyfrowany z użyciem Android Keystore.</span></li>
           </ul>
@@ -1578,34 +1608,37 @@
 
         <aside class="download-card" aria-label="Pobieranie aplikacji">
           <span class="release-label">Wydanie testowe</span>
-          <h3>lewicowYT 1.8-beta</h3>
-          <p class="release-info">Wydanie beta · versionCode 19</p>
-          <a class="button button-primary" href="https://github.com/emmunioo/lewicowyt/releases/download/v1.8-beta/lewicowYT-1.8-beta.apk">
-            Pobierz dla Androida <span class="button-arrow" aria-hidden="true">↓</span>
+          <h3>lewicowYT 1.9-beta</h3>
+          <p class="release-info">Wydanie beta · versionCode 20</p>
+          <a class="button button-primary" data-apk-primary href="https://github.com/emmunioo/lewicowyt/releases/download/v1.9-beta/lewicowYT-1.9-beta-arm64.apk">
+            Pobierz dla Androida<span data-apk-abi></span> <span class="button-arrow" aria-hidden="true">↓</span>
           </a>
+          <p class="apk-variants" data-apk-variants hidden></p>
           <div class="checksum">
             <div class="checksum-label">
               <span>SHA-256 pliku</span>
               <button class="copy-button" id="copy-hash" type="button">Kopiuj</button>
             </div>
-            <code class="hash" id="release-hash">f3e645e1974d5229392732342f45a8ede352fc2c39e96e6947cd7411cdce6fd3</code>
+            <code class="hash" id="release-hash">b2b9ea7e0f3f7079f33075f4a16b2f93e9023c2a999458137bda1abe6aa71b60</code>
           </div>
           <div class="verification">
             <p class="verification-title">Weryfikacja APK</p>
             <div class="verification-links">
-              <a class="verification-link" href="https://www.virustotal.com/gui/file/f3e645e1974d5229392732342f45a8ede352fc2c39e96e6947cd7411cdce6fd3" target="_blank" rel="noopener noreferrer">
+              <a class="verification-link" data-vt-link href="https://www.virustotal.com/gui/file/b2b9ea7e0f3f7079f33075f4a16b2f93e9023c2a999458137bda1abe6aa71b60" target="_blank" rel="noopener noreferrer">
                 <span class="verification-mark" aria-hidden="true">VT</span>
-                <span>VirusTotal 1.8-beta</span>
+                <span data-vt-label>VirusTotal 1.9-beta · arm64</span>
                 <span class="verification-arrow" aria-hidden="true">↗</span>
               </a>
-              <a class="verification-link" href="lewicowYT-1.8-beta-MobSF.pdf" target="_blank" rel="noopener noreferrer">
+              <a class="verification-link" data-mobsf-link href="lewicowYT-1.9-beta-arm64-MobSF.pdf" target="_blank" rel="noopener noreferrer">
                 <span class="verification-mark" aria-hidden="true">PDF</span>
-                <span>Raport MobSF 1.8-beta</span>
+                <span data-mobsf-label>Raport MobSF 1.9-beta · arm64</span>
                 <span class="verification-arrow" aria-hidden="true">↗</span>
               </a>
             </div>
             <p class="verification-note">
-              VirusTotal oraz raport MobSF dotyczą finalnego APK 1.8-beta o sumie SHA-256 podanej powyżej.
+              VirusTotal oraz raport MobSF dotyczą finalnego APK 1.9-beta o sumie SHA-256 podanej powyżej
+              (po wybraniu innego wariantu linki i suma zmieniają się razem z nim). Raport MobSF jest opublikowany dla wariantów arm64
+              i uniwersalnego; dla armv7 i x64 podajemy raport wersji uniwersalnej, która zawiera te same biblioteki natywne.
               Automatyczny skan nie stanowi gwarancji bezpieczeństwa;
               <a href="https://github.com/emmunioo/lewicowyt/blob/main/SECURITY_AUDIT.md" target="_blank" rel="noopener noreferrer">zobacz dokumentację bezpieczeństwa</a>.
             </p>
@@ -1621,8 +1654,8 @@
         <h2 class="section-title">Krótko i konkretnie.</h2>
         <div class="faq-list">
           <details>
-            <summary>Co zmienia wersja 1.8-beta?</summary>
-            <p>Wersja 1.8-beta jest skupiona głównie na wydajności: przewijanie i wyszukiwanie Historii nie liczy się już na wątku, który rysuje ekran, odświeżanie Historii jest szybsze, a miniatury i konwersja obrazów w tle są tańsze dla baterii. Dodaje też dwóch nowych twórców (Koroluk, PROsiaczek) i animowaną ikonkę zaplanowanej transmisji podczas pobierania opisu. Zawiera cały zakres poprzednich wersji: lokalną wyszukiwarkę Historii działającą offline, funkcję „Znajdź starszy”, mniejsze aktualizacje różnicowe oraz prywatność powiadomień na ekranie blokady z 1.7-beta; obsługę ReVanced i innych klientów YouTube z 1.6.1-beta; a także Ulubione, wysoki kontrast, poprawki TalkBack, pewniejsze działanie w tle i SQLite Bundled z 1.6-beta.</p>
+            <summary>Co zmienia wersja 1.9-beta?</summary>
+            <p>Wersja 1.9-beta dodaje serwery społeczności (nowa zakładka z treściami od serwerów, którym ufasz, z regulaminem akceptowanym w aplikacji), powiadomienia o nowych filmach zgłaszane przez serwer zamiast ciągłego sprawdzania YouTube w tle (UnifiedPush, szyfrowane end-to-end), wbudowany Tor dla serwerów .onion oraz godziny powiadomień i powiadomienia na zegarek. Przy pierwszym uruchomieniu pokazuje regulamin aplikacji — do jego akceptacji aplikacja nie łączy się z serwerem domyślnym, który można zastąpić własnym. Wzmacnia też obsługę obrazów (jedyny dekoder JPEG XL z limitami rozmiaru, nowsze libjxl, libavif i dekoder AV1 dav1d, utwardzone biblioteki natywne) i dodaje ukryte ustawienie zaufania do certyfikatów użytkownika dla pracy przez proxy. Wersja 1.8-beta była skupiona głównie na wydajności: przewijanie i wyszukiwanie Historii nie liczy się już na wątku, który rysuje ekran, odświeżanie Historii jest szybsze, a miniatury i konwersja obrazów w tle są tańsze dla baterii. Dodaje też dwóch nowych twórców (Koroluk, PROsiaczek) i animowaną ikonkę zaplanowanej transmisji podczas pobierania opisu. Zawiera cały zakres poprzednich wersji: lokalną wyszukiwarkę Historii działającą offline, funkcję „Znajdź starszy”, mniejsze aktualizacje różnicowe oraz prywatność powiadomień na ekranie blokady z 1.7-beta; obsługę ReVanced i innych klientów YouTube z 1.6.1-beta; a także Ulubione, wysoki kontrast, poprawki TalkBack, pewniejsze działanie w tle i SQLite Bundled z 1.6-beta.</p>
           </details>
           <details>
             <summary>Jak działają automatyczne aktualizacje?</summary>
@@ -1667,7 +1700,7 @@
               w repozytorium. Kod oraz dokumentacja bezpieczeństwa są publicznie dostępne.
             </p>
             <div class="actions">
-              <a class="button button-primary" href="https://github.com/emmunioo/lewicowyt/releases/download/v1.8-beta/lewicowYT-1.8-beta.apk">Pobierz 1.8-beta ↓</a>
+              <a class="button button-primary" data-apk-primary href="https://github.com/emmunioo/lewicowyt/releases/download/v1.9-beta/lewicowYT-1.9-beta-arm64.apk">Pobierz 1.9-beta<span data-apk-abi></span> ↓</a>
               <a class="button button-secondary" href="https://github.com/emmunioo/lewicowyt/issues" target="_blank" rel="noopener noreferrer">Zgłoś problem ↗</a>
             </div>
           </div>
@@ -1678,10 +1711,10 @@
     <section class="download-count-section" aria-labelledby="download-count-title">
       <div class="shell">
         <div class="download-count-panel">
-          <h2 id="download-count-title">Pobrano nas tyle razy</h2>
+          <h2 id="download-count-title">Pobrania najnowszej wersji</h2>
           <strong class="download-count" id="download-count" aria-live="polite">…</strong>
           <p class="download-count-note" id="download-count-note">
-            Łączna liczba pobrań plików APK z GitHub Releases. Nie oznacza liczby unikalnych osób ani instalacji.
+            Liczba pobrań pliku APK najnowszego wydania z GitHub Releases. Nie sumujemy starszych wydań (inaczej każda aktualizacja liczyłaby się osobno). Zawiera też pobrania przez aktualizację w aplikacji, więc nie oznacza liczby unikalnych osób ani instalacji.
           </p>
         </div>
       </div>
@@ -1696,8 +1729,9 @@
       </p>
       <nav class="footer-links" aria-label="Linki w stopce">
         <a href="https://github.com/emmunioo/lewicowyt" target="_blank" rel="noopener noreferrer">GitHub</a>
-        <a href="https://github.com/emmunioo/lewicowyt/releases/tag/v1.8-beta" target="_blank" rel="noopener noreferrer">Wydanie</a>
+        <a href="https://github.com/emmunioo/lewicowyt/releases/tag/v1.9-beta" target="_blank" rel="noopener noreferrer">Wydanie</a>
         <a href="https://github.com/emmunioo/lewicowyt/blob/main/SECURITY_AUDIT.md" target="_blank" rel="noopener noreferrer">Bezpieczeństwo</a>
+        <a href="protokol-serwera.html">Protokół serwera</a>
         <a href="https://github.com/emmunioo/lewicowyt/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">Licencja</a>
       </nav>
     </div>
@@ -1712,7 +1746,7 @@
       const hash = document.getElementById("release-hash");
       const downloadCount = document.getElementById("download-count");
       const downloadCountNote = document.getElementById("download-count-note");
-      const downloadCountCacheKey = "lewicowyt-download-count";
+      const downloadCountCacheKey = "lewicowyt-download-count-latest"; // -latest: nowa metoda (najnowsze wydanie), pomija stary zbuforowany wynik sumaryczny
       const downloadCountCacheTime = 60 * 60 * 1000;
 
       const updateHeader = () => {
@@ -1753,6 +1787,173 @@
         }, 1800);
       });
 
+      // jedno zapytanie do GitHub API na wizytę — korzysta z niego licznik pobrań i wybór wariantu APK
+      let releasesPromise = null;
+      const fetchReleases = () => {
+        releasesPromise ??= fetch(
+          "https://api.github.com/repos/emmunioo/lewicowyt/releases?per_page=100",
+          {
+            headers: {
+              Accept: "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28"
+            }
+          }
+        ).then((response) => {
+          if (!response.ok) {
+            throw new Error(`GitHub API: ${response.status}`);
+          }
+          return response.json();
+        });
+        return releasesPromise;
+      };
+
+      // --- wariant APK dla architektury urządzenia (arm64 / armv7 / x64) ---
+      // Android w przeglądarce nie podaje ABI wprost: Chrome ma navigator.platform („Linux aarch64",
+      // „Linux armv8l" = 32-bitowa przeglądarka na 64-bitowym procesorze, „Linux armv7l", „Linux x86_64"),
+      // Firefox ma to samo w userAgent, a nowsze Chromium dodatkowo architecture/bitness z Client Hints.
+      const APK_ABIS = {
+        arm64: "arm64 (64-bit ARM — prawie wszystkie telefony)",
+        armv7: "armv7 (starsze 32-bitowe telefony)",
+        x64: "x64 (emulatory i urządzenia x86_64)"
+      };
+
+      const pickAbi = (platform, userAgent, hints) => {
+        const all = `${platform} ${userAgent} ${hints}`.toLowerCase();
+        const android = /android/.test(all);
+        // komputer (Windows/macOS/Linux): pobiera się na telefon, więc architektura komputera nic nie mówi
+        if (!android) return { abi: "arm64", detected: false, android };
+        if (/aarch64|arm64|armv8|\barm 64\b/.test(all)) return { abi: "arm64", detected: android, android };
+        if (/x86_64|x86-64|amd64|\bx64\b|\bx86 64\b/.test(all)) return { abi: "x64", detected: android, android };
+        // 32-bitowy x86 — takiego APK nie ma; uniwersalny też go nie obejmuje
+        if (/\bi[3-6]86\b|\bx86\b/.test(all)) return { abi: null, detected: android, android };
+        if (/armv7|armeabi|\barm 32\b|\barm\b/.test(all)) return { abi: "armv7", detected: android, android };
+        // nie wiadomo — arm64 to bezpieczny wybór dla zdecydowanej większości telefonów
+        return { abi: "arm64", detected: false, android };
+      };
+
+      const detectAbi = async () => {
+        let hints = "";
+        try {
+          const uaData = navigator.userAgentData;
+          if (uaData?.getHighEntropyValues) {
+            const values = await uaData.getHighEntropyValues(["architecture", "bitness", "platform"]);
+            hints = `${values.platform || ""} ${values.architecture || ""} ${values.bitness || ""}`;
+          }
+        } catch {
+          // Client Hints niedostępne — zostaje platform/userAgent
+        }
+        return pickAbi(navigator.platform || "", navigator.userAgent || "", hints);
+      };
+
+      const formatSize = (bytes) =>
+        Number.isFinite(bytes) && bytes > 0
+          ? `${new Intl.NumberFormat("pl-PL", { maximumFractionDigits: 1 }).format(bytes / 1048576)} MB`
+          : "";
+
+      // skróty SHA-256 APK wydania 1.9-beta (VirusTotal) i raporty MobSF opublikowane na tej stronie
+      const releaseVerification = {
+        arm64: { sha256: "b2b9ea7e0f3f7079f33075f4a16b2f93e9023c2a999458137bda1abe6aa71b60", mobsf: "lewicowYT-1.9-beta-arm64-MobSF.pdf", mobsfVariant: "arm64" },
+        armv7: { sha256: "9c74a68424f6729b92a51dbe3edb24d9781be875cdadf2d089459af6685cf433", mobsf: "lewicowYT-1.9-beta-all-universal-MobSF.pdf", mobsfVariant: "uniwersalny" },
+        x64: { sha256: "a6c377dbe380f2faf0066b58ac2614f08a84988da7246fec04aa56a084415bb5", mobsf: "lewicowYT-1.9-beta-all-universal-MobSF.pdf", mobsfVariant: "uniwersalny" },
+        universal: { sha256: "d6c50cdf58610013bcfa1ab296a405c86ae8907a36c9ecad0751f2b4b71b0499", mobsf: "lewicowYT-1.9-beta-all-universal-MobSF.pdf", mobsfVariant: "uniwersalny" },
+      };
+
+      const setupApkVariants = async () => {
+        const primaryButtons = [...document.querySelectorAll("[data-apk-primary]")];
+        const variantBoxes = [...document.querySelectorAll("[data-apk-variants]")];
+        if (!primaryButtons.length) return;
+        // wydanie, które strona opisuje (hash, VirusTotal, MobSF) — nie przeskakujemy na inne
+        const tag = primaryButtons[0].getAttribute("href").match(/\/releases\/download\/([^/]+)\//)?.[1];
+        if (!tag) return;
+
+        const [device, releases] = await Promise.all([detectAbi(), fetchReleases().catch(() => null)]);
+        const release = (Array.isArray(releases) ? releases : []).find((r) => r?.tag_name === tag && !r.draft);
+        const apks = (release?.assets || []).filter((a) => a.name?.toLowerCase().endsWith(".apk"));
+        const byVariant = {};
+        for (const asset of apks) {
+          const variant = asset.name.match(/-(arm64|armv7|x64|universal)\.apk$/i)?.[1]?.toLowerCase();
+          if (variant) byVariant[variant] = asset;
+        }
+        const universal = byVariant.universal || (apks.length === 1 ? apks[0] : null);
+        const chosen = (device.abi && byVariant[device.abi]) || null;
+        const hasAbiFiles = ["arm64", "armv7", "x64"].some((v) => byVariant[v]);
+
+        const link = (asset, text) => {
+          const a = document.createElement("a");
+          a.href = asset.browser_download_url;
+          a.textContent = text;
+          return a;
+        };
+
+        if (chosen) {
+          primaryButtons.forEach((button) => {
+            button.href = chosen.browser_download_url;
+            const label = button.querySelector("[data-apk-abi]");
+            if (label) label.textContent = ` · ${device.abi}`;
+          });
+          // skrót SHA-256 na karcie dotyczy pobieranego pliku
+          const digest = chosen.digest?.replace(/^sha256:/, "");
+          if (digest && hash) hash.textContent = digest;
+          // VirusTotal i raport MobSF odpowiadają wybranemu wariantowi (sumy z wydania 1.9-beta; MobSF: arm64 i uniwersalny)
+          const info = releaseVerification[device.abi];
+          if (info) {
+            const vt = document.querySelector("[data-vt-link]");
+            const vtLabel = document.querySelector("[data-vt-label]");
+            const mobsf = document.querySelector("[data-mobsf-link]");
+            const mobsfLabel = document.querySelector("[data-mobsf-label]");
+            if (vt) vt.href = `https://www.virustotal.com/gui/file/${info.sha256}`;
+            if (vtLabel) vtLabel.textContent = `VirusTotal 1.9-beta · ${device.abi}`;
+            if (mobsf) mobsf.href = info.mobsf;
+            if (mobsfLabel) mobsfLabel.textContent = `Raport MobSF 1.9-beta · ${info.mobsfVariant}`;
+          }
+        } else if (universal && device.abi === null && hasAbiFiles) {
+          // 32-bitowy x86: nic nie pasuje, podajemy plik uniwersalny i uczciwą informację
+          primaryButtons.forEach((button) => (button.href = universal.browser_download_url));
+        }
+
+        variantBoxes.forEach((box) => {
+          box.replaceChildren();
+          if (hasAbiFiles) {
+            const lead = document.createElement("span");
+            if (device.abi === null) {
+              lead.textContent = "Twoje urządzenie (32-bitowe x86) nie jest obsługiwane. ";
+            } else if (chosen) {
+              lead.textContent = device.detected
+                ? `Wykryto architekturę: ${APK_ABIS[device.abi]}. `
+                : device.android
+                  ? "Nie udało się wykryć architektury — wybrano arm64. "
+                  : "Pobierasz na komputerze — domyślnie arm64, pasuje do prawie każdego telefonu. ";
+            }
+            box.append(lead, "Inny wariant: ");
+            ["arm64", "armv7", "x64"]
+              .filter((v) => byVariant[v] && v !== (chosen && device.abi))
+              .forEach((v, i) => {
+                if (i) box.append(" · ");
+                const size = formatSize(byVariant[v].size);
+                box.append(link(byVariant[v], size ? `${v} (${size})` : v));
+              });
+          }
+          if (universal) {
+            const small = document.createElement("small");
+            small.className = "apk-universal";
+            const size = formatSize(universal.size);
+            if (hasAbiFiles) {
+              small.append(
+                "Nie wiesz, który wybrać? ",
+                link(universal, `Pobierz wersję uniwersalną${size ? ` (${size})` : ""}`),
+                " — większa, ale działa na każdym urządzeniu."
+              );
+            } else {
+              small.append(
+                `To wydanie ma jeden wspólny plik APK dla wszystkich urządzeń${size ? ` (${size})` : ""}.`
+              );
+            }
+            box.append(small);
+          }
+          box.hidden = !box.childNodes.length;
+        });
+      };
+
       const showDownloadCount = (count) => {
         downloadCount.textContent = `~${new Intl.NumberFormat("pl-PL").format(count)}`;
       };
@@ -1775,34 +1976,31 @@
         }
 
         try {
-          const response = await fetch(
-            "https://api.github.com/repos/emmunioo/lewicowyt/releases?per_page=100",
-            {
-              headers: {
-                Accept: "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28"
-              }
-            }
-          );
+          const releases = await fetchReleases();
 
-          if (!response.ok) {
-            throw new Error(`GitHub API: ${response.status}`);
-          }
+          // Sumowanie WSZYSTKICH wydań zawyżało wynik: aktualizacja w aplikacji pobiera APK z Releases,
+          // więc przejście usera przez kolejne wersje liczyło się wielokrotnie. Bierzemy tylko APK z
+          // NAJNOWSZEGO wydania — każdy aktywny user liczony jest wtedy ~raz (jego pobranie bieżącej wersji).
+          const apkDownloads = (release) =>
+            (Array.isArray(release?.assets) ? release.assets : []).reduce(
+              (assetTotal, asset) =>
+                assetTotal +
+                (asset.name?.toLowerCase().endsWith(".apk") && Number.isFinite(asset.download_count)
+                  ? asset.download_count
+                  : 0),
+              0
+            );
 
-          const releases = await response.json();
-          const count = releases.reduce(
-            (releaseTotal, release) =>
-              releaseTotal +
-              release.assets.reduce(
-                (assetTotal, asset) =>
-                  assetTotal +
-                  (asset.name.toLowerCase().endsWith(".apk") && Number.isFinite(asset.download_count)
-                    ? asset.download_count
-                    : 0),
-                0
-              ),
-            0
-          );
+          const latest = (Array.isArray(releases) ? releases : [])
+            .filter((r) => r && !r.draft && apkDownloads(r) >= 0 &&
+              (Array.isArray(r.assets) && r.assets.some((a) => a.name?.toLowerCase().endsWith(".apk"))))
+            .sort(
+              (a, b) =>
+                new Date(b.published_at || b.created_at || 0) -
+                new Date(a.published_at || a.created_at || 0)
+            )[0];
+
+          const count = latest ? apkDownloads(latest) : 0;
 
           showDownloadCount(count);
 
@@ -1826,6 +2024,7 @@
       };
 
       loadDownloadCount();
+      setupApkVariants();
       document.getElementById("year").textContent = new Date().getFullYear();
     })();
   </script>
