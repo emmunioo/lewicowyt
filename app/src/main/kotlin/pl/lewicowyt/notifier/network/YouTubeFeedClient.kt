@@ -287,9 +287,9 @@ internal fun parseYouTubePublishedInstant(
 private const val FEED_MAX_FUTURE_SKEW_MILLIS = 10L * 60L * 1_000L
 
 /**
- * Atomowy RSS YouTube czasem publikuje dla Shorta kanoniczny adres `/shorts/`.
- * Zachowujemy wyłącznie ten jednoznaczny sygnał; każdy inny lub obcy adres
- * zastępujemy bezpiecznym adresem `watch` z identyfikatorem z pola yt:videoId.
+ * atomowy RSS YT czasem podaje dla Shorta kanoniczne `/shorts/`. trzymamy tylko
+ * ten jednoznaczny sygnał; każdy inny albo obcy adres zamieniamy na bezpieczny
+ * `watch` z ID z pola yt:videoId.
  */
 internal fun canonicalYouTubeEntryUrl(videoId: String, alternateUrl: String): String {
     val shortUrl = runCatching { URI(alternateUrl) }.getOrNull()

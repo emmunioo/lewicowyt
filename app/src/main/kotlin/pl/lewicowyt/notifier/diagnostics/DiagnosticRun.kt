@@ -120,9 +120,8 @@ internal enum class DiagnosticSyncStage {
 }
 
 /**
- * Lekki kontekst jednego rzeczywistego przebiegu. Nie zawiera identyfikatora
- * urządzenia ani danych użytkownika. Czasy etapów są wall-clock i mogą się
- * nakładać, gdy źródła działają równolegle.
+ * lekki kontekst jednego przebiegu. bez ID urządzenia i danych użytkownika.
+ * czasy etapów są wall-clock i mogą się nakładać, gdy źródła lecą równolegle.
  */
 internal class DiagnosticSyncRun private constructor(
     val syncId: String,

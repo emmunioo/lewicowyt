@@ -2,7 +2,6 @@ package pl.lewicowyt.notifier.images
 
 import android.content.Context
 import android.graphics.Bitmap
-import com.awxkee.jxlcoder.JxlCoder
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import org.json.JSONObject
@@ -53,10 +52,10 @@ object BundledAvatarStore {
                 readLimited(input)
             }
         }.getOrNull() ?: return null
-        if (bytes.isEmpty() || !JxlCoder.isJXL(bytes)) {
+        if (bytes.isEmpty() || !NativeJxl.isJxl(bytes)) {
             return null
         }
-        val bitmap = runCatching { JxlCoder.decode(bytes) }.getOrNull() ?: return null
+        val bitmap = NativeJxl.decode(bytes) ?: return null
         if (bitmap.width != AVATAR_SIZE_PX || bitmap.height != AVATAR_SIZE_PX) {
             bitmap.recycle()
             return null

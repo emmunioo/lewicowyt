@@ -1,5 +1,6 @@
 package pl.lewicowyt.notifier
 
+import okhttp3.OkHttpClient
 import java.time.OffsetDateTime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -11,7 +12,7 @@ import pl.lewicowyt.notifier.network.DescriptionFetchResult
 import pl.lewicowyt.notifier.network.YouTubePageClassifier
 
 class YouTubePageClassifierTest {
-    private val classifier = YouTubePageClassifier(HttpTextClient())
+    private val classifier = YouTubePageClassifier(HttpTextClient(OkHttpClient()))
 
     @Test
     fun `members only response is a final description status`() {
@@ -141,6 +142,28 @@ class YouTubePageClassifierTest {
             VideoKind.VIDEO,
             classifier.classifyHtml(html, "lU4H50GMJyI"),
         )
+    }
+
+    @Test
+    fun `D-14 recommended short flag outside player data does not turn film into short`() {
+        val html = """
+            <script>
+            var ytInitialPlayerResponse = {
+              "playabilityStatus":{"status":"OK"},
+              "videoDetails":{
+                "videoId":"lU4H50GMJyI",
+                "lengthSeconds":"641",
+                "isLiveContent":false
+              },
+              "streamingData":{"formats":[{"width":1920,"height":1080}]}
+            };
+            </script>
+            <script>
+            {"reelItemRenderer":{"videoId":"recShort001","isShort":true}}
+            </script>
+        """.trimIndent()
+
+        assertEquals(VideoKind.VIDEO, classifier.classifyHtml(html, "lU4H50GMJyI"))
     }
 
     @Test

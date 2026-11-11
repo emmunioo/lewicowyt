@@ -3,8 +3,18 @@ package pl.lewicowyt.notifier.data
 import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
+import android.database.Cursor
 import androidx.sqlite.SQLiteStatement
+import java.io.File
 import pl.lewicowyt.notifier.AppLog
+import pl.lewicowyt.notifier.community.CommunityAuthorRecord
+import pl.lewicowyt.notifier.community.CommunityConsentRecord
+import pl.lewicowyt.notifier.community.CommunitySection
+import pl.lewicowyt.notifier.community.CommunityServerCodec
+import pl.lewicowyt.notifier.community.CommunityServerRecord
+import pl.lewicowyt.notifier.community.CommunityStoredContent
+import pl.lewicowyt.notifier.community.CommunityStoredItem
+import pl.lewicowyt.notifier.community.CommunityTransportKind
 import pl.lewicowyt.notifier.diagnostics.DiagnosticCategory
 import pl.lewicowyt.notifier.diagnostics.DiagnosticLevel
 import pl.lewicowyt.notifier.diagnostics.DiagnosticLogStore
@@ -85,37 +95,48 @@ class LocalDatabase(
     context: Context,
     databaseName: String = DATABASE_NAME,
 ) {
-    internal val writableDatabase = BundledDatabase(context.getDatabasePath(databaseName))
+    private val databaseFile = context.getDatabasePath(databaseName)
+
+    // T-04: konstruktor nie dotyka dysku. Plik bazy jest otwierany, migrowany i sprawdzany przy PIERWSZYM użyciu
+    // (pod blokadą lazy), a [warmUp] robi to w tle zaraz po starcie — dzięki temu migracja po aktualizacji nie
+    // blokuje wątku głównego w `Application.onCreate` (ANR) ani odbiorników budzonych w tle.
+    internal val writableDatabase: BundledDatabase by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        openRecovering(databaseFile).also { createOrMigrate(it) }
+    }
     internal val readableDatabase: BundledDatabase
         get() = writableDatabase
 
-    init {
-        val oldVersion = readableDatabase.rawQuery("PRAGMA user_version", null).use { cursor ->
+    /** Otwiera bazę (i wykonuje migrację) — wołać z wątku roboczego zaraz po starcie procesu. */
+    fun warmUp() {
+        writableDatabase
+    }
+
+    private fun createOrMigrate(db: BundledDatabase) {
+        val oldVersion = db.rawQuery("PRAGMA user_version", null).use { cursor ->
             if (cursor.moveToFirst()) cursor.getInt(0) else 0
         }
-        require(oldVersion <= DATABASE_VERSION) {
-            "Baza pochodzi z nowszej wersji aplikacji ($oldVersion > $DATABASE_VERSION)"
-        }
+        // M-12: po [openRecovering] nie powinno być już bazy nowszej niż kod — gdyby jednak była (nieoczekiwane),
+        // nie wywracamy startu aplikacji, tylko traktujemy jak brak znanego schematu (bez migracji).
         if (oldVersion == 0) {
-            writableDatabase.beginTransaction()
+            db.beginTransaction()
             try {
-                onCreate(writableDatabase)
-                writableDatabase.execSQL("PRAGMA user_version = $DATABASE_VERSION")
-                writableDatabase.setTransactionSuccessful()
+                onCreate(db)
+                db.execSQL("PRAGMA user_version = $DATABASE_VERSION")
+                db.setTransactionSuccessful()
             } finally {
-                writableDatabase.endTransaction()
+                db.endTransaction()
             }
         } else if (oldVersion < DATABASE_VERSION) {
-            writableDatabase.beginTransaction()
+            db.beginTransaction()
             try {
-                onUpgrade(writableDatabase, oldVersion, DATABASE_VERSION)
-                writableDatabase.execSQL("PRAGMA user_version = $DATABASE_VERSION")
-                writableDatabase.setTransactionSuccessful()
+                onUpgrade(db, oldVersion, DATABASE_VERSION)
+                db.execSQL("PRAGMA user_version = $DATABASE_VERSION")
+                db.setTransactionSuccessful()
             } finally {
-                writableDatabase.endTransaction()
+                db.endTransaction()
             }
         }
-        runCatching { ensureVideoHistoryFtsCoverage(writableDatabase) }
+        runCatching { ensureVideoHistoryFtsCoverage(db) }
             .onFailure { error ->
                 AppLog.warning(
                     "DatabaseFTS",
@@ -128,12 +149,18 @@ class LocalDatabase(
     private fun onCreate(db: BundledDatabase) {
         createSourceStateTable(db)
         createVideoHistoryTable(db)
+        createStreamPrivacyTable(db)
         createVideoHistoryFts(db)
         createCreatorMetadataTable(db)
         createNotificationInboxTable(db)
         createNotificationIdsTable(db)
         createSourcePriorityTable(db)
         createYouTubeChannelTabsTable(db)
+        createCommunityServersTable(db)
+        createCommunityConsentsTable(db)
+        createCommunityAuthorsTable(db)
+        createCommunityItemsTable(db)
+        createCommunityImageKindTable(db)
     }
 
     private fun onUpgrade(db: BundledDatabase, oldVersion: Int, newVersion: Int) {
@@ -192,9 +219,8 @@ class LocalDatabase(
             )
         }
         if (oldVersion < 10) {
-            // Wersja RSS-first korzysta wyłącznie ze źródeł YouTube. Usuwamy
-            // niepotwierdzone rekordy ze starszej integracji; zostaną ponownie
-            // pobrane i sklasyfikowane przez RSS oraz API/Web.
+            // RSS-first = tylko YouTube. wywalamy resztki starej integracji,
+            // RSS/API i tak pobierze je ponownie
             db.delete(
                 "video_history",
                 "origin <> ?",
@@ -202,19 +228,17 @@ class LocalDatabase(
             )
         }
         if (oldVersion < 11) {
-            // Starszy resolver HTML mógł odczytać identyfikator polecanego kanału
-            // zamiast kanału otwartego na stronie. Schemat historii nie przechowuje
-            // ID kanału przy filmie, więc nie da się bezpiecznie odróżnić zatrutych
-            // rekordów. Jednorazowo odbudowujemy historię ze zweryfikowanego katalogu.
+            // stary resolver HTML łapał czasem ID kanału z polecanych zamiast z
+            // otwartej strony. historia nie trzyma channel ID przy filmie, więc nie
+            // odróżnimy zatrutych wierszy – jednorazowy reset z katalogu
             db.delete("notification_inbox", null, null)
             db.delete("notification_ids", null, null)
             db.delete("video_history", null, null)
             db.delete("source_state", null, null)
         }
         if (oldVersion < 12) {
-            // Starszy klasyfikator nie rozpoznawał aktualnego znacznika Shortów.
-            // Ponawiamy klasyfikacje, które po kilku błędach uznano awaryjnie
-            // za zwykły film.
+            // stary klasyfikator nie znał aktualnego znacznika Shortów – ponawiamy te,
+            // które po kilku błędach spadły awaryjnie na zwykły film
             db.execSQL(
                 """
                 UPDATE video_history
@@ -227,13 +251,12 @@ class LocalDatabase(
                 arrayOf<Any>(VideoKind.UNKNOWN.name, MAX_CLASSIFICATION_ATTEMPTS),
             )
         }
-        // Migracje 13 i 14 w starszym wydaniu zerowały `kind`. Nie wolno tego
-        // powtarzać przy bezpośredniej aktualizacji starszej bazy do bieżącej
-        // wersji: niepewna ponowna klasyfikacja nie może usuwać streamów z UI.
+        // UWAGA: migracje 13/14 w starych wydaniach zerowały `kind`. przy skoku ze
+        // starej bazy prosto na bieżącą NIE wolno tego powtarzać – niepewna
+        // reklasyfikacja nie może wywalać streamów z UI.
         if (oldVersion < 15) {
-            // Urządzenia, które zdążyły uruchomić wadliwą migrację 14, wymagają
-            // ponownej klasyfikacji. Zachowujemy jednak aktualny typ do chwili,
-            // gdy YouTube dostarczy jednoznaczną odpowiedź.
+            // kto odpalił felerną migrację 14 – reklasyfikacja, ale trzymamy obecny
+            // typ dopóki YouTube nie da jednoznacznej odpowiedzi
             db.execSQL(
                 """
                 UPDATE video_history
@@ -244,10 +267,9 @@ class LocalDatabase(
             )
         }
         if (oldVersion < 16) {
-            // Starsza ścieżka Data API uznawała każdą zakończoną Premierę za
-            // archiwalny stream, a każdy materiał do 180 sekund za Short.
-            // Zachowujemy widoczny typ do chwili pewnej odpowiedzi, lecz
-            // pozwalamy nowemu klasyfikatorowi poprawić te rekordy w miejscu.
+            // stara ścieżka Data API brała każdą skończoną Premierę za archiwalny
+            // stream, a wszystko do 180 s za Short. typ zostaje widoczny, ale nowy
+            // klasyfikator może poprawić te wiersze w miejscu
             db.execSQL(
                 """
                 UPDATE video_history
@@ -267,9 +289,8 @@ class LocalDatabase(
                 "ALTER TABLE video_history ADD COLUMN " +
                     "kind_evidence INTEGER NOT NULL DEFAULT 0",
             )
-            // Starsze klasyfikatory mogły pomylić typ w obie strony. Nie
-            // usuwamy widocznej historii, ale kolejkujemy każdy rekord do
-            // ponownego potwierdzenia nowym mechanizmem dowodów.
+            // stare klasyfikatory myliły typ w obie strony. historii nie ruszamy,
+            // ale kolejkujemy wszystko do potwierdzenia nowym mechanizmem dowodów
             db.execSQL(
                 """
                 UPDATE video_history
@@ -291,8 +312,8 @@ class LocalDatabase(
         }
         if (oldVersion < 20) {
             createYouTubeChannelTabsTable(db)
-            // Nierozpoznany wpis ma być od razu widoczny jako zwykły film.
-            // Bardziej wiarygodna karta kanału nadal może później zmienić typ.
+            // nierozpoznane pokazujemy od razu jako zwykły film; pewniejsza karta
+            // kanału może to później zmienić
             db.execSQL(
                 """
                 UPDATE video_history
@@ -335,10 +356,9 @@ class LocalDatabase(
             )
         }
         if (oldVersion < 24) {
-            // Przed publicznym wydaniem 1.6 wycofano przedwczesny indeks FTS5
-            // i nieskompresowaną kolumnę opisu. Bazy testowe schematu 23 mogły
-            // już je utworzyć, dlatego sprzątamy je jawnie. Właściwy magazyn
-            // Zstd BLOB i contentless FTS5 powstaną dopiero w 1.7.
+            // przed 1.6 wycofaliśmy przedwczesny FTS5 i nieskompresowaną kolumnę opisu.
+            // testowe bazy schematu 23 mogły je już mieć – sprzątamy jawnie.
+            // docelowy Zstd BLOB + contentless FTS5 dopiero w 1.7
             db.execSQL("DROP TRIGGER IF EXISTS video_history_fts_insert")
             db.execSQL("DROP TRIGGER IF EXISTS video_history_fts_delete")
             db.execSQL("DROP TRIGGER IF EXISTS video_history_fts_update")
@@ -379,15 +399,13 @@ class LocalDatabase(
             )
         }
         if (oldVersion < 26) {
-            // 1.8-beta (#13): description_availability przechowuje 4-stanowy
-            // wskaźnik dostępności opisu (NONE/DOWNLOADED/MEMBERS_ONLY/
-            // SCHEDULED_STREAM) wyliczany RAZ przy zapisie, zamiast dekompresować
-            // Zstd pełny opis przy każdym odczycie listy Historii. Backfill
-            // istniejących wierszy jest w czystym SQL: markery są krótkie i
-            // przechowywane jako UTF-8, więc rozpoznajemy je przez
-            // CAST(description_data AS TEXT) bez dekompresji. Wartości 0..3 są
-            // stabilnym odwzorowaniem DescriptionAvailability (patrz
-            // descriptionAvailabilityDatabaseValue), nie zależnym od ordinal.
+            // 1.8-beta (#13): description_availability trzyma 4-stanowy marker
+            // (NONE/DOWNLOADED/MEMBERS_ONLY/SCHEDULED_STREAM) liczony RAZ przy
+            // zapisie, żeby nie dekompresować Zstd przy każdym odczycie Historii.
+            // backfill w czystym SQL – markery są krótkie i w UTF-8, więc łapiemy je
+            // przez CAST(description_data AS TEXT) bez dekompresji. 0..3 to stałe
+            // mapowanie DescriptionAvailability (patrz descriptionAvailabilityDatabaseValue),
+            // niezależne od .ordinal
             db.execSQL(
                 "ALTER TABLE video_history ADD COLUMN " +
                     "description_availability INTEGER NOT NULL DEFAULT 0",
@@ -410,6 +428,171 @@ class LocalDatabase(
                 ),
             )
         }
+        if (oldVersion < 27) {
+            // 1.9: warstwa serwerów społeczności. czysto addytywne – żadnych danych
+            // z istniejących tabel nie ruszamy.
+            createCommunityServersTable(db)
+            createCommunityConsentsTable(db)
+        }
+        if (oldVersion < 28) {
+            // ustawienia powiadomień per serwer + flaga "może być główny". guard przez
+            // hasColumn, bo baza tworzona świeżo w bloku <27 ma już te kolumny.
+            if (!hasColumn(db, "community_servers", "notify_enabled")) {
+                db.execSQL(
+                    "ALTER TABLE community_servers ADD COLUMN " +
+                        "notify_enabled INTEGER NOT NULL DEFAULT 1",
+                )
+            }
+            if (!hasColumn(db, "community_servers", "muted_platforms")) {
+                db.execSQL("ALTER TABLE community_servers ADD COLUMN muted_platforms TEXT")
+            }
+            if (!hasColumn(db, "community_servers", "can_be_primary")) {
+                db.execSQL(
+                    "ALTER TABLE community_servers ADD COLUMN " +
+                        "can_be_primary INTEGER NOT NULL DEFAULT 0",
+                )
+            }
+        }
+        if (oldVersion < 29) {
+            // widoczność reklam per serwer (domyślnie włączone)
+            if (!hasColumn(db, "community_servers", "ads_enabled")) {
+                db.execSQL(
+                    "ALTER TABLE community_servers ADD COLUMN " +
+                        "ads_enabled INTEGER NOT NULL DEFAULT 1",
+                )
+            }
+        }
+        if (oldVersion < 30) {
+            // druga oś: wyciszenia WYŚWIETLANIA w zakładce (muted_platforms = powiadomienia)
+            if (!hasColumn(db, "community_servers", "display_muted")) {
+                db.execSQL("ALTER TABLE community_servers ADD COLUMN display_muted TEXT")
+            }
+        }
+        if (oldVersion < 31) {
+            // trwały, wspólny magazyn treści: słownik autorów + pozycje ze ściśniętym ZSTD tekstem.
+            // czysto addytywne; przy pierwszym odświeżeniu serwery same zapełnią te tabele.
+            createCommunityAuthorsTable(db)
+            createCommunityItemsTable(db)
+        }
+        if (oldVersion < 32) {
+            // obraz jako osobne kolumny (osobna retencja tekstu/obrazu) + flaga ulubionych
+            if (!hasColumn(db, "community_items", "image_url")) {
+                db.execSQL("ALTER TABLE community_items ADD COLUMN image_url TEXT")
+            }
+            if (!hasColumn(db, "community_items", "notify_image_url")) {
+                db.execSQL("ALTER TABLE community_items ADD COLUMN notify_image_url TEXT")
+            }
+            if (!hasColumn(db, "community_items", "image_quality")) {
+                db.execSQL("ALTER TABLE community_items ADD COLUMN image_quality INTEGER")
+            }
+            if (!hasColumn(db, "community_items", "favorite")) {
+                db.execSQL("ALTER TABLE community_items ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+        if (oldVersion < 33) {
+            // wykrywanie streamów, które stały się prywatne — osobna tabela, nie rusza odczytów historii
+            createStreamPrivacyTable(db)
+        }
+        if (oldVersion < 34) {
+            // #10: walidatory warunkowego GET-a (ETag / Last-Modified) zapamiętane per serwer, oddawane
+            // przy kolejnym pobraniu manifestu (If-None-Match / If-Modified-Since). Serwer może ustawić
+            // ETag na SHA-256 manifestu — wtedy 304 to „ten sam skrót, nie pobieraj". Addytywne, nullable.
+            if (!hasColumn(db, "community_servers", "manifest_etag")) {
+                db.execSQL("ALTER TABLE community_servers ADD COLUMN manifest_etag TEXT")
+            }
+            if (!hasColumn(db, "community_servers", "manifest_last_modified")) {
+                db.execSQL("ALTER TABLE community_servers ADD COLUMN manifest_last_modified TEXT")
+            }
+        }
+        if (oldVersion < 35) {
+            // H-01: hash regulaminu z OSTATNIEGO manifestu. Pozwala egzekwować zgodę po treści regulaminu
+            // (a nie tylko flagę accepted) poza warstwą UI — po zmianie regulaminu serwer wypada z
+            // contactableServers()/restoredState() aż do ponownej zgody. Addytywne, nullable.
+            if (!hasColumn(db, "community_servers", "manifest_terms_hash")) {
+                db.execSQL("ALTER TABLE community_servers ADD COLUMN manifest_terms_hash TEXT")
+            }
+        }
+        if (oldVersion < 36) {
+            // R-01: ostatnio znany `push` i `primaryFeed` (JSON). Odtwarzane w restoredState, żeby po zimnym
+            // starcie/304 serwer nie wypadł z rejestru push (inaczej budziki były cicho ignorowane). Addytywne.
+            if (!hasColumn(db, "community_servers", "push_json")) {
+                db.execSQL("ALTER TABLE community_servers ADD COLUMN push_json TEXT")
+            }
+            if (!hasColumn(db, "community_servers", "primary_feed_json")) {
+                db.execSQL("ALTER TABLE community_servers ADD COLUMN primary_feed_json TEXT")
+            }
+        }
+        if (oldVersion < 37) {
+            // R-09: tekst+wersja OSTATNIEGO regulaminu (obok hasza). Po restarcie przy zmienionym regulaminie
+            // pozwala pokazać przycisk „Przejrzyj regulamin” i wyświetlić nowy regulamin OFFLINE (bez manifestu).
+            if (!hasColumn(db, "community_servers", "manifest_terms_text")) {
+                db.execSQL("ALTER TABLE community_servers ADD COLUMN manifest_terms_text TEXT")
+            }
+            if (!hasColumn(db, "community_servers", "manifest_terms_version")) {
+                db.execSQL("ALTER TABLE community_servers ADD COLUMN manifest_terms_version TEXT")
+            }
+        }
+        if (oldVersion < 38) {
+            // A-35: triggery FTS po mapie video_id → rowid (zamiast pełnych skanów kolumny UNINDEXED).
+            db.execSQL("DROP TRIGGER IF EXISTS video_history_fts_insert")
+            db.execSQL("DROP TRIGGER IF EXISTS video_history_fts_delete")
+            db.execSQL("DROP TRIGGER IF EXISTS video_history_fts_update")
+            createVideoHistoryFts(db)
+            rebuildVideoHistoryFtsMap(db)
+            // A-33: R-02 zmienił author_id (z serverId) bez migracji — awatary zapisane sprzed poprawki mogły
+            // wskazywać na cudzy host (beacon dla zapisanych wierszy). Zerujemy awatary, których host ≠ host
+            // serwera; przy następnym odświeżeniu poprawny awatar wróci z manifestu.
+            migrateCommunityAuthorAvatars(db)
+        }
+        if (oldVersion < 39) {
+            // T-05: rejestr „czy obraz społeczności jest animacją" (sprawdzany raz, nie przy każdym wyświetleniu)
+            createCommunityImageKindTable(db)
+        }
+    }
+
+    /**
+     * T-05: czy obraz z cache obrazów społeczności (po kluczu TREŚCI — content-addressing, więc wpis nigdy nie jest
+     * nieaktualny) jest animowanym WebP. Sprawdzany raz (przy zapisie albo z 21 bajtów nagłówka); dawniej przy
+     * KAŻDYM wejściu obrazu na ekran aplikacja czytała z dysku cały plik tylko po to, by zajrzeć do nagłówka.
+     */
+    private fun createCommunityImageKindTable(db: BundledDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS community_image_kind (" +
+                "content_key TEXT PRIMARY KEY NOT NULL, " +
+                "animated INTEGER NOT NULL" +
+                ")",
+        )
+    }
+
+    /** T-05: null = obraz jeszcze nie sprawdzony. */
+    fun communityImageAnimated(contentKey: String): Boolean? = readableDatabase.rawQuery(
+        "SELECT animated FROM community_image_kind WHERE content_key = ?",
+        arrayOf(contentKey),
+    ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) != 0 else null }
+
+    fun setCommunityImageAnimated(contentKey: String, animated: Boolean) {
+        writableDatabase.execSQL(
+            "INSERT OR REPLACE INTO community_image_kind(content_key, animated) VALUES(?, ?)",
+            arrayOf<Any>(contentKey, if (animated) 1 else 0),
+        )
+    }
+
+    /** T-05: przy czyszczeniu cache obrazów rejestr też znika (inaczej rósłby bez końca). */
+    fun clearCommunityImageKinds() {
+        writableDatabase.execSQL("DELETE FROM community_image_kind")
+    }
+
+    private fun createStreamPrivacyTable(db: BundledDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS stream_privacy (
+                video_id TEXT PRIMARY KEY,
+                stream_start_ms INTEGER,
+                is_private INTEGER NOT NULL DEFAULT 0,
+                checked_ms INTEGER NOT NULL DEFAULT 0
+            )
+            """.trimIndent(),
+        )
     }
 
     private fun createSourceStateTable(db: BundledDatabase) {
@@ -497,6 +680,13 @@ class LocalDatabase(
             )
             """.trimIndent(),
         )
+        // A-35: `video_id` w FTS5 jest UNINDEXED, więc `WHERE video_id = ?` na tabeli FTS to pełny skan na
+        // każdy wiersz (prune 60 dni / backfill opisów = O(n·m)). Mapa video_id → rowid FTS (PRIMARY KEY, a
+        // rowid FTS5 jest stabilny także po VACUUM — w przeciwieństwie do rowid `video_history`) daje O(log n).
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS video_history_fts_map(" +
+                "video_id TEXT PRIMARY KEY, fts_rowid INTEGER NOT NULL) WITHOUT ROWID",
+        )
         db.execSQL(
             """
             CREATE TRIGGER IF NOT EXISTS video_history_fts_insert
@@ -508,6 +698,8 @@ class LocalDatabase(
                     replace(replace(new.creator_name, 'Ł', 'L'), 'ł', 'l'),
                     ''
                 );
+                INSERT OR REPLACE INTO video_history_fts_map(video_id, fts_rowid)
+                VALUES (new.video_id, last_insert_rowid());
             END
             """.trimIndent(),
         )
@@ -515,7 +707,9 @@ class LocalDatabase(
             """
             CREATE TRIGGER IF NOT EXISTS video_history_fts_delete
             AFTER DELETE ON video_history BEGIN
-                DELETE FROM video_history_fts WHERE video_id = old.video_id;
+                DELETE FROM video_history_fts WHERE rowid =
+                    (SELECT fts_rowid FROM video_history_fts_map WHERE video_id = old.video_id);
+                DELETE FROM video_history_fts_map WHERE video_id = old.video_id;
             END
             """.trimIndent(),
         )
@@ -526,45 +720,102 @@ class LocalDatabase(
                 UPDATE video_history_fts
                 SET title = replace(replace(new.title, 'Ł', 'L'), 'ł', 'l'),
                     creator_name = replace(replace(new.creator_name, 'Ł', 'L'), 'ł', 'l')
-                WHERE video_id = new.video_id;
+                WHERE rowid = (SELECT fts_rowid FROM video_history_fts_map WHERE video_id = new.video_id);
             END
             """.trimIndent(),
+        )
+    }
+
+    /**
+     * A-33: awatar autora zostaje tylko, gdy jego host == host KAŻDEGO serwera, którego pozycje wskazują tego
+     * autora (reguła anty-beacon z parsera). Autor bez pozycji albo z awatarem z cudzego hosta → `NULL`.
+     */
+    private fun migrateCommunityAuthorAvatars(db: BundledDatabase) {
+        fun host(url: String?): String? =
+            runCatching { java.net.URI(url!!.trim()).host?.lowercase()?.removeSuffix(".") }.getOrNull()
+        val allowed = HashMap<String, Boolean>()
+        db.rawQuery(
+            "SELECT a.author_id, a.avatar_url, s.endpoint FROM community_authors a " +
+                "LEFT JOIN community_items i ON i.author_id = a.author_id " +
+                "LEFT JOIN community_servers s ON s.server_id = i.server_id " +
+                "WHERE a.avatar_url IS NOT NULL",
+            null,
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val authorId = cursor.getString(0) ?: continue
+                val avatarHost = host(cursor.getString(1))
+                val serverHost = if (cursor.isNull(2)) null else host(cursor.getString(2))
+                val ok = avatarHost != null && serverHost != null && avatarHost == serverHost
+                allowed[authorId] = (allowed[authorId] ?: true) && ok
+            }
+        }
+        allowed.filterValues { !it }.keys.forEach { authorId ->
+            db.execSQL("UPDATE community_authors SET avatar_url = NULL WHERE author_id = ?", arrayOf<Any>(authorId))
+        }
+    }
+
+    /** A-35: przebudowa mapy video_id → rowid FTS i usunięcie zdublowanych/osieroconych wierszy FTS. */
+    private fun rebuildVideoHistoryFtsMap(db: BundledDatabase) {
+        db.execSQL("DELETE FROM video_history_fts_map")
+        // przy duplikatach zostaje najnowszy wiersz FTS (najwyższy rowid — np. z uzupełnionym opisem)
+        db.execSQL(
+            "INSERT INTO video_history_fts_map(video_id, fts_rowid) " +
+                "SELECT video_id, MAX(rowid) FROM video_history_fts GROUP BY video_id",
+        )
+        db.execSQL(
+            "DELETE FROM video_history_fts WHERE rowid NOT IN (SELECT fts_rowid FROM video_history_fts_map)",
+        )
+        db.execSQL(
+            "DELETE FROM video_history_fts WHERE rowid IN (SELECT m.fts_rowid FROM video_history_fts_map m " +
+                "WHERE NOT EXISTS (SELECT 1 FROM video_history h WHERE h.video_id = m.video_id))",
+        )
+        db.execSQL(
+            "DELETE FROM video_history_fts_map WHERE NOT EXISTS " +
+                "(SELECT 1 FROM video_history h WHERE h.video_id = video_history_fts_map.video_id)",
         )
     }
 
     /** Naprawia bazy schema 25 utworzone przez wcześniejsze kompilacje testowe. */
     private fun ensureVideoHistoryFtsCoverage(db: BundledDatabase) {
         createVideoHistoryFts(db)
-        val missingBefore = db.rawQuery(
-            """
-            SELECT COUNT(*)
-            FROM video_history h
-            WHERE NOT EXISTS (
-                SELECT 1 FROM video_history_fts f WHERE f.video_id = h.video_id
-            )
-            """.trimIndent(),
-            null,
-        ).use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else 0L }
-        if (missingBefore <= 0L) return
+        // A-39: `video_id` jest UNINDEXED w FTS5, więc dawne `NOT EXISTS (… f.video_id = h.video_id)` robiło pełny
+        // skan FTS na KAŻDY wiersz historii (O(N²)) przy każdym zimnym starcie na wątku głównym → ANR. Szybka
+        // ścieżka: porównanie liczności historii i mapy video_id → rowid FTS (A-35; O(N), milisekundy). Dopiero
+        // przy rozjeździe naprawa po indeksowanej mapie (O(N log N)).
+        fun count(sql: String): Long =
+            db.rawQuery(sql, null).use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else 0L }
+        val historyRows = count("SELECT COUNT(*) FROM video_history")
+        val mapRows = count("SELECT COUNT(*) FROM video_history_fts_map")
+        if (mapRows == historyRows) return
+        var missingBefore = 0L
         db.beginTransaction()
         try {
-            db.execSQL(
-                """
-                INSERT INTO video_history_fts(video_id, title, creator_name, description)
-                SELECT h.video_id,
-                       replace(replace(h.title, 'Ł', 'L'), 'ł', 'l'),
-                       replace(replace(h.creator_name, 'Ł', 'L'), 'ł', 'l'),
-                       ''
-                FROM video_history h
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM video_history_fts f WHERE f.video_id = h.video_id
-                )
-                """.trimIndent(),
+            rebuildVideoHistoryFtsMap(db)
+            missingBefore = count(
+                "SELECT COUNT(*) FROM video_history h " +
+                    "WHERE NOT EXISTS (SELECT 1 FROM video_history_fts_map m WHERE m.video_id = h.video_id)",
             )
+            if (missingBefore > 0L) {
+                db.execSQL(
+                    """
+                    INSERT INTO video_history_fts(video_id, title, creator_name, description)
+                    SELECT h.video_id,
+                           replace(replace(h.title, 'Ł', 'L'), 'ł', 'l'),
+                           replace(replace(h.creator_name, 'Ł', 'L'), 'ł', 'l'),
+                           ''
+                    FROM video_history h
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM video_history_fts_map m WHERE m.video_id = h.video_id
+                    )
+                    """.trimIndent(),
+                )
+                rebuildVideoHistoryFtsMap(db)
+            }
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
         }
+        if (missingBefore <= 0L) return
         DiagnosticLogStore.event(
             category = DiagnosticCategory.DATABASE,
             level = DiagnosticLevel.WARNING,
@@ -662,6 +913,570 @@ class LocalDatabase(
         )
     }
 
+    // --- serwery społeczności ---
+    // wszystko lokalne: do serwera nic nie odsyłamy. zgoda na regulamin (i odmowa)
+    // żyje wyłącznie tutaj, bo apka nie ma jak jej wysłać z powrotem.
+
+    private fun createCommunityServersTable(db: BundledDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS community_servers (
+                server_id TEXT PRIMARY KEY,
+                endpoint TEXT NOT NULL,
+                added_ms INTEGER NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                display_name TEXT,
+                transport TEXT,
+                last_manifest_fetch_ms INTEGER NOT NULL DEFAULT 0,
+                notify_enabled INTEGER NOT NULL DEFAULT 1,
+                muted_platforms TEXT,
+                can_be_primary INTEGER NOT NULL DEFAULT 0,
+                ads_enabled INTEGER NOT NULL DEFAULT 1,
+                display_muted TEXT,
+                manifest_etag TEXT,
+                manifest_last_modified TEXT,
+                manifest_terms_hash TEXT,
+                push_json TEXT,
+                primary_feed_json TEXT,
+                manifest_terms_text TEXT,
+                manifest_terms_version TEXT
+            )
+            """.trimIndent(),
+        )
+    }
+
+    private fun createCommunityConsentsTable(db: BundledDatabase) {
+        // tożsamością regulaminu jest hash treści – jeden wiersz na (serwer, regulamin).
+        // trzymamy pełny tekst + wersję + daty + decyzję (także odmowę): dowód świadomej zgody.
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS community_consents (
+                server_id TEXT NOT NULL,
+                terms_hash TEXT NOT NULL,
+                terms_version TEXT NOT NULL,
+                terms_text TEXT NOT NULL,
+                presented_ms INTEGER NOT NULL,
+                decided_ms INTEGER NOT NULL,
+                accepted INTEGER NOT NULL,
+                PRIMARY KEY (server_id, terms_hash)
+            )
+            """.trimIndent(),
+        )
+    }
+
+    private fun createCommunityAuthorsTable(db: BundledDatabase) {
+        // słownik autorów WSPÓLNY dla wszystkich serwerów: nazwa + avatar twórcy/źródła raz,
+        // w pozycjach referencjonowane przez author_id (oszczędność miejsca).
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS community_authors (
+                author_id TEXT PRIMARY KEY,
+                platform TEXT NOT NULL,
+                name TEXT NOT NULL,
+                avatar_url TEXT
+            )
+            """.trimIndent(),
+        )
+    }
+
+    private fun createCommunityItemsTable(db: BundledDatabase) {
+        // jedna pozycja treści; tekst (JSON pól) ściśnięty ZSTD w blob. server_id + author_id to
+        // znormalizowane referencje. item_id = stabilny klucz per serwer (re-wysyłka nadpisuje).
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS community_items (
+                server_id TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                section TEXT NOT NULL,
+                author_id TEXT,
+                published_ms INTEGER,
+                blob BLOB NOT NULL,
+                codec INTEGER NOT NULL,
+                original_size INTEGER NOT NULL,
+                image_url TEXT,
+                notify_image_url TEXT,
+                image_quality INTEGER,
+                favorite INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (server_id, item_id)
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS idx_community_items_server ON community_items(server_id)",
+        )
+    }
+
+    /**
+     * Aktualizuje treść serwera: upsert autorów + upsert pozycji ze świeżego manifestu.
+     * ULUBIONE są zachowywane (flaga przenoszona przy nadpisaniu), a pozycje NIE-ulubione,
+     * których serwer już nie podaje, są usuwane. Ulubione zostają, dopóki user ich nie odznaczy
+     * albo serwer ich jawnie nie usunie ([deleteCommunityItems]).
+     */
+    @Synchronized
+    fun replaceCommunityContent(serverId: String, content: CommunityStoredContent) =
+        writeCommunityContent(serverId, content, wipeNonFavorites = true)
+
+    /** tryb plików treści: DOKŁADA/aktualizuje pozycje po itemId bez kasowania istniejących nie-ulubionych. */
+    @Synchronized
+    fun appendCommunityContent(serverId: String, content: CommunityStoredContent) =
+        writeCommunityContent(serverId, content, wipeNonFavorites = false)
+
+    private fun writeCommunityContent(
+        serverId: String,
+        content: CommunityStoredContent,
+        wipeNonFavorites: Boolean,
+    ) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            content.authors.forEach { author ->
+                // C-09: dopisywanie pliku (append) bez awatara NIE kasuje awatara z wcześniejszego pliku
+                if (!wipeNonFavorites) {
+                    db.execSQL(
+                        "INSERT INTO community_authors(author_id, platform, name, avatar_url) VALUES(?, ?, ?, ?) " +
+                            "ON CONFLICT(author_id) DO UPDATE SET platform = excluded.platform, name = excluded.name, " +
+                            "avatar_url = COALESCE(excluded.avatar_url, community_authors.avatar_url)",
+                        arrayOf<Any?>(author.authorId, author.platform, author.name, author.avatarUrl),
+                    )
+                    return@forEach
+                }
+                db.insertWithOnConflict(
+                    "community_authors",
+                    null,
+                    ContentValues().apply {
+                        put("author_id", author.authorId)
+                        put("platform", author.platform)
+                        put("name", author.name)
+                        author.avatarUrl?.let { put("avatar_url", it) } ?: putNull("avatar_url")
+                    },
+                    BundledDatabase.CONFLICT_REPLACE,
+                )
+            }
+            val favorites = communityFavoriteItemIdsLocked(serverId)
+            // replace: usuwamy nie-ulubione (ulubione nigdy nie znikają samą aktualizacją). append: nie kasujemy.
+            if (wipeNonFavorites) {
+                db.delete("community_items", "server_id = ? AND favorite = 0", arrayOf(serverId))
+            }
+            content.items.forEach { item ->
+                db.insertWithOnConflict(
+                    "community_items",
+                    null,
+                    ContentValues().apply {
+                        put("server_id", item.serverId)
+                        put("item_id", item.itemId)
+                        put("section", item.section.name)
+                        item.authorId?.let { put("author_id", it) } ?: putNull("author_id")
+                        item.publishedMs?.let { put("published_ms", it) } ?: putNull("published_ms")
+                        put("blob", item.blob)
+                        put("codec", item.codec)
+                        put("original_size", item.originalSize)
+                        item.imageUrl?.let { put("image_url", it) } ?: putNull("image_url")
+                        item.notifyImageUrl?.let { put("notify_image_url", it) } ?: putNull("notify_image_url")
+                        item.imageQuality?.let { put("image_quality", it) } ?: putNull("image_quality")
+                        put("favorite", if (item.itemId in favorites) 1 else 0)
+                    },
+                    BundledDatabase.CONFLICT_REPLACE,
+                )
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        pruneOrphanCommunityAuthors()
+    }
+
+    private fun communityFavoriteItemIdsLocked(serverId: String): Set<String> =
+        writableDatabase.query(
+            "community_items",
+            arrayOf("item_id"),
+            "server_id = ? AND favorite = 1",
+            arrayOf(serverId),
+            null,
+            null,
+            null,
+        ).use { cursor -> buildSet { while (cursor.moveToNext()) add(cursor.getString(0)) } }
+
+    /** ustawia/zdejmuje ulubione dla pozycji – ulubiona nie zostanie usunięta retencją ani aktualizacją. */
+    @Synchronized
+    fun setCommunityItemFavorite(serverId: String, itemId: String, favorite: Boolean) {
+        writableDatabase.update(
+            "community_items",
+            ContentValues().apply { put("favorite", if (favorite) 1 else 0) },
+            "server_id = ? AND item_id = ?",
+            arrayOf(serverId, itemId),
+        )
+    }
+
+    /** ulubione itemId danego serwera – do zaznaczenia stanu w feedzie. */
+    @Synchronized
+    fun communityFavoriteItemIds(serverId: String): Set<String> =
+        communityFavoriteItemIdsLocked(serverId)
+
+    /** JAWNE usunięcie pozycji przez serwer – kasuje całkowicie, także ulubione. */
+    @Synchronized
+    fun deleteCommunityItems(serverId: String, itemIds: Collection<String>) {
+        if (itemIds.isEmpty()) return
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            itemIds.forEach { id ->
+                db.delete("community_items", "server_id = ? AND item_id = ?", arrayOf(serverId, id))
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        pruneOrphanCommunityAuthors()
+    }
+
+    /**
+     * Retencja treści: osobno dla tekstu i obrazów. Pozycje starsze niż [textBeforeMillis] (i NIE
+     * ulubione) znikają całkiem; dla pozycji starszych niż [imageBeforeMillis] usuwamy sam obraz,
+     * ale tekst zostaje (baza może trzymać tekst bez zdjęcia). 0 = brak limitu danej osi.
+     */
+    @Synchronized
+    fun pruneCommunityContent(
+        textBeforeMillis: Long,
+        imageBeforeMillis: Long,
+        pruneAllText: Boolean,
+        pruneAllImage: Boolean,
+    ) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            // M-09: pruneAll = „nie zapisuj" (0 dni) → usuń CAŁĄ treść poza ulubionymi, także bez daty.
+            // Inaczej usuwamy tylko datowane starsze niż próg (pozycji bez daty nie da się zestarzeć).
+            if (pruneAllText) {
+                db.delete("community_items", "favorite = 0", null)
+            } else if (textBeforeMillis > 0L) {
+                db.delete(
+                    "community_items",
+                    "favorite = 0 AND published_ms IS NOT NULL AND published_ms < ?",
+                    arrayOf(textBeforeMillis.toString()),
+                )
+            }
+            if (pruneAllImage) {
+                db.execSQL(
+                    "UPDATE community_items SET image_url = NULL, notify_image_url = NULL, " +
+                        "image_quality = NULL WHERE favorite = 0 " +
+                        "AND (image_url IS NOT NULL OR notify_image_url IS NOT NULL)",
+                )
+                // R-07: obrazy MEMÓW leżą w blobie (nie w kolumnach image_url), więc zerowanie kolumn ich nie
+                // usuwa. Mem to treść obrazkowa — przy retencji obrazów usuwamy cały nie-ulubiony mem (bez
+                // obrazu nie ma czego pokazać). "0 = nie zapisuj obrazów" => memy nie są trzymane.
+                db.delete("community_items", "favorite = 0 AND section = ?", arrayOf("MEME"))
+            } else if (imageBeforeMillis > 0L) {
+                db.execSQL(
+                    "UPDATE community_items SET image_url = NULL, notify_image_url = NULL, " +
+                        "image_quality = NULL WHERE favorite = 0 AND published_ms IS NOT NULL " +
+                        "AND published_ms < ? AND (image_url IS NOT NULL OR notify_image_url IS NOT NULL)",
+                    arrayOf(imageBeforeMillis),
+                )
+                // R-07: memy starsze niż okno obrazów usuwamy w całości (obraz = cała treść mema)
+                db.delete(
+                    "community_items",
+                    "favorite = 0 AND section = ? AND published_ms IS NOT NULL AND published_ms < ?",
+                    arrayOf("MEME", imageBeforeMillis.toString()),
+                )
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        pruneOrphanCommunityAuthors()
+    }
+
+    /** pozycje serwera z dołączonymi danymi autora (LEFT JOIN ze słownikiem), najnowsze pierwsze. */
+    @Synchronized
+    fun communityStoredItems(serverId: String): List<CommunityStoredItem> = readableDatabase.rawQuery(
+        """
+        SELECT i.server_id, i.item_id, i.section, i.author_id, i.published_ms,
+               i.blob, i.codec, i.original_size, i.image_url, i.notify_image_url,
+               i.image_quality, i.favorite, a.platform, a.name, a.avatar_url
+        FROM community_items i
+        LEFT JOIN community_authors a ON a.author_id = i.author_id
+        WHERE i.server_id = ?
+        ORDER BY i.published_ms DESC
+        """.trimIndent(),
+        arrayOf(serverId),
+    ).use { cursor ->
+        buildList {
+            while (cursor.moveToNext()) {
+                val section = runCatching { CommunitySection.valueOf(cursor.getString(2)) }.getOrNull()
+                    ?: continue
+                add(
+                    CommunityStoredItem(
+                        serverId = cursor.getString(0),
+                        itemId = cursor.getString(1),
+                        section = section,
+                        authorId = cursor.getString(3),
+                        publishedMs = if (cursor.isNull(4)) null else cursor.getLong(4),
+                        blob = cursor.getBlob(5),
+                        codec = cursor.getInt(6),
+                        originalSize = cursor.getInt(7),
+                        imageUrl = cursor.getString(8),
+                        notifyImageUrl = cursor.getString(9),
+                        imageQuality = if (cursor.isNull(10)) null else cursor.getInt(10),
+                        favorite = cursor.getInt(11) != 0,
+                        authorPlatform = cursor.getString(12),
+                        authorName = cursor.getString(13),
+                        authorAvatarUrl = cursor.getString(14),
+                    ),
+                )
+            }
+        }
+    }
+
+    /** kasuje autorów, do których nie prowadzi już żadna pozycja (po zamianie treści serwera). */
+    private fun pruneOrphanCommunityAuthors() {
+        writableDatabase.execSQL(
+            "DELETE FROM community_authors WHERE author_id NOT IN " +
+                "(SELECT DISTINCT author_id FROM community_items WHERE author_id IS NOT NULL)",
+        )
+    }
+
+    /** dodaje serwer, ale nie kasuje enabled/added, gdy user doda go ponownie. */
+    @Synchronized
+    fun addCommunityServer(serverId: String, endpoint: String, addedAtMillis: Long) {
+        writableDatabase.insertWithOnConflict(
+            "community_servers",
+            null,
+            ContentValues().apply {
+                put("server_id", serverId)
+                put("endpoint", endpoint)
+                put("added_ms", addedAtMillis)
+                put("enabled", 1)
+            },
+            BundledDatabase.CONFLICT_IGNORE,
+        )
+    }
+
+    /** cache nazwy/transportu/flagi „może być główny" z ostatniego manifestu – do listy. */
+    @Synchronized
+    fun updateCommunityServerManifestCache(
+        serverId: String,
+        displayName: String?,
+        transport: CommunityTransportKind?,
+        canBePrimary: Boolean,
+        fetchedAtMillis: Long,
+        etag: String?,
+        lastModified: String?,
+        termsHash: String?,
+        pushJson: String?,
+        primaryFeedJson: String?,
+        termsText: String?,
+        termsVersion: String?,
+    ) {
+        writableDatabase.update(
+            "community_servers",
+            ContentValues().apply {
+                displayName?.let { put("display_name", it) } ?: putNull("display_name")
+                transport?.let { put("transport", it.name) } ?: putNull("transport")
+                put("can_be_primary", if (canBePrimary) 1 else 0)
+                put("last_manifest_fetch_ms", fetchedAtMillis)
+                // #10: zapisujemy walidatory tylko gdy serwer je podał; brak nagłówka nie kasuje
+                // poprzedniego (serwer mógł chwilowo ich nie wysłać — nie tracimy możliwości 304).
+                etag?.takeIf { it.isNotBlank() }?.let { put("manifest_etag", it) }
+                lastModified?.takeIf { it.isNotBlank() }?.let { put("manifest_last_modified", it) }
+                // H-01: hash regulaminu z tego manifestu — zapisujemy ZAWSZE (także po zmianie), żeby bramka
+                // zgody po haszu działała poza UI. Null tylko gdy manifest nie miał regulaminu.
+                termsHash?.let { put("manifest_terms_hash", it) } ?: putNull("manifest_terms_hash")
+                // R-01: push/primaryFeed ze ŚWIEŻEGO manifestu zapisujemy ZAWSZE (null = serwer je usunął).
+                // Przy 304/zimnym starcie ta funkcja nie jest wołana, więc wartość z bazy przetrwa i zasili
+                // restoredState — serwer nie wypadnie z rejestru push.
+                put("push_json", pushJson)
+                put("primary_feed_json", primaryFeedJson)
+                // R-09: tekst+wersja regulaminu ze świeżego manifestu (do offline „Przejrzyj regulamin")
+                put("manifest_terms_text", termsText)
+                put("manifest_terms_version", termsVersion)
+            },
+            "server_id = ?",
+            arrayOf(serverId),
+        )
+    }
+
+    /** J-01: walidatory ETag/Last-Modified ustawiane dokładnie (null kasuje) — po niekompletnym pobraniu plików treści. */
+    @Synchronized
+    fun setCommunityServerManifestValidators(serverId: String, etag: String?, lastModified: String?) {
+        writableDatabase.update(
+            "community_servers",
+            ContentValues().apply {
+                put("manifest_etag", etag?.takeIf { it.isNotBlank() })
+                put("manifest_last_modified", lastModified?.takeIf { it.isNotBlank() })
+            },
+            "server_id = ?",
+            arrayOf(serverId),
+        )
+    }
+
+    @Synchronized
+    fun setCommunityServerNotifyEnabled(serverId: String, enabled: Boolean) {
+        writableDatabase.update(
+            "community_servers",
+            ContentValues().apply { put("notify_enabled", if (enabled) 1 else 0) },
+            "server_id = ?",
+            arrayOf(serverId),
+        )
+    }
+
+    @Synchronized
+    fun setCommunityServerAdsEnabled(serverId: String, enabled: Boolean) {
+        writableDatabase.update(
+            "community_servers",
+            ContentValues().apply { put("ads_enabled", if (enabled) 1 else 0) },
+            "server_id = ?",
+            arrayOf(serverId),
+        )
+    }
+
+    /** wyciszenia POWIADOMIEŃ (klucze platforma / platforma/twórca). puste = powiadamiaj ze wszystkiego. */
+    @Synchronized
+    fun setCommunityServerNotifyMuted(serverId: String, muted: Set<String>) =
+        updateCommunityMutedColumn(serverId, "muted_platforms", muted)
+
+    /** wyciszenia WYŚWIETLANIA w zakładce (te same klucze). puste = pokazuj wszystko. */
+    @Synchronized
+    fun setCommunityServerDisplayMuted(serverId: String, muted: Set<String>) =
+        updateCommunityMutedColumn(serverId, "display_muted", muted)
+
+    private fun updateCommunityMutedColumn(serverId: String, column: String, muted: Set<String>) {
+        // rozdzielamy nową linią, bo klucze twórców mogą zawierać przecinki
+        val encoded = muted.map { it.trim() }.filter { it.isNotEmpty() }.toSortedSet().joinToString("\n")
+        writableDatabase.update(
+            "community_servers",
+            ContentValues().apply {
+                if (encoded.isEmpty()) putNull(column) else put(column, encoded)
+            },
+            "server_id = ?",
+            arrayOf(serverId),
+        )
+    }
+
+    @Synchronized
+    fun setCommunityServerEnabled(serverId: String, enabled: Boolean) {
+        writableDatabase.update(
+            "community_servers",
+            ContentValues().apply { put("enabled", if (enabled) 1 else 0) },
+            "server_id = ?",
+            arrayOf(serverId),
+        )
+    }
+
+    /** usuwa serwer i całą jego historię zgód – user zrezygnował z niego w całości. */
+    @Synchronized
+    fun deleteCommunityServer(serverId: String) {
+        writableDatabase.delete("community_items", "server_id = ?", arrayOf(serverId))
+        writableDatabase.delete("community_consents", "server_id = ?", arrayOf(serverId))
+        writableDatabase.delete("community_servers", "server_id = ?", arrayOf(serverId))
+        pruneOrphanCommunityAuthors()
+    }
+
+    @Synchronized
+    fun communityServers(): List<CommunityServerRecord> = readableDatabase.query(
+        "community_servers",
+        COMMUNITY_SERVER_COLUMNS,
+        null,
+        null,
+        null,
+        null,
+        "added_ms ASC",
+    ).use { cursor ->
+        buildList { while (cursor.moveToNext()) add(cursor.toCommunityServerRecord()) }
+    }
+
+    @Synchronized
+    fun communityServer(serverId: String): CommunityServerRecord? = readableDatabase.query(
+        "community_servers",
+        COMMUNITY_SERVER_COLUMNS,
+        "server_id = ?",
+        arrayOf(serverId),
+        null,
+        null,
+        null,
+    ).use { cursor -> if (cursor.moveToFirst()) cursor.toCommunityServerRecord() else null }
+
+    @Synchronized
+    fun recordCommunityConsent(record: CommunityConsentRecord) {
+        writableDatabase.insertWithOnConflict(
+            "community_consents",
+            null,
+            ContentValues().apply {
+                put("server_id", record.serverId)
+                put("terms_hash", record.termsHash)
+                put("terms_version", record.termsVersionLabel)
+                put("terms_text", record.termsText)
+                put("presented_ms", record.presentedAtMillis)
+                put("decided_ms", record.decidedAtMillis)
+                put("accepted", if (record.accepted) 1 else 0)
+            },
+            BundledDatabase.CONFLICT_REPLACE,
+        )
+    }
+
+    /** decyzja usera dla DOKŁADNIE tego regulaminu (po hashu) – tego używa bramka zgody. */
+    @Synchronized
+    fun communityConsentForTerms(serverId: String, termsHash: String): CommunityConsentRecord? =
+        readableDatabase.query(
+            "community_consents",
+            COMMUNITY_CONSENT_COLUMNS,
+            "server_id = ? AND terms_hash = ?",
+            arrayOf(serverId, termsHash),
+            null,
+            null,
+            null,
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.toCommunityConsentRecord() else null }
+
+    /** ostatnia decyzja dla serwera (do wyświetlenia/audytu), niezależnie od regulaminu. */
+    @Synchronized
+    fun latestCommunityConsent(serverId: String): CommunityConsentRecord? = readableDatabase.query(
+        "community_consents",
+        COMMUNITY_CONSENT_COLUMNS,
+        "server_id = ?",
+        arrayOf(serverId),
+        null,
+        null,
+        "decided_ms DESC, rowid DESC", // D-01: remis co do ms → ostatnio zapisana zgoda
+    ).use { cursor -> if (cursor.moveToFirst()) cursor.toCommunityConsentRecord() else null }
+
+    private fun Cursor.toCommunityServerRecord() = CommunityServerRecord(
+        serverId = getString(0),
+        endpoint = getString(1),
+        addedAtMillis = getLong(2),
+        enabled = getInt(3) != 0,
+        displayName = getString(4),
+        transport = CommunityTransportKind.fromRaw(getString(5)),
+        lastManifestFetchMillis = getLong(6),
+        notifyEnabled = getInt(7) != 0,
+        notifyMuted = decodeCommunityMuted(getString(8)),
+        canBePrimary = getInt(9) != 0,
+        adsEnabled = getInt(10) != 0,
+        displayMuted = decodeCommunityMuted(getString(11)),
+        manifestEtag = getString(12),
+        manifestLastModified = getString(13),
+        manifestTermsHash = getString(14),
+        push = CommunityServerCodec.pushFromJson(getString(15)),
+        primaryFeed = CommunityServerCodec.primaryFeedFromJson(getString(16)),
+        manifestTermsText = getString(17),
+        manifestTermsVersion = getString(18),
+    )
+
+    private fun decodeCommunityMuted(raw: String?): Set<String> = raw
+        ?.split('\n')
+        ?.map { it.trim().lowercase() }
+        ?.filter { it.isNotEmpty() }
+        ?.toSet()
+        .orEmpty()
+
+    private fun Cursor.toCommunityConsentRecord() = CommunityConsentRecord(
+        serverId = getString(0),
+        termsHash = getString(1),
+        termsVersionLabel = getString(2),
+        termsText = getString(3),
+        presentedAtMillis = getLong(4),
+        decidedAtMillis = getLong(5),
+        accepted = getInt(6) != 0,
+    )
+
     @Synchronized
     fun getResolvedId(sourceKey: String): String? = readableDatabase.query(
         "source_state",
@@ -734,9 +1549,9 @@ class LocalDatabase(
     }
 
     /**
-     * Odpowiedź pierwszej strony kanału zawiera kompletną listę dostępnych kart.
-     * Zapisujemy trzy stany atomowo; błąd sieci nie wywołuje tej metody, więc
-     * nigdy nie zmienia poprzedniej wartości na fałszywe ABSENT.
+     * pierwsza strona kanału ma komplet dostępnych kart. zapisujemy trzy stany
+     * atomowo; błąd sieci nie woła tej metody, więc nigdy nie podmienia poprzedniej
+     * wartości na fałszywe ABSENT.
      */
     @Synchronized
     fun saveYouTubeChannelTabs(
@@ -785,8 +1600,8 @@ class LocalDatabase(
     }
 
     /**
-     * Zapisuje wyłącznie pozytywnie rozpoznane karty z odpowiedzi częściowej.
-     * Brak karty w takim JSON-ie nie jest dowodem ABSENT.
+     * zapisuje tylko pewnie rozpoznane karty z częściowej odpowiedzi.
+     * brak karty w takim JSON-ie to nie dowód ABSENT.
      */
     @Synchronized
     fun markYouTubeChannelTabsPresent(
@@ -941,8 +1756,7 @@ class LocalDatabase(
     @Synchronized
     fun saveCreatorAvatar(creatorId: String, avatarUrl: String) {
         val existing = getCreatorAvatarMetadata(creatorId)
-        // Resolver HTML nie może nadpisać zasobu lub URL-u, którego treść
-        // została już zweryfikowana i zapisana wraz z SHA-256.
+        // resolver HTML nie nadpisuje tego, co już zweryfikowane i zapisane z SHA-256
         if (!existing?.sha256.isNullOrBlank()) return
         val values = ContentValues().apply {
             put("creator_id", creatorId)
@@ -994,8 +1808,8 @@ class LocalDatabase(
         force: Boolean = false,
     ) {
         val existing = getCreatorAvatarMetadata(creatorId)
-        // Nowszy pakiet APK może zawierać świeższy avatar niż lokalny cache.
-        // Lokalnej aktualizacji wykonanej już po zbudowaniu APK nie cofamy.
+        // nowszy APK może nieść świeższy avatar niż cache, ale nie cofamy
+        // aktualizacji zrobionej lokalnie już po zbudowaniu APK
         if (!force && existing != null && existing.checkedAtMillis >= checkedAtMillis) return
         saveVerifiedCreatorAvatar(
             creatorId = creatorId,
@@ -1491,12 +2305,11 @@ class LocalDatabase(
     }
 
     /**
-     * Atomowo scala wpis potwierdzony przez synchronizowane źródło YouTube.
-     * Dzięki temu równoległy backfill historii nie może wstawić rekordu między
-     * wcześniejszym sprawdzeniem a zapisem i bezpowrotnie ukryć powiadomienia.
+     * atomowo scala wpis potwierdzony przez synchronizowane źródło YT. dzięki temu
+     * równoległy backfill nie wciśnie rekordu między sprawdzeniem a zapisem i nie
+     * ukryje powiadomienia na zawsze.
      *
-     * @return true, gdy wywołanie utworzyło nową pozycję oczekującą na
-     * dostarczenie powiadomienia.
+     * @return true, gdy powstała nowa pozycja czekająca na dostarczenie powiadomienia.
      */
     @Synchronized
     fun upsertVerifiedVideoFromSync(
@@ -1662,8 +2475,7 @@ class LocalDatabase(
         val db = writableDatabase
         db.beginTransaction()
         try {
-            // Jeden odczyt strony zastępuje po dwa SELECT-y wykonywane wcześniej
-            // dla każdego istniejącego filmu (data oraz rodzaj).
+            // jeden odczyt zamiast dwóch SELECT-ów na każdy istniejący film (data + rodzaj)
             val existingEvidence = storedVideoEvidence(
                 db = db,
                 videoIds = distinctItems.map { it.entry.id },
@@ -2191,6 +3003,8 @@ class LocalDatabase(
               AND (description_state <> 3 OR published_ms <= ?)
               AND description_attempts < ?
               AND description_last_attempt_ms <= ?
+              -- nie pobieramy transkrypcji/opisu dla streamów wykrytych jako prywatne
+              AND video_id NOT IN (SELECT video_id FROM stream_privacy WHERE is_private = 1)
             -- Gotowe do ponowienia błędy są nieliczne i mają twardy limit
             -- prób. Obsługujemy je przed dużą kolejką nowych rekordów, aby
             -- pojedyncza chwilowa awaria nie blokowała opisu przez wiele dni.
@@ -2296,7 +3110,7 @@ class LocalDatabase(
                     """
                     UPDATE video_history_fts
                     SET description = ?
-                    WHERE video_id = ?
+                    WHERE rowid = (SELECT fts_rowid FROM video_history_fts_map WHERE video_id = ?)
                     """.trimIndent(),
                     arrayOf<Any>(normalizePolishSearchText(searchable), videoId),
                 )
@@ -2322,6 +3136,18 @@ class LocalDatabase(
         } finally {
             db.endTransaction()
         }
+    }
+
+    /** E-06: po naprawie tytułu zastępczego — porażki opisu (liczone przy złym tytule) zaczynają się od nowa. */
+    @Synchronized
+    fun resetDescriptionFailures(videoId: String) {
+        if (!YOUTUBE_VIDEO_ID.matches(videoId)) return
+        writableDatabase.execSQL(
+            "UPDATE video_history SET description_attempts = 0, description_last_attempt_ms = 0, " +
+                "description_state = CASE WHEN description_state = 2 THEN 0 ELSE description_state END " +
+                "WHERE video_id = ? AND description_state <> 1",
+            arrayOf<Any>(videoId),
+        )
     }
 
     @Synchronized
@@ -2600,9 +3426,71 @@ class LocalDatabase(
     ) { row -> row.getText(0) }
         .mapNotNull { videoId ->
             videoId.takeIf(YOUTUBE_VIDEO_ID::matches)
-                ?.let { "https://i.ytimg.com/vi/$it/sddefault.jpg" }
+                // musi odpowiadać URL-owi, którego faktycznie używa miniatura w Historii (VideoThumbnail),
+                // inaczej ochrona przed czyszczeniem cache nie trafiałaby w ten wpis (klucz = urlKey(url)).
+                ?.let { "https://i.ytimg.com/vi_webp/$it/hqdefault.webp" }
         }
         .toSet()
+
+    /** wiersz do sprawdzenia prywatności streamu: dane z historii + zapisany stan. */
+    data class StreamPrivacyRow(
+        val videoId: String,
+        val publishedMs: Long,
+        val streamStartMs: Long?,
+        val checkedMs: Long,
+        val isPrivate: Boolean,
+    )
+
+    /** streamy (LIVE/STREAM_ARCHIVE) z historii + ich stan prywatności (LEFT JOIN), najnowsze. */
+    @Synchronized
+    fun streamsForPrivacyCheck(limit: Int = 300): List<StreamPrivacyRow> =
+        readableDatabase.queryRows(
+            """
+            SELECT h.video_id, h.published_ms, p.stream_start_ms, p.checked_ms, p.is_private
+            FROM video_history h
+            LEFT JOIN stream_privacy p ON p.video_id = h.video_id
+            WHERE h.kind IN ('LIVE', 'STREAM_ARCHIVE')
+            ORDER BY h.published_ms DESC
+            LIMIT $limit
+            """.trimIndent(),
+            null,
+        ) { row ->
+            StreamPrivacyRow(
+                videoId = row.getText(0),
+                publishedMs = row.getLong(1),
+                streamStartMs = if (row.isNull(2)) null else row.getLong(2),
+                checkedMs = if (row.isNull(3)) 0L else row.getLong(3),
+                isPrivate = !row.isNull(4) && row.getLong(4) == 1L,
+            )
+        }
+
+    /** zapisuje realny czas startu streamu (dobę później sprawdzamy prywatność). */
+    @Synchronized
+    fun setStreamStart(videoId: String, startMs: Long) {
+        writableDatabase.execSQL(
+            "INSERT INTO stream_privacy(video_id, stream_start_ms) VALUES(?, ?) " +
+                "ON CONFLICT(video_id) DO UPDATE SET stream_start_ms = excluded.stream_start_ms",
+            arrayOf<Any>(videoId, startMs),
+        )
+    }
+
+    /** zapisuje wynik sprawdzenia prywatności + kiedy sprawdzono. */
+    @Synchronized
+    fun markStreamPrivacy(videoId: String, isPrivate: Boolean, checkedMs: Long) {
+        writableDatabase.execSQL(
+            "INSERT INTO stream_privacy(video_id, is_private, checked_ms) VALUES(?, ?, ?) " +
+                "ON CONFLICT(video_id) DO UPDATE SET is_private = excluded.is_private, checked_ms = excluded.checked_ms",
+            arrayOf<Any>(videoId, if (isPrivate) 1L else 0L, checkedMs),
+        )
+    }
+
+    /** zbiór videoId streamów wykrytych jako prywatne — do badge, transkrypcji i wyszukiwarki. */
+    @Synchronized
+    fun privateVideoIds(): Set<String> =
+        readableDatabase.queryRows(
+            "SELECT video_id FROM stream_privacy WHERE is_private = 1",
+            null,
+        ) { row -> row.getText(0) }.toSet()
 
     /** Lekki stan infrastruktury; nie odczytuje ani nie eksportuje rekordów. */
     @Synchronized
@@ -2673,6 +3561,12 @@ class LocalDatabase(
                 "video_id NOT IN (SELECT video_id FROM video_history)",
                 null,
             )
+            // B-15: stan prywatności streamu żyje tylko tak długo, jak jego wpis w Historii
+            deletedRows += db.delete(
+                "stream_privacy",
+                "video_id NOT IN (SELECT video_id FROM video_history)",
+                null,
+            )
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
@@ -2683,10 +3577,9 @@ class LocalDatabase(
     @Synchronized
     fun recentHistory(days: Int = 60, limit: Int = 500): List<HistoryItem> {
         val cutoff = System.currentTimeMillis() - days.coerceIn(1, 365).toLong() * DAY_MILLIS
-        // `limit` ogranicza WYŁĄCZNIE okno najnowszych materiałów (pula rośnie w
-        // miarę przewijania — patrz refreshHistoryNow). Ulubione są zawsze
-        // zwracane w całości, niezależnie od `limit`, aby filtr Ulubionych nigdy
-        // nie gubił pozycji starszych niż okno (#5).
+        // `limit` tnie tylko okno najnowszych (pula rośnie przy przewijaniu, patrz
+        // refreshHistoryNow). Ulubione lecą zawsze w całości, żeby filtr Ulubionych
+        // nie gubił pozycji starszych niż okno (#5)
         return readableDatabase.queryRows(
             """
             SELECT video_id, creator_id, creator_name, title, url,
@@ -2779,6 +3672,11 @@ class LocalDatabase(
                 "video_id NOT IN (SELECT video_id FROM video_history)",
                 null,
             )
+            writableDatabase.delete(
+                "stream_privacy",
+                "video_id NOT IN (SELECT video_id FROM video_history)",
+                null,
+            ) // B-15
             writableDatabase.setTransactionSuccessful()
         } finally {
             writableDatabase.endTransaction()
@@ -2789,6 +3687,7 @@ class LocalDatabase(
     fun clearHistory() {
         writableDatabase.beginTransaction()
         try {
+            writableDatabase.delete("stream_privacy", null, null) // B-15: razem z Historią
             writableDatabase.delete("notification_inbox", null, null)
             writableDatabase.delete("notification_ids", null, null)
             writableDatabase.delete("video_history", null, null)
@@ -2840,10 +3739,9 @@ class LocalDatabase(
         else -> DescriptionAvailability.DOWNLOADED
     }
 
-    // Stabilne wartości bazodanowe kolumny description_availability. Celowo NIE
-    // opieramy się na .ordinal, aby przyszła zmiana kolejności enuma nie
-    // uszkodziła zapisanych rekordów. Wartości muszą być zgodne z backfillem
-    // migracji 26 (CASE 0..3).
+    // stałe wartości dla description_availability – celowo bez .ordinal, żeby
+    // zmiana kolejności enuma nie popsuła zapisanych wierszy. musi się zgadzać
+    // z backfillem migracji 26 (CASE 0..3)
     private fun descriptionAvailabilityDatabaseValue(
         availability: DescriptionAvailability,
     ): Int = when (availability) {
@@ -2862,9 +3760,8 @@ class LocalDatabase(
         else -> DescriptionAvailability.NONE
     }
 
-    // Tania ścieżka listy Historii (recentHistory/recentNotificationInbox):
-    // czyta gotowy wskaźnik dostępności z kolumny zamiast dekompresować Zstd
-    // pełny opis dla każdego z maks. 10 000 wierszy przy każdym odświeżeniu.
+    // tania ścieżka listy Historii (recentHistory/recentNotificationInbox): bierze
+    // gotowy wskaźnik z kolumny zamiast dekompresować Zstd dla ~10 000 wierszy co odświeżenie
     private fun readHistoryListItem(row: SQLiteStatement): HistoryItem =
         readHistoryItem(
             row,
@@ -2887,9 +3784,39 @@ class LocalDatabase(
         writableDatabase.close()
     }
 
-    private companion object {
+    // internal (nie private): testy instrumentalne migracji czytają DATABASE_VERSION
+    internal companion object {
         const val DATABASE_NAME = "lewicowyt_notifier.db"
-        const val DATABASE_VERSION = 26
+        const val DATABASE_VERSION = 39
+
+        /**
+         * M-12: otwiera bazę, a gdy pochodzi z NOWSZEJ wersji aplikacji niż ten kod (np. po awaryjnym
+         * rollbacku do starszego buildu), NIE wywraca startu (dawne `require` dawało crash-loop). Zamiast tego
+         * robi kopię `<nazwa>.bak` i startuje od pustej bazy bieżącego schematu — dane zostają do odzysku w .bak.
+         */
+        private fun openRecovering(dbFile: File): BundledDatabase {
+            val db = BundledDatabase(dbFile)
+            val version = runCatching {
+                db.rawQuery("PRAGMA user_version", null).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+            }.getOrDefault(0)
+            if (version <= DATABASE_VERSION) return db
+            runCatching { db.execSQL("PRAGMA wal_checkpoint(TRUNCATE)") } // zrzuć WAL do głównego pliku przed kopią
+            runCatching { db.close() }
+            val parent = dbFile.parentFile
+            val backup = File(parent, dbFile.name + ".bak")
+            runCatching { if (backup.exists()) backup.delete() }
+            runCatching { dbFile.copyTo(backup, overwrite = true) }
+            // usuń główny plik + towarzyszące WAL/SHM, żeby powstała czysta baza bieżącego schematu
+            runCatching { dbFile.delete() }
+            runCatching { File(parent, dbFile.name + "-wal").delete() }
+            runCatching { File(parent, dbFile.name + "-shm").delete() }
+            AppLog.warning(
+                "DatabaseRollback",
+                "Baza z nowszej wersji — kopia do ${backup.name}, start od zera",
+                IllegalStateException("user_version $version > $DATABASE_VERSION"),
+            )
+            return BundledDatabase(dbFile)
+        }
         const val CURRENT_CLASSIFIER_VERSION = 1
         const val MAX_CHANNEL_TAB_PARAMS_CHARS = 2_048
         const val MAX_EVIDENCE_QUERY_IDS = 900
@@ -2905,6 +3832,38 @@ class LocalDatabase(
         const val MIN_FREE_PAGES_FOR_VACUUM = 128L
         val SHA_256 = Regex("[0-9a-f]{64}")
         val YOUTUBE_VIDEO_ID = Regex("[A-Za-z0-9_-]{11}")
+
+        // kolejność MUSI się zgadzać z toCommunityServerRecord/toCommunityConsentRecord
+        private val COMMUNITY_SERVER_COLUMNS = arrayOf(
+            "server_id",
+            "endpoint",
+            "added_ms",
+            "enabled",
+            "display_name",
+            "transport",
+            "last_manifest_fetch_ms",
+            "notify_enabled",
+            "muted_platforms",
+            "can_be_primary",
+            "ads_enabled",
+            "display_muted",
+            "manifest_etag",
+            "manifest_last_modified",
+            "manifest_terms_hash",
+            "push_json",
+            "primary_feed_json",
+            "manifest_terms_text",
+            "manifest_terms_version",
+        )
+        private val COMMUNITY_CONSENT_COLUMNS = arrayOf(
+            "server_id",
+            "terms_hash",
+            "terms_version",
+            "terms_text",
+            "presented_ms",
+            "decided_ms",
+            "accepted",
+        )
     }
 }
 
@@ -2983,9 +3942,8 @@ internal fun polishSearchPrefixVariants(token: String): List<String> {
     return variants.take(MAX_POLISH_VARIANTS_PER_TOKEN)
 }
 
-// Kompilowane raz. Wcześniej te wzorce powstawały na nowo przy każdym
-// wywołaniu — a normalizePolishSearchText/searchTokens są w gorącej ścieżce
-// rankingu wyszukiwarki (per kandydat i per token) (#10).
+// kompilowane raz – wcześniej regexy powstawały od nowa przy każdym wywołaniu,
+// a normalizePolishSearchText/searchTokens siedzą w gorącej ścieżce rankingu (#10)
 private val SEARCH_TOKEN_SEPARATOR = Regex("[^\\p{L}\\p{N}_-]+")
 private val COMBINING_MARKS = Regex("\\p{M}+")
 
@@ -3114,9 +4072,9 @@ private val POLISH_SEARCH_STOP_WORDS = setOf(
 )
 
 /**
- * Parametry liczbowe muszą pozostać liczbami podczas bindowania SQLite.
- * Tekstowe "0" nie jest równe liczbowemu 0 w wyrażeniu `? = 0`, przez co
- * zwykłe (nieulubione) rekordy były odrzucane przez obie ścieżki wyszukiwania.
+ * przy bindowaniu do SQLite parametry liczbowe muszą zostać liczbami. tekstowe
+ * "0" ≠ liczbowe 0 w `? = 0`, przez co zwykłe (nieulubione) rekordy odpadały
+ * z obu ścieżek wyszukiwania.
  */
 internal fun historySearchNumericArguments(
     cutoffMillis: Long,
@@ -3131,9 +4089,9 @@ internal fun historySearchNumericArguments(
 )
 
 /**
- * Selekcja opisów porównuje kolumny INTEGER i używa liczbowego LIMIT.
- * Bindowanie tych wartości jako tekst powoduje w SQLite odrzucenie poprawnych
- * rekordów jeszcze przed pobraniem opisu i zasileniem indeksu FTS5.
+ * wybór opisów porównuje kolumny INTEGER i używa liczbowego LIMIT. bindowanie
+ * ich jako tekst każe SQLite odrzucić poprawne rekordy jeszcze przed pobraniem
+ * opisu i zasileniem FTS5.
  */
 internal fun descriptionPendingNumericArguments(
     cutoffMillis: Long,

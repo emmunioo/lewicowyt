@@ -10,10 +10,10 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
- * Procesowy single-flight. Praca nie jest dzieckiem callera, więc anulowanie
- * ekranu oczekującego na wynik nie przerywa pobierania potrzebnego workerowi.
- * Osobny mutex wykonania gwarantuje, że również różne wydania nigdy nie użyją
- * równolegle wspólnego katalogu plików tymczasowych aktualizatora.
+ * procesowy single-flight. praca nie jest dzieckiem callera, więc zamknięcie
+ * ekranu czekającego na wynik nie ubija pobierania potrzebnego workerowi.
+ * osobny mutex wykonania pilnuje, żeby też różne wydania nie sięgały równolegle
+ * po wspólny katalog tymczasowy aktualizatora.
  */
 internal class UpdatePreparationSingleFlight<K : Any, V : Any>(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
@@ -46,10 +46,10 @@ internal class UpdatePreparationSingleFlight<K : Any, V : Any>(
 }
 
 /**
- * GitHub nie publikuje versionCode obok assetu; jest on odczytywany i
- * obowiązkowo sprawdzany z APK przed publikacją pending. Do single-flight
- * używamy wszystkich dostępnych, niezmiennych cech targetu, w szczególności
- * versionName i SHA-256, a przy braku digestu także unikalnego URL-u assetu.
+ * GitHub nie podaje versionCode obok assetu – czytamy go i obowiązkowo sprawdzamy
+ * z APK przed publikacją pending. do single-flight bierzemy wszystkie dostępne,
+ * niezmienne cechy targetu: versionName i SHA-256, a przy braku digestu też
+ * unikalny URL assetu.
  */
 internal data class UpdatePreparationTargetKey(
     val versionName: String,
@@ -67,7 +67,7 @@ internal fun AvailableUpdate.preparationTargetKey(): UpdatePreparationTargetKey 
         apkName = apkName,
         apkSizeBytes = apkSizeBytes,
         apkDownloadUrl = apkDownloadUrl,
-        deltaManifestSha256 = releaseAssets[DELTA_MANIFEST_ASSET_NAME]
+        deltaManifestSha256 = deltaManifestAsset()
             ?.sha256Digest
             ?.lowercase(),
     )

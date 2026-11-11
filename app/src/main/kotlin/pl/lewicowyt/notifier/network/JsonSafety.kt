@@ -1,8 +1,8 @@
 package pl.lewicowyt.notifier.network
 
 /**
- * Odrzuca nadmiernie zagnieżdżony albo niezbilansowany JSON przed przekazaniem
- * go parserowi. Nawiasy znajdujące się wewnątrz napisów są ignorowane.
+ * odrzuca za głęboko zagnieżdżony albo niezbilansowany JSON zanim trafi do parsera.
+ * nawiasy w środku stringów pomijamy.
  */
 internal fun hasSafeJsonNesting(
     json: String,

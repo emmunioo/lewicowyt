@@ -34,9 +34,9 @@ internal fun diagnosticYouTubeSourceSummary(
 }
 
 /**
- * Buduje bezpieczny kontekst publicznego źródła YouTube. Celowo nie zapisuje
- * URL-a, nazwy twórcy, treści odpowiedzi ani komunikatu wyjątku, ponieważ URL
- * Data API może zawierać klucz, a odpowiedź może być nieprzewidywalna.
+ * buduje bezpieczny kontekst publicznego źródła YT. celowo nie zapisuje URL-a,
+ * nazwy twórcy, treści odpowiedzi ani komunikatu wyjątku – URL Data API może
+ * nieść klucz, a odpowiedź bywa nieprzewidywalna.
  */
 internal fun diagnosticYouTubeSourceFields(
     creatorId: String,

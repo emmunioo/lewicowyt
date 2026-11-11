@@ -8,10 +8,9 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 
 /**
- * Stała pula workerów zachowuje kolejność wyników oraz gwarantuje, że pierwszą
- * falą pracy są pierwsze elementy wejścia. Jest to istotne dla adaptacyjnego
- * rankingu: późniejszy kanał nie może wygrać wyścigu o semafor z kanałem o
- * wyższym priorytecie.
+ * stała pula workerów trzyma kolejność wyników i pilnuje, żeby pierwszą falą
+ * poszły pierwsze elementy wejścia. ważne dla adaptacyjnego rankingu: późniejszy
+ * kanał nie może wygrać wyścigu o semafor z kanałem o wyższym priorytecie.
  */
 internal suspend fun <T, R> Iterable<T>.mapConcurrently(
     maxConcurrency: Int,

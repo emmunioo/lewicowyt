@@ -25,11 +25,10 @@ internal interface VcdiffPatchDecoder {
 }
 
 /**
- * Czysto javowy dekoder RFC 3284. Zainstalowany APK jest mapowany tylko do
- * odczytu z pliku, a poprawka i wynik są przetwarzane strumieniowo. Generator
- * tworzy bazowy VCDIFF bez secondary compression i application header. Używany
- * encoder Xdelta3 nie emituje VCD_TARGET, więc dekoder nie przechowuje
- * poprzednich okien wyniku.
+ * czysto javowy dekoder RFC 3284. zainstalowany APK mapujemy z pliku tylko do
+ * odczytu, a patch i wynik lecą strumieniowo. generator robi bazowy VCDIFF bez
+ * secondary compression i application header. używany Xdelta3 nie emituje
+ * VCD_TARGET, więc dekoder nie trzyma poprzednich okien wyniku.
  */
 internal class StreamingVcdiffPatchDecoder : VcdiffPatchDecoder {
     override fun apply(

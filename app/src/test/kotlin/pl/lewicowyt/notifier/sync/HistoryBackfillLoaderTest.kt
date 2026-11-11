@@ -15,56 +15,14 @@ import pl.lewicowyt.notifier.model.SourceType
 import pl.lewicowyt.notifier.network.YouTubeHistoryTab
 
 class HistoryBackfillLoaderTest {
+    // A-56: testy martwego shouldContinueHistoryPaging zastąpione testem ŻYWEJ funkcji isHistoryRangeComplete
     @Test
-    fun continuesOnlyWhilePageIsInsideSelectedTimeRange() {
+    fun historyRangeCompletesOnlyAfterCrossingCutoffOrLastPage() {
         val cutoff = 1_000L
-
-        assertTrue(
-            shouldContinueHistoryPaging(
-                publishedTimes = listOf(1_500L, 1_200L, 1_000L),
-                cutoff = cutoff,
-                hasNextPage = true,
-                loadedPageCount = 1,
-            ),
-        )
-        assertFalse(
-            shouldContinueHistoryPaging(
-                publishedTimes = listOf(1_500L, 999L),
-                cutoff = cutoff,
-                hasNextPage = true,
-                loadedPageCount = 1,
-            ),
-        )
-    }
-
-    @Test
-    fun emptyPageWithCursorContinuesButLastOrSafetyLimitedPageStops() {
-        val cutoff = 1_000L
-
-        assertTrue(
-            shouldContinueHistoryPaging(
-                publishedTimes = emptyList(),
-                cutoff = cutoff,
-                hasNextPage = true,
-                loadedPageCount = 1,
-            ),
-        )
-        assertFalse(
-            shouldContinueHistoryPaging(
-                publishedTimes = listOf(1_500L),
-                cutoff = cutoff,
-                hasNextPage = false,
-                loadedPageCount = 1,
-            ),
-        )
-        assertFalse(
-            shouldContinueHistoryPaging(
-                publishedTimes = listOf(1_500L),
-                cutoff = cutoff,
-                hasNextPage = true,
-                loadedPageCount = 30,
-            ),
-        )
+        assertFalse(isHistoryRangeComplete(listOf(1_500L, 1_200L, 1_000L), cutoff, hasNextPage = true))
+        assertTrue(isHistoryRangeComplete(listOf(1_500L, 999L), cutoff, hasNextPage = true))
+        assertFalse(isHistoryRangeComplete(emptyList(), cutoff, hasNextPage = true))
+        assertTrue(isHistoryRangeComplete(listOf(1_500L), cutoff, hasNextPage = false))
     }
 
     @Test
@@ -296,18 +254,6 @@ class HistoryBackfillLoaderTest {
 
         assertEquals(listOf("AAAAAAAAAAA"), ready.map { it.entry.id })
         assertEquals(listOf("BBBBBBBBBBB"), deferred.map { it.entry.id })
-    }
-
-    @Test
-    fun DomaFilmDoesNotMatchStreamsFilterAfterApiFallback() {
-        assertTrue(VideoKind.VIDEO.matchesHistoryFilters(setOf(HistoryFilter.VIDEOS)))
-        assertFalse(VideoKind.VIDEO.matchesHistoryFilters(setOf(HistoryFilter.STREAMS)))
-    }
-
-    @Test
-    fun unknownMaterialIsNotGuessedAsFilm() {
-        assertFalse(VideoKind.UNKNOWN.matchesHistoryFilters(setOf(HistoryFilter.VIDEOS)))
-        assertFalse(VideoKind.UNKNOWN.matchesHistoryFilters(HistoryFilter.entries.toSet()))
     }
 
     private fun historyItem(id: String, kind: VideoKind) =

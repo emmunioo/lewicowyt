@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Nakładka manifestu WARIANTU `play` (Google Play). Usuwa samoaktualizację z GitHub Releases:
+  zasady Google Play zabraniają aplikacji aktualizowania się inaczej niż przez Google Play, a uprawnienie
+  REQUEST_INSTALL_PACKAGES jest zarezerwowane dla aplikacji, których główną funkcją jest instalowanie pakietów.
+
+  NOTE FOR GOOGLE PLAY REVIEWERS: this build does not request REQUEST_INSTALL_PACKAGES and contains no
+  self-update mechanism. Updates are delivered exclusively by Google Play.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission
+        android:name="android.permission.REQUEST_INSTALL_PACKAGES"
+        tools:node="remove" />
+
+    <application>
+        <activity
+            android:name=".updates.UpdateInstallActivity"
+            tools:node="remove" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.update-files"
+            tools:node="remove" />
+    </application>
+</manifest>

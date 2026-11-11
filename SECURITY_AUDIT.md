@@ -1,7 +1,22 @@
 # Audyt bezpieczeństwa
 
+> **Aktualizacja dla 1.9-beta (2026-10-12).** Poniższy opis powstał dla 1.7/1.8-beta; niektóre twierdzenia
+> zdezaktualizowały się. Najważniejsze różnice w 1.9-beta (reszta sekcji pozostaje poglądowa):
+> - **Schemat bazy: 35** (nie 25/26). Doszły m.in. tabele/kolumny serwerów społeczności, walidatory
+>   warunkowego GET-a (`manifest_etag`/`manifest_last_modified`) i hash regulaminu (`manifest_terms_hash`).
+> - **Ruch nieszyfrowany:** `network_security_config.xml` dopuszcza cleartext globalnie; faktyczną granicą
+>   jest warstwa aplikacji — http akceptujemy TYLKO dla adresów LAN/prywatnych, `localhost`/`.local` i `.onion`
+>   (patrz `toCommunityUrlOrNull`/`isPrivateHost`). Publiczne hosty nadal wyłącznie po HTTPS.
+> - **Obrazy:** oprócz miniatur YouTube doszły obrazy serwerów społeczności — auto-pobierane WYŁĄCZNIE z
+>   hosta danego serwera (lub przez Tor dla `.onion`); brak hosta serwera ⇒ obraz pomijany (fail-closed).
+> - **Serwery społeczności / push:** nowa powierzchnia (manifest, zgoda per regulamin, E2E P-256, FCM/UnifiedPush
+>   per serwer z rotacją tożsamości). Szczegóły w `.lewicowyt json/Protokół serwera społeczności lewicowYT.md`.
+> - **Architektura „dokładnych alarmów" usunięta** — wzmianki o alarmach/Doze niżej są nieaktualne.
+
 Data ostatniej aktualizacji przeglądu kodu: 21 sierpnia 2026 r. (audyt różnicowy
-binarny 1.6.1-beta→1.7-beta na finalnych podpisanych APK).
+binarny 1.6.1-beta→1.7-beta na finalnych podpisanych APK). Raport MobSF i
+VirusTotal finalnego podpisanego `lewicowYT-1.8-beta.apk` doszły 30 sierpnia
+2026 r. — patrz „Artefakt wydania 1.8-beta” niżej.
 
 Wersja kodu: `1.8-beta` (`versionCode 19`).
 
@@ -45,10 +60,10 @@ zachowuje rekordy i Ulubione, tworzy produkcyjny indeks FTS5 oraz magazyn pełny
 opisów jako BLOB Zstd level 5 albo UTF-8, zależnie od rzeczywistego zysku.
 FTS5 otrzymuje osobną oczyszczoną reprezentację tekstową, nigdy skompresowany BLOB.
 
-Kandydat źródłowy 1.8-beta jest przygotowany do dalszej walidacji i podpisania
-przez użytkownika w Android Studio, ale nie ma jeszcze finalnego APK ani raportów.
-Nie wolno przypisywać mu sum SHA-256, VirusTotal ani MobSF wcześniejszych wydań
-(w tym opublikowanego już 1.7-beta).
+Kandydat źródłowy 1.8-beta został podpisany przez użytkownika w Android Studio;
+finalny `lewicowYT-1.8-beta.apk` ma własny raport MobSF i wpis VirusTotal —
+patrz „Artefakt wydania 1.8-beta” niżej. Nie wolno przypisywać mu sum SHA-256,
+VirusTotal ani MobSF innych wydań (w tym 1.7-beta).
 
 ## Zakres
 
@@ -69,13 +84,26 @@ certyfikat Android Debug i narzędziowy kod debug).
 
 ## Wynik i interpretacja MobSF
 
-Raport podpisanego wydania 1.5-beta z 1 sierpnia 2026 r. potwierdza pakiet
-`pl.lewicowyt.notifier`, `versionCode 15`, `versionName 1.5-beta` i podpis v2.
-MobSF przyznał ocenę A, 69/100 (`LOW RISK`): 0 ustaleń wysokiego, 8 średniego
-i 1 informacyjne. Raport jest dostępny jako
-[PDF](https://emmunioo.github.io/lewicowyt/lewicowYT-1.5-beta-MobSF.pdf), a
+Raport podpisanego wydania 1.8-beta z 30 sierpnia 2026 r. potwierdza pakiet
+`pl.lewicowyt.notifier`, `versionCode 19`, `versionName 1.8-beta` i podpis v2
+(ten sam certyfikat co poprzednie wydania, `sha256`
+`2d242f3390a37913459085f86edf96484f2ccc3866e327325d2915c74a8e980a`). MobSF
+przyznał ocenę A, 69/100 (`LOW RISK`) — identyczny wynik co 1.5-beta: 0 ustaleń
+wysokiego, 8 średniego, 2 informacyjne, 3 bezpieczne, 1 „hotspot”. Żadne z
+ustaleń nie jest nowe względem wcześniejszych raportów (patrz interpretacja
+niżej); tym razem raport nie zgłasza już żadnych fałszywych „możliwych
+sekretów” WorkManagera, bo bieżący kod od 1.6-beta z niego nie korzysta.
+Raport jest dostępny jako
+[PDF](https://emmunioo.github.io/lewicowyt/lewicowYT-1.8-beta-MobSF.pdf), a
 odpowiadający mu wynik jest dostępny w
-[VirusTotal](https://www.virustotal.com/gui/file/41bff61a26ddebf32f09064b4fa9e17a3b9a407b18c9d29316e98f3443995eac).
+[VirusTotal](https://www.virustotal.com/gui/file/f3e645e1974d5229392732342f45a8ede352fc2c39e96e6947cd7411cdce6fd3).
+
+Poprzedni pełny raport (1.5-beta, 1 sierpnia 2026 r.) dał ten sam wynik A,
+69/100 (`LOW RISK`): 0 ustaleń wysokiego, 8 średniego i 1 informacyjne. Był
+dostępny jako
+[PDF](https://emmunioo.github.io/lewicowyt/lewicowYT-1.5-beta-MobSF.pdf) i w
+[VirusTotal](https://www.virustotal.com/gui/file/41bff61a26ddebf32f09064b4fa9e17a3b9a407b18c9d29316e98f3443995eac)
+— zachowany jako punkt odniesienia, nie jako aktualny raport dla 1.8-beta.
 
 Poniższe uwagi obejmują również wcześniejsze raporty użyte podczas utwardzania
 aplikacji:
@@ -351,7 +379,25 @@ współdzielenie obrazów i wbudowane awatary. Ostatni przebieg wykonano
 - skan plików publikowanych: brak kluczy podpisu, APK/AAB, zrzutów pamięci,
   raportów awarii, osadzonych kluczy API oraz danych osobowych z certyfikatu.
 
-### Artefakt wydania 1.5-beta
+### Artefakt wydania 1.8-beta
+
+Podpisany artefakt `lewicowYT-1.8-beta.apk` ma:
+
+- rozmiar 16 962 811 bajtów (16,18 MiB);
+- SHA-256 APK:
+  `f3e645e1974d5229392732342f45a8ede352fc2c39e96e6947cd7411cdce6fd3`;
+- MD5: `fbd627dbc389b798762a18da1e6fdd80`; SHA1:
+  `01af3936557747f06115eaa1d98e255547523527`;
+- pakiet `pl.lewicowyt.notifier`, `versionCode 19`, `versionName 1.8-beta`;
+- poprawny podpis APK Signature Scheme v2 i jednego sygnatariusza;
+- SHA-256 certyfikatu:
+  `2d242f3390a37913459085f86edf96484f2ccc3866e327325d2915c74a8e980a`
+  (ten sam certyfikat co 1.4-beta i 1.5-beta);
+- minimalny Android API 26, docelowy API 36.
+
+SHA-256 jest zgodny z identyfikatorem raportów VirusTotal i MobSF.
+
+### Historyczny artefakt 1.5-beta
 
 Podpisany artefakt `lewicowYT-1.5-beta.apk` ma:
 
@@ -364,7 +410,8 @@ Podpisany artefakt `lewicowYT-1.5-beta.apk` ma:
   `2d242f3390a37913459085f86edf96484f2ccc3866e327325d2915c74a8e980a`;
 - minimalny Android API 26, docelowy API 36 oraz cztery deklarowane ABI.
 
-SHA-256 jest zgodny z identyfikatorem raportów VirusTotal i MobSF.
+Skrót tego APK jest zgodny z identyfikatorem raportu VirusTotal 1.5-beta. Nie
+wolno używać go jako skrótu ani raportu dla 1.8-beta.
 
 ### Historyczny artefakt 1.4-beta
 

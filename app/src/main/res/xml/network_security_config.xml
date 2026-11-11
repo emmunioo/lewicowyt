@@ -1,8 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <base-config cleartextTrafficPermitted="false">
-        <!-- Aplikacja ufa wyłącznie magazynowi certyfikatów systemu. Certyfikat
-             użytkownika lub narzędzia MITM nie może przechwycić klucza API. -->
+    <!--
+      Cleartext (http) jest DOZWOLONY na poziomie systemu — także w RELEASE (ten plik obowiązuje we
+      wszystkich wariantach; wcześniejszy komentarz twierdzący, że release blokuje cleartext, był
+      NIEPRAWDZIWY — patrz audyt F-03). Powód: network-security-config NIE umie zawęzić cleartextu do
+      zakresu IP (brak CIDR), a apka świadomie wspiera serwery w sieci LOKALNEJ (LAN, 192.168.x/10.x)
+      oraz usługi ukryte Tora (.onion — zawsze http, ale Tor je szyfruje i uwierzytelnia; ruch idzie przez SOCKS).
+      REALNĄ granicą jest WARSTWA APLIKACJI: `toCommunityUrlOrNull`/`isPrivateHost` dopuszczają http TYLKO
+      dla literałów adresów prywatnych/LAN oraz .onion (po poprawce F-03 nazwy DNS typu fdroid.org/
+      fcbarcelona.com NIE są już uznawane za LAN); linki treści i pobrania publiczne pozostają https-only.
+      Certyfikaty tylko z magazynu systemu (domyślnie bez CA użytkownika → brak MITM na TLS; ukryte, domyślnie wyłączone ustawienie diagnostyczne dopuszcza CA użytkownika w czasie działania — patrz network/UserCertificateTrust.kt, nota dla audytorów). Pełne zamknięcie NSC
+      do samego .onion wymagałoby rezygnacji z serwerów LAN w release (decyzja produktowa).
+    -->
+    <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>

@@ -3,6 +3,7 @@ package pl.lewicowyt.notifier.updates
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -104,10 +105,51 @@ class GitHubUpdateCheckerTest {
     }
 
     @Test
-    fun removedCurrentReleaseMakesNewerReplacementMandatory() {
+    fun `M-11 missing current release offers newer as optional (no false mandatory)`() {
+        // bieżąca wersja nie jest na liście (np. repo >100 wydań), ale jest nowsza — bez markera to
+        // aktualizacja OPCJONALNA, nie wymuszana (dawniej błędnie MANDATORY_SECURITY_UPDATE).
         val releases = JSONArray()
             .put(release(version = "1.4-beta", hasApk = true, prerelease = true))
             .put(release(version = "1.2-beta", hasApk = true, prerelease = true))
+
+        val result = selectUpdateResultFromReleases(
+            releases = releases,
+            currentVersion = "1.3-beta",
+            repository = "emmunioo/lewicowyt",
+        ) as UpdateCheckResult.Available
+
+        assertEquals("1.4-beta", result.update.version)
+        assertEquals(UpdatePolicy.OPTIONAL, result.update.policy)
+    }
+
+    @Test
+    fun `M-11 build ahead of all releases is up to date (no false rollback)`() {
+        // lokalna beta wyprzedza wszystkie wydania — nic nowszego → UpToDate (dawniej błędnie SECURITY_ROLLBACK).
+        val releases = JSONArray()
+            .put(release(version = "1.2-beta", hasApk = true, prerelease = true))
+            .put(release(version = "1.1-beta", hasApk = true, prerelease = true))
+
+        val result = selectUpdateResultFromReleases(
+            releases = releases,
+            currentVersion = "1.3-beta",
+            repository = "emmunioo/lewicowyt",
+        )
+
+        assertEquals(UpdateCheckResult.UpToDate("1.3-beta"), result)
+    }
+
+    @Test
+    fun `M-11 explicit marker in release body makes update mandatory`() {
+        val releases = JSONArray()
+            .put(release(version = "1.3-beta", hasApk = true, prerelease = true))
+            .put(
+                release(
+                    version = "1.4-beta",
+                    hasApk = true,
+                    prerelease = true,
+                    body = "Krytyczna łatka. [security-mandatory]",
+                ),
+            )
 
         val result = selectUpdateResultFromReleases(
             releases = releases,
@@ -120,25 +162,22 @@ class GitHubUpdateCheckerTest {
     }
 
     @Test
-    fun removedCurrentReleaseSelectsNewestOlderSecurityRollback() {
-        val releases = JSONArray()
-            .put(release(version = "1.2-beta", hasApk = true, prerelease = true))
-            .put(release(version = "1.1-beta", hasApk = true, prerelease = true))
-
-        val result = selectUpdateResultFromReleases(
-            releases = releases,
-            currentVersion = "1.3-beta",
-            repository = "emmunioo/lewicowyt",
-        ) as UpdateCheckResult.Available
-
-        assertEquals("1.2-beta", result.update.version)
-        assertEquals(UpdatePolicy.SECURITY_ROLLBACK, result.update.policy)
+    fun `single apk for a foreign abi is not offered`() {
+        val armv7 = listOf("armeabi-v7a", "armeabi")
+        val arm64 = listOf("arm64-v8a", "armeabi-v7a", "armeabi")
+        assertTrue(isApkCompatibleWithAbis("lewicowYT-1.9.apk", armv7)) // bez tokenu = uniwersalny
+        assertFalse(isApkCompatibleWithAbis("lewicowYT-1.9-arm64.apk", armv7))
+        assertTrue(isApkCompatibleWithAbis("lewicowYT-1.9-arm64.apk", arm64))
+        assertTrue(isApkCompatibleWithAbis("lewicowYT-1.9-armv7.apk", arm64))
+        assertFalse(isApkCompatibleWithAbis("lewicowYT-1.9-x86_64.apk", arm64))
+        assertTrue(isApkCompatibleWithAbis("lewicowYT-1.9-arm64.apk", emptyList()))
     }
 
     private fun release(
         version: String,
         hasApk: Boolean,
         prerelease: Boolean = false,
+        body: String = "Informacje o wydaniu",
     ): JSONObject = JSONObject()
         .put("tag_name", "v$version")
         .put("draft", false)
@@ -147,7 +186,7 @@ class GitHubUpdateCheckerTest {
             "html_url",
             "https://github.com/emmunioo/lewicowyt/releases/tag/v$version",
         )
-        .put("body", "Informacje o wydaniu")
+        .put("body", body)
         .put(
             "assets",
             JSONArray().apply {
@@ -165,4 +204,31 @@ class GitHubUpdateCheckerTest {
                 }
             },
         )
+
+    @Test
+    fun rejectsReleaseUrlsEscapingTheRepositoryWithDotSegments() {
+        listOf(
+            "https://github.com/emmunioo/lewicowyt/../inny/releases/download/v1/app.apk",
+            "https://github.com/emmunioo/lewicowyt/%2e%2e/inny/app.apk",
+            "https://github.com/emmunioo/lewicowyt/%2E%2E/inny/app.apk",
+        ).forEach { url ->
+            assertThrows(IllegalArgumentException::class.java) { requireSafeGitHubReleaseUrl(url, "emmunioo/lewicowyt") }
+        }
+    }
+
+    @Test
+    fun universalApkNamedForOldUpdaterIsFirstAndFitsEveryAbi() {
+        // K-01: aktualizator 1.8-beta bierze pierwszy alfabetycznie .apk z wydania (bez ABI)
+        val names = listOf(
+            "lewicowYT-1.9-beta-arm64.apk",
+            "lewicowYT-1.9-beta-armv7.apk",
+            "lewicowYT-1.9-beta-x64.apk",
+            "lewicowYT-1.9-beta-all-universal.apk",
+        )
+        assertEquals("lewicowYT-1.9-beta-all-universal.apk", names.sorted().first())
+        listOf(listOf("arm64-v8a"), listOf("armeabi-v7a", "armeabi"), listOf("x86_64")).forEach { abis ->
+            assertTrue(isApkCompatibleWithAbis("lewicowYT-1.9-beta-all-universal.apk", abis))
+        }
+        assertFalse(isApkCompatibleWithAbis("lewicowYT-1.9-beta-arm64.apk", listOf("armeabi-v7a")))
+    }
 }

@@ -65,8 +65,8 @@ class SourcePriorityScheduler(
         )
 
     /**
-     * Najpierw porządkuje twórców, a potem rozkłada ich dodatkowe źródła
-     * rundami. Jeden twórca nie zajmie dzięki temu kilku pierwszych slotów.
+     * najpierw sortuje twórców, potem rozkłada ich dodatkowe źródła rundami –
+     * dzięki temu jeden twórca nie zgarnia kilku pierwszych slotów.
      */
     fun prioritizeSources(
         creators: List<Creator>,
@@ -113,8 +113,8 @@ class SourcePriorityScheduler(
     }
 
     /**
-     * Historia tylko korzysta z modelu. Nie uczy go na starszych stronach,
-     * bo wielokrotne przewijanie sztucznie zwiększałoby aktywność twórcy.
+     * Historia tylko czyta model, nie uczy go na starszych stronach – bo częste
+     * przewijanie sztucznie podbijałoby aktywność twórcy.
      */
     fun <T> prioritizeSourceGroups(
         groups: List<T>,
@@ -165,9 +165,9 @@ class SourcePriorityScheduler(
     }
 
     /**
-     * Aktualizacja jest wykonywana po zwykłej synchronizacji, bez osobnego
-     * alarmu i bez dodatkowego ruchu sieciowego. Powtarzające się videoId są
-     * przypisywane tylko pierwszemu źródłu w stabilnej kolejności.
+     * aktualizacja leci po zwykłym syncu, bez osobnego alarmu i bez dodatkowego
+     * ruchu w sieci. powtarzające się videoId przypisujemy tylko pierwszemu źródłu
+     * w stabilnej kolejności.
      */
     fun recordOutcomes(observations: List<SourcePriorityObservation>) {
         if (observations.isEmpty()) return

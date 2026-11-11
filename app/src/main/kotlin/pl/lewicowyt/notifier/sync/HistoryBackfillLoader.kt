@@ -61,10 +61,9 @@ data class BackfillResult(
 )
 
 /**
- * Kanały są pobierane współbieżnie w małych grupach. Ograniczenie chroni
- * pamięć telefonu, ponieważ pojedyncza strona kanału YouTube może zawierać
- * kilka megabajtów JSON. Kanał kończy pracę natychmiast po dojściu do granicy
- * czasu wybranej w ustawieniach.
+ * kanały pobieramy współbieżnie, w małych grupach – limit chroni RAM telefonu,
+ * bo jedna strona kanału YT potrafi mieć kilka MB JSON-a. kanał kończy od razu
+ * po dojściu do granicy czasu z ustawień.
  */
 class HistoryBackfillLoader(
     private val catalog: CreatorCatalog,
@@ -243,9 +242,8 @@ class HistoryBackfillLoader(
             )
         }
 
-        // RSS jest najmniejszą i najszybszą odpowiedzią YouTube. Zapisujemy ją
-        // przed uruchomieniem cięższego stronicowania, aby około 15 najnowszych
-        // pozycji mogło pojawić się na ekranie od razu.
+        // RSS to najlżejsza odpowiedź YouTube – zapisujemy przed cięższym
+        // stronicowaniem, żeby ~15 najnowszych wskoczyło na ekran od razu
         val rssCutoff = if (
             apiKey.isBlank() && settings.historyWindowDays > HISTORY_STAGE_DAYS
         ) {
@@ -316,10 +314,9 @@ class HistoryBackfillLoader(
                 enabledHistoryTypes,
                 diagnosticRun,
             )
-            // Data API zapewnia szybkie ID i dokładne daty, natomiast karta
-            // wybrana przez użytkownika jest wiarygodnym dowodem rodzaju.
-            // To jest zwykłe pobieranie historii do granicy czasu, a nie
-            // osobny skan każdej karty w poszukiwaniu wszystkich kandydatów.
+            // Data API daje szybkie ID i dokładne daty, a wybrana karta jest pewnym
+            // dowodem rodzaju. to zwykłe pobranie historii do granicy czasu,
+            // nie osobny skan każdej karty pod kątem wszystkich kandydatów
             val webTargets = if (apiResult.errors.isEmpty()) {
                 buildApiKindVerificationTargets(
                     creator = firstTarget.creator,
@@ -327,8 +324,7 @@ class HistoryBackfillLoader(
                     enabledHistoryTypes = enabledHistoryTypes,
                 )
             } else {
-                // Gdy API zawiedzie, publiczne karty nadal muszą dostarczyć
-                // cały zakres aktualnie wybrany przez użytkownika.
+                // API padło – publiczne karty muszą dowieźć cały wybrany zakres
                 buildWebTargets(
                     creator = firstTarget.creator,
                     source = firstTarget.source,
@@ -345,8 +341,8 @@ class HistoryBackfillLoader(
                 diagnosticRun = diagnosticRun,
             )
             if (webResult.errors.isEmpty()) {
-                // Pełny zakres został dostarczony przez YouTube Web.
-                // Wadliwy lub wyczerpany klucz nie może wymuszać kolejnych prób.
+                // cały zakres dowiózł YouTube Web – zepsuty/wyczerpany klucz
+                // nie ma po co ponawiać
                 targets.forEach { completedTargets += it.key }
                 return mergeRssAndYouTubeResults(
                     rssResult = rssResult,
@@ -413,19 +409,18 @@ class HistoryBackfillLoader(
     }
 
     /**
-     * RSS nie zawiera rodzaju materiału. Karty kanału są lżejszym źródłem tej
-     * informacji, ale w EOG YouTube może zamiast nich zwrócić stronę zgody.
-     * Najnowsze wpisy klasyfikujemy więc również po publicznej stronie filmu.
+     * RSS nie niesie rodzaju. karty kanału są lżejszym źródłem, ale w EOG YouTube
+     * potrafi zamiast nich podać stronę zgody – dlatego najnowsze wpisy klasyfikujemy
+     * też po publicznej stronie filmu.
      */
     private suspend fun classifyRssItems(
         items: List<YouTubeHistoryItem>,
         reporter: ProgressReporter,
         diagnosticRun: DiagnosticSyncRun,
     ) {
-        // Wpis RSS ma już słaby fallback VIDEO, ale playlista nie ujawnia
-        // rodzaju materiału kartą kanału. Sprawdzamy więc bieżący pakiet RSS
-        // niezależnie od wersji zapisanego fallbacku; silniejszy dowód PLAYER
-        // może go bezpiecznie zastąpić.
+        // wpis RSS ma słaby fallback VIDEO, a playlista nie zdradza rodzaju kartą
+        // kanału. sprawdzamy więc bieżący pakiet RSS niezależnie od zapisanego
+        // fallbacku – mocniejszy dowód PLAYER może go spokojnie nadpisać
         val candidateIds = items.map { it.entry.id }.distinct()
         if (candidateIds.isEmpty()) return
 
@@ -475,9 +470,8 @@ class HistoryBackfillLoader(
         }
         return ChannelResult(
             insertedCount = rssResult.getOrDefault(0) + youtubeResult.insertedCount,
-            // RSS jest szybkim początkiem, ale sam nie dowodzi kompletności
-            // wybranego zakresu. Jego błąd zgłaszamy tylko wtedy, gdy zawiodło
-            // również źródło stronicowane.
+            // RSS to szybki start, ale sam nie dowodzi kompletności zakresu –
+            // jego błąd zgłaszamy tylko gdy padło też źródło stronicowane
             errors = if (youtubeResult.errors.isEmpty()) {
                 emptyList()
             } else {
@@ -566,12 +560,15 @@ class HistoryBackfillLoader(
         if (target.source.type == SourceType.PLAYLIST) {
             return resolver.resolve(target.creator, target.source)
         }
+        // G-05e: ta sama ścisła walidacja co w YouTubeSourceResolver — luźniejsze „UC…" z Data API nie trafia
+        // do saveResolvedId ani do adresu feedu
         val externalId = target.source.externalId
-            ?.takeIf { it.startsWith("UC") }
+            ?.takeIf(YouTubeSourceResolver::isChannelId)
             ?: database.getResolvedId(sourceKey)
-                ?.takeIf { it.startsWith("UC") }
+                ?.takeIf(YouTubeSourceResolver::isChannelId)
             ?: runCatching {
                 dataApiClient.resolveChannelId(target.source.url, apiKey)
+                    .also { require(YouTubeSourceResolver.isChannelId(it)) { "Niepoprawne id kanału z Data API" } }
             }.getOrElse { error ->
                 diagnosticRun.sourceError(DiagnosticYouTubeSource.DATA_API)
                 diagnosticRun.youtubeIssue(
@@ -597,10 +594,9 @@ class HistoryBackfillLoader(
     }
 
     /**
-     * Karty jednego kanału są przeplatane co 14 dni: najpierw Filmy, potem
-     * Shorty i Streamy. Kursor każdej karty pozostaje w pamięci, więc następny
-     * etap nie zaczyna ponownie od najnowszej strony. Pięć kanałów nadal może
-     * wykonywać ten sam algorytm równolegle.
+     * karty jednego kanału przeplatamy co 14 dni: najpierw Filmy, potem Shorty i
+     * Streamy. kursor każdej karty siedzi w pamięci, więc następny etap nie startuje
+     * znów od najnowszej strony. pięć kanałów wciąż może robić ten sam algorytm równolegle.
      */
     private suspend fun loadWebTargetsProgressively(
         targets: List<Target>,
@@ -615,8 +611,8 @@ class HistoryBackfillLoader(
         val failedTargets = mutableSetOf<Target>()
         val errors = mutableListOf<String>()
         var insertedCount = 0
-        // Odtwarzamy dokładnie tę samą chwilę, z której wyliczono końcową
-        // granicę. Dzięki temu ostatni etap zawsze kończy się na overallCutoff.
+        // odtwarzamy tę samą chwilę, z której wyszła końcowa granica – ostatni
+        // etap zawsze domyka się na overallCutoff
         val rangeNowMillis = overallCutoff + historyWindowDays.toLong() * DAY_MILLIS
 
         for (stageDepthDays in historyStageDepths(historyWindowDays)) {
@@ -691,8 +687,8 @@ class HistoryBackfillLoader(
                         ).take(MAX_ERROR_LINE_CHARS)
                 }
             }
-            // Po każdym dwutygodniowym etapie odświeżamy ekran nawet wtedy,
-            // gdy mała liczba pozycji nie uruchomiła ogranicznika czasowego.
+            // po każdym 2-tygodniowym etapie odświeżamy ekran, nawet gdy garstka
+            // pozycji nie ruszyła ogranicznika czasu
             reporter.report(force = true)
         }
         states.forEach { (target, state) ->
@@ -804,9 +800,8 @@ class HistoryBackfillLoader(
                 page.items
             }
 
-            // Jedna strona YouTube może przeciąć granicę 14 dni. Jej starszą
-            // część zachowujemy w pamięci i zapisujemy dopiero w kolejnym
-            // etapie, bez ponownego pobierania strony.
+            // jedna strona YT potrafi przeciąć granicę 14 dni – starszą część
+            // trzymamy w pamięci i zapisujemy w kolejnym etapie, bez ponownego pobierania
             val (readyNow, deferred) = splitHistoryStageItems(
                 items = pageItems.filter {
                     it.isSafeForEnabledContentTypes(enabledHistoryTypes)
@@ -832,8 +827,8 @@ class HistoryBackfillLoader(
                 page.items.isEmpty() &&
                 page.membershipKinds.isNotEmpty()
             ) {
-                // Karta bez dat nadal klasyfikuje bieżące wpisy RSS, lecz nie
-                // nadaje się do bezpiecznego przewijania historii.
+                // karta bez dat wciąż klasyfikuje bieżące wpisy RSS, ale nie nadaje
+                // się do bezpiecznego przewijania historii
                 state.networkComplete = true
                 stageComplete = true
                 break
@@ -976,9 +971,9 @@ class HistoryBackfillLoader(
             return emptyList()
         }
         val enabledHistoryTypes = settings.historyTypesFor(creator.id)
-        // RSS miesza rodzaje materiałów. Pobranie wszystkich istniejących kart
-        // daje poprawną klasyfikację niezależnie od aktualnie otwartego filtra;
-        // SQL sprawia, że potwierdzonego braku karty już nie odpytujemy.
+        // RSS miesza rodzaje – pobranie wszystkich istniejących kart daje poprawną
+        // klasyfikację niezależnie od otwartego filtra; SQL pilnuje, żeby nie
+        // odpytywać kart, których pewnie nie ma
         return webHistoryTabsForSource(source.type, enabledHistoryTypes).map { tab ->
             Target(creator, source, tab)
         }
@@ -1002,9 +997,9 @@ class HistoryBackfillLoader(
     private fun buildSignature(settings: AppSettings, apiKey: String): String = buildString {
         append(settings.selectedCreatorIds.sorted().joinToString(","))
         append('|')
-        // Konkretny filtr zmienia wyłącznie widok. Zestaw celów sieciowych jest
-        // zawsze taki sam (Shorty, Streamy i Filmy), więc nie wolno przez jego
-        // przełączenie kasować zakończonych celów i ponownie pobierać kanałów.
+        // filtr zmienia tylko widok – zestaw celów sieciowych i tak jest ten sam
+        // (Shorty, Streamy, Filmy), więc jego przełączenie nie może kasować
+        // zakończonych celów ani pobierać kanałów od nowa
         append(historyFilterTargetSignature(settings.historyFilters))
         append('|')
         append(contentSettingsSignature(settings))
@@ -1116,8 +1111,7 @@ internal fun webHistoryTabsForSource(
     enabledTypes: Set<HistoryFilter> = HistoryFilter.entries.toSet(),
 ): List<YouTubeHistoryTab> =
     if (sourceType == SourceType.CHANNEL) {
-        // W każdym dwutygodniowym etapie zwykłe filmy są dostarczane jako
-        // pierwsze, następnie Shorty, a na końcu transmisje.
+        // w każdym etapie kolejność: najpierw zwykłe filmy, potem Shorty, na końcu streamy
         listOf(
             YouTubeHistoryTab.VIDEOS,
             YouTubeHistoryTab.SHORTS,
@@ -1128,9 +1122,9 @@ internal fun webHistoryTabsForSource(
     }
 
 /**
- * API rozpoznaje bieżące LIVE/UPCOMING i długie filmy, ale nie potwierdza
- * archiwalnych transmisji ani Shorts. Tylko te dwie karty są więc potrzebne
- * jako zwykły backfill klasyfikacyjny; nie wykonujemy drugiego skanu VIDEOS.
+ * API łapie bieżące LIVE/UPCOMING i długie filmy, ale nie potwierdza archiwalnych
+ * streamów ani Shortów. potrzebne więc tylko te dwie karty jako backfill
+ * klasyfikacyjny – VIDEOS nie skanujemy drugi raz.
  */
 internal fun apiKindVerificationTabs(sourceType: SourceType): List<YouTubeHistoryTab> =
     if (sourceType == SourceType.CHANNEL) {
@@ -1176,15 +1170,6 @@ internal fun YouTubeHistoryTab.contentType(): HistoryFilter? = when (this) {
     YouTubeHistoryTab.PLAYLIST -> null
 }
 
-internal fun VideoKind.matchesHistoryFilters(filters: Set<HistoryFilter>): Boolean = when (this) {
-    VideoKind.VIDEO -> HistoryFilter.VIDEOS in filters
-    VideoKind.LIVE,
-    VideoKind.UPCOMING,
-    VideoKind.STREAM_ARCHIVE -> HistoryFilter.STREAMS in filters
-    VideoKind.SHORT -> HistoryFilter.SHORTS in filters
-    VideoKind.UNKNOWN -> false
-}
-
 private suspend inline fun <T> runSuspendCatching(
     crossinline block: suspend () -> T,
 ): Result<T> = try {
@@ -1194,16 +1179,6 @@ private suspend inline fun <T> runSuspendCatching(
 } catch (error: Exception) {
     Result.failure(error)
 }
-
-internal fun shouldContinueHistoryPaging(
-    publishedTimes: List<Long>,
-    cutoff: Long,
-    hasNextPage: Boolean,
-    loadedPageCount: Int,
-    maxPages: Int = 30,
-): Boolean =
-    !isHistoryRangeComplete(publishedTimes, cutoff, hasNextPage) &&
-        loadedPageCount < maxPages
 
 internal fun isHistoryTargetComplete(
     publishedTimes: List<Long>,
@@ -1236,8 +1211,8 @@ internal fun rssHistoryItems(
         val decision = rssVideoKindDecision(entry)
         YouTubeHistoryItem(
             entry = entry.copy(origin = VideoOrigin.YOUTUBE),
-            // Kanoniczny `/shorts/ID` jest mocnym dowodem; zwykły watch
-            // dostaje słaby fallback VIDEO, który karta kanału może poprawić.
+            // kanoniczne `/shorts/ID` to mocny dowód; zwykły watch dostaje słaby
+            // fallback VIDEO, który karta kanału może poprawić
             kind = decision.kind,
             evidence = decision.evidence,
             publishedAtEvidence = PublishedAtEvidence.RSS,

@@ -25,15 +25,15 @@ class YouTubeChooserIntentTest {
     }
 
     @Test
-    fun alwaysAskAddsExplicitAlternativeApplications() {
+    fun alwaysAskPassesThroughExplicitInitialIntents() {
         val target = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/watch?v=dQw4w9WgXcQ"))
-        val newPipe = Intent(target).setPackage("org.schabi.newpipe")
+        val player = Intent(target).setPackage("com.example.player")
         val browser = Intent(target).setPackage("com.android.chrome")
 
-        val chooser = createAlwaysAskChooser(target, listOf(newPipe, browser))
+        val chooser = createAlwaysAskChooser(target, listOf(player, browser))
 
         val alternatives = chooser.getParcelableArrayExtra(Intent.EXTRA_INITIAL_INTENTS)
             ?.mapNotNull { (it as? Intent)?.`package` }
-        assertEquals(listOf("org.schabi.newpipe", "com.android.chrome"), alternatives)
+        assertEquals(listOf("com.example.player", "com.android.chrome"), alternatives)
     }
 }

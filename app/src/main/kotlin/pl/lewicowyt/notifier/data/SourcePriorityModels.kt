@@ -11,10 +11,10 @@ data class SourcePrioritySeed(
 )
 
 /**
- * Lokalny stan lekkiego modelu aktywności źródła.
+ * lokalny stan lekkiego modelu aktywności źródła.
  *
- * eventMass i exposureDays tworzą estymator Gamma–Poisson. Dane pozostają
- * wyłącznie na urządzeniu użytkownika.
+ * eventMass i exposureDays tworzą estymator Gamma–Poisson. dane zostają tylko
+ * na urządzeniu usera.
  */
 data class SourcePriorityStats(
     val sourceKey: String,

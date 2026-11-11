@@ -575,5 +575,16 @@
         "externalId": "UCQhjrIQpR7MkVDWdtktOuUg"
       }
     ]
+  },
+  {
+    "id": "vrzenie",
+    "name": "vrzenie",
+    "sources": [
+      {
+        "type": "CHANNEL",
+        "url": "https://www.youtube.com/@vrzenie",
+        "externalId": "UCRIBFMa4GU47JPReORqpJ4A"
+      }
+    ]
   }
 ]

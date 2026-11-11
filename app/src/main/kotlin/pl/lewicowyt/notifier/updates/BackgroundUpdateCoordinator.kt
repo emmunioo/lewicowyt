@@ -43,8 +43,8 @@ class BackgroundUpdateCoordinator(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            // Zwykła awaria GitHuba nie może oznaczać awarii synchronizacji
-            // YouTube ani powodować dodatkowych alarmów i zużycia baterii.
+            // wywrotka GitHuba nie może uchodzić za awarię syncu YT ani generować
+            // dodatkowych alarmów i zjadać baterii
         }
     }
 

@@ -24,8 +24,10 @@ class DatabaseDiagnosticsInstrumentedTest {
         try {
             val state = database.diagnosticState()
             assertEquals("BUNDLED_SQLITE", state.engine)
-            assertEquals(24, state.userVersion)
-            assertEquals(24, state.appSchemaVersion)
+            // M-13: świeża baza ma BIEŻĄCY schemat — używamy stałej zamiast zahardkodowanej liczby,
+            // żeby test nie gnił przy każdym bumpie DATABASE_VERSION.
+            assertEquals(LocalDatabase.DATABASE_VERSION, state.userVersion)
+            assertEquals(LocalDatabase.DATABASE_VERSION, state.appSchemaVersion)
             assertTrue(state.sqliteVersion.isNotBlank())
             assertTrue(state.journalMode.isNotBlank())
             assertTrue(state.fts5Available)

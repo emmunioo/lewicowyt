@@ -22,9 +22,12 @@ internal sealed interface DescriptionFetchResult {
     data object Invalid : DescriptionFetchResult
 }
 
+/** Wynik sprawdzenia streamu: realny start (ms) i czy film jest teraz prywatny. */
+data class StreamStatus(val actualStartMs: Long?, val isPrivate: Boolean)
+
 /**
- * Klasyfikacja bez klucza YouTube Data API na podstawie publicznej strony filmu.
- * Jest to mechanizm best-effort: YouTube może zmieniać wewnętrzny JSON strony.
+ * klasyfikacja bez klucza Data API, z publicznej strony filmu. best-effort –
+ * YouTube potrafi zmienić wewnętrzny JSON strony.
  */
 class YouTubePageClassifier(private val http: HttpTextClient) {
     fun inspect(videoId: String): YouTubeVideoMetadata? {
@@ -39,9 +42,9 @@ class YouTubePageClassifier(private val http: HttpTextClient) {
         }.getOrNull()
         responseText?.let { inspectPlayerResponse(it, videoId) }?.let { return it }
 
-        // Część publicznych starszych filmów jest błędnie oznaczana przez klienta
-        // Android player jako LOGIN_REQUIRED. Strona watch nadal zawiera podpisane
-        // przez YouTube metadane bieżącego videoId, kanału i daty.
+        // część starszych, publicznych filmów player Androida błędnie oznacza jako
+        // LOGIN_REQUIRED. strona watch i tak ma podpisane przez YT metadane
+        // videoId, kanału i daty
         val html = runCatching {
             http.getText(
                 "https://www.youtube.com/watch?v=$videoId",
@@ -121,8 +124,8 @@ class YouTubePageClassifier(private val http: HttpTextClient) {
                 headers = PLAYER_HEADERS,
             )
         }.getOrNull()
-        // Pobieranie opisów celowo nie korzysta z /watch. Poprawna odpowiedź
-        // playera, także z pustym shortDescription, jest wynikiem ostatecznym.
+        // opisów celowo nie bierzemy z /watch. poprawna odpowiedź playera – nawet
+        // z pustym shortDescription – jest ostateczna
         return responseText?.let {
             extractDescriptionFetchResult(
                 responseText = it,
@@ -199,8 +202,8 @@ class YouTubePageClassifier(private val http: HttpTextClient) {
                 return DescriptionFetchResult.Invalid
             }
         }
-        // Brak pola albo sam biały tekst oznacza prawidłowy film bez opisu.
-        // Pusty String różni się od null, które pozostaje błędem walidacji/sieci.
+        // brak pola albo same białe znaki = poprawny film bez opisu. pusty String
+        // to co innego niż null (null zostaje błędem walidacji/sieci)
         return DescriptionFetchResult.Available(
             details.optString("shortDescription")
                 .trim()
@@ -236,6 +239,8 @@ class YouTubePageClassifier(private val http: HttpTextClient) {
         }
 
     fun classify(videoId: String): VideoKind {
+        // B-90: id trafia do URL-a — bez walidacji zniekształcone id (np. z ładunku serwera) sklejałoby zapytanie
+        if (!YOUTUBE_VIDEO_ID.matches(videoId)) return VideoKind.UNKNOWN
         val playerKind = runCatching {
             val response = http.postJson(
                 url = PLAYER_ENDPOINT,
@@ -255,6 +260,41 @@ class YouTubePageClassifier(private val http: HttpTextClient) {
             classifyHtml(html, videoId)
         }.getOrDefault(VideoKind.UNKNOWN)
     }
+
+    /**
+     * Dla streamu: realny czas startu (liveBroadcastDetails.startTimestamp) i czy film stał się
+     * PRYWATNY (komunikat „film prywatny" w playabilityStatus). Null = nie udało się pobrać.
+     * Prywatny rozpoznajemy po treści powodu (a nie samym LOGIN_REQUIRED, który łapie też wiek).
+     */
+    fun streamStatus(videoId: String): StreamStatus? = if (!YOUTUBE_VIDEO_ID.matches(videoId)) null else runCatching {
+        val json = http.postJson(
+            url = PLAYER_ENDPOINT,
+            json = playerRequest(videoId),
+            maxChars = MAX_PLAYER_RESPONSE_CHARS,
+            headers = PLAYER_HEADERS,
+        )
+        if (!hasSafeJsonNesting(json)) return@runCatching null
+        val response = JSONObject(json)
+        val startIso = response.optJSONObject("microformat")
+            ?.optJSONObject("playerMicroformatRenderer")
+            ?.optJSONObject("liveBroadcastDetails")
+            ?.optString("startTimestamp")
+            ?.ifBlank { null }
+        val playability = response.optJSONObject("playabilityStatus")
+        val reason = buildString {
+            append(playability?.optString("reason").orEmpty())
+            append(' ')
+            append(
+                playability?.optJSONObject("errorScreen")
+                    ?.optJSONObject("playerErrorMessageRenderer")
+                    ?.optJSONObject("subreason")
+                    ?.optString("simpleText")
+                    .orEmpty(),
+            )
+        }.lowercase()
+        val isPrivate = reason.contains("private") || reason.contains("prywat")
+        StreamStatus(actualStartMs = parseIsoDateMillis(startIso), isPrivate = isPrivate)
+    }.getOrNull()
 
     private fun playerRequest(videoId: String): String = JSONObject()
         .put(
@@ -300,8 +340,8 @@ class YouTubePageClassifier(private val http: HttpTextClient) {
             isUpcoming -> VideoKind.UPCOMING
             isLive -> VideoKind.LIVE
             status != "OK" -> VideoKind.UNKNOWN
-            // To pole obejmuje również zakończone Premiery. Bez karty kanału
-            // nie jest dowodem, że materiał należy do sekcji „Streamy”.
+            // to pole łapie też skończone Premiery – bez karty kanału nie dowodzi,
+            // że materiał jest w sekcji „Streamy"
             details.optBoolean("isLiveContent", false) -> VideoKind.UNKNOWN
             durationSeconds !in 1L..MAX_SHORT_SECONDS ->
                 if (durationSeconds > MAX_SHORT_SECONDS) {
@@ -340,7 +380,9 @@ class YouTubePageClassifier(private val http: HttpTextClient) {
         if (!currentVideoIdPattern(videoId).containsMatchIn(playerData)) {
             return VideoKind.UNKNOWN
         }
-        if (isShort(html, videoId) || isShort(playerData, videoId)) {
+        // D-14: flagę isShort bierzemy tylko z danych BIEŻĄCEGO filmu (playerData), nie z całej strony — polecany
+        // Short w HTML nie może przestawić zwykłego filmu na SHORT; ścieżki /shorts/<id> są i tak związane z id
+        if (isShort(html, videoId, flagAllowed = false) || isShort(playerData, videoId, flagAllowed = true)) {
             return VideoKind.SHORT
         }
         return classifyPlayerResponse(playerData, videoId)
@@ -350,8 +392,8 @@ class YouTubePageClassifier(private val http: HttpTextClient) {
         PLAYER_RESPONSE_MARKERS.forEach { marker ->
             extractJsonObjectAfterMarker(html, marker)?.let { return it }
         }
-        // Ułatwia bezpośrednie testowanie parsera małym fragmentem odpowiedzi,
-        // lecz nigdy nie uruchamia globalnego skanowania pełnej strony HTML.
+        // ułatwia testowanie parsera na małym fragmencie, ale nigdy nie skanuje
+        // całej strony HTML
         return html.trim().takeIf {
             it.length <= MAX_INLINE_PLAYER_JSON_CHARS &&
                 it.startsWith('{') &&
@@ -394,11 +436,10 @@ class YouTubePageClassifier(private val http: HttpTextClient) {
     private fun currentVideoIdPattern(videoId: String): Regex =
         Regex(""""videoId"\s*:\s*"${Regex.escape(videoId)}"""")
 
-    private fun isShort(html: String, videoId: String): Boolean {
-        if (SHORT_FLAG.containsMatchIn(html)) return true
-        // YouTube nie zawsze publikuje już pole `isShort`. Aktualna strona
-        // odtwarzania umieszcza jednak ścieżkę bieżącego Shorta w wewnętrznych
-        // komendach nawigacji (ze zwykłymi albo escapowanymi slashami).
+    private fun isShort(html: String, videoId: String, flagAllowed: Boolean): Boolean {
+        if (flagAllowed && SHORT_FLAG.containsMatchIn(html)) return true
+        // pole `isShort` YouTube nie zawsze już podaje, ale ścieżkę bieżącego
+        // Shorta wciąż wsadza w wewnętrzne komendy nawigacji (slashe zwykłe lub escapowane)
         val shortPath = "/shorts/$videoId"
         if (html.contains(shortPath) || html.contains(shortPath.replace("/", "\\/"))) {
             return true

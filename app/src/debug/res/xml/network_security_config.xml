@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Konfiguracja TYLKO dla buildu debug. Zezwala na zwykły HTTP, żeby dało się testować
+  serwer społeczności w sieci lokalnej bez HTTPS. Nadpisuje strict-config z src/main.
+  J-11a: release używa src/main/res/xml/network_security_config.xml, który TEŻ dopuszcza cleartext
+  (patrz F-03 w tamtym pliku). Ograniczenie do samego LAN wymusza warstwa aplikacji (isPrivateHost).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

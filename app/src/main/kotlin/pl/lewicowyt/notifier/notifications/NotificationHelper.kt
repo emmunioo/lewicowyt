@@ -32,12 +32,16 @@ import pl.lewicowyt.notifier.model.Creator
 import pl.lewicowyt.notifier.model.HistoryItem
 import pl.lewicowyt.notifier.model.VideoEntry
 import pl.lewicowyt.notifier.model.VideoKind
+import pl.lewicowyt.notifier.network.BROWSER_USER_AGENT
 import pl.lewicowyt.notifier.network.PrivacyHttpClient
 
 data class NotificationCandidate(
     val creator: Creator,
     val entry: VideoEntry,
     val kind: VideoKind,
+    // miniatura DOSTARCZONA przez serwer główny (społeczności) — używamy jej wprost, bez pobierania
+    // z sieci (zero korelacji IP „kto otworzył powiadomienie"). null = pobierz standardową z YouTube.
+    val thumbnailOverride: Bitmap? = null,
 )
 
 data class NotificationDeliveryResult(
@@ -52,6 +56,8 @@ class NotificationHelper(
     private val context: Context,
     private val database: LocalDatabase,
     private val youtubeLinks: YouTubeLinkLauncher,
+    // czy nowe materiały mają trafiać też na smartwatch (czytane świeżo przy każdej partii)
+    private val notifyOnWatch: suspend () -> Boolean = { true },
 ) {
     private val thumbnailClient by lazy {
         PrivacyHttpClient.get(context).newBuilder()
@@ -71,12 +77,60 @@ class NotificationHelper(
                 "Powiadomienia o nowych filmach, Shortach i transmisjach wybranych twórców"
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         }
-        context.getSystemService(NotificationManager::class.java)
-            .createNotificationChannel(channel)
+        val healthChannel = NotificationChannel(
+            HEALTH_CHANNEL_ID,
+            "Weryfikacja serwera głównego",
+            NotificationManager.IMPORTANCE_LOW, // ciche: bez dźwięku i wibracji
+        ).apply {
+            description =
+                "Ostrzeżenia, gdy serwer społeczności zastępujący serwer domyślny daje inne wyniki niż YouTube"
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+            setShowBadge(false)
+        }
+        context.getSystemService(NotificationManager::class.java).apply {
+            createNotificationChannel(channel)
+            createNotificationChannel(healthChannel)
+        }
+    }
+
+    /**
+     * Ciche powiadomienie o rozjeżdżaniu się „serwera głównego" z RSS YouTube. Bez dźwięku (kanał
+     * IMPORTANCE_LOW) — właściwy, szczegółowy opis różnic user widzi w banerze w zakładce społeczności.
+     */
+    fun notifyPrimaryHealth(title: String, text: String): Boolean {
+        if (!hasNotificationPermission(HEALTH_CHANNEL_ID)) return false
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            HEALTH_NOTIFICATION_ID,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notification = WearNotifications.phoneOnly(NotificationCompat.Builder(context, HEALTH_CHANNEL_ID))
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .build()
+        return show(HEALTH_NOTIFICATION_ID, notification)
+    }
+
+    /** kasuje powiadomienie o serwerze głównym (po powrocie serwera do zgodności). */
+    fun cancelPrimaryHealth() {
+        NotificationManagerCompat.from(context).cancel(HEALTH_NOTIFICATION_ID)
     }
 
     suspend fun notifyBatch(
         candidates: List<NotificationCandidate>,
+        forceSummary: Boolean = false,
         canDeliver: suspend (NotificationCandidate) -> Boolean = { true },
     ): NotificationDeliveryResult {
         if (candidates.isEmpty()) {
@@ -84,6 +138,14 @@ class NotificationHelper(
         }
         val unique = candidates.distinctBy { it.entry.id }
             .sortedByDescending { it.entry.publishedAtMillis }
+        // G-05d: anulowanie przepuszczamy (runCatching połknąłby CancellationException)
+        val onWatch = try {
+            notifyOnWatch()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            true
+        }
         if (!hasNotificationPermission()) {
             return NotificationDeliveryResult(
                 permissionMissingVideoIds = unique.mapTo(mutableSetOf()) { it.entry.id },
@@ -93,22 +155,22 @@ class NotificationHelper(
         val rejected = unique.mapTo(mutableSetOf()) { it.entry.id }.apply {
             removeAll(initiallyAllowed.map { it.entry.id }.toSet())
         }
-        // Wybór kanałów może zmienić się podczas przygotowywania paczki.
-        // Ponowny odczyt tuż przed wyborem typu powiadomienia zapobiega
-        // zbiorczemu oznaczeniu odznaczonych twórców jako dostarczonych.
+        // wybór kanałów mógł się zmienić w trakcie przygotowywania paczki –
+        // ponowny odczyt tuż przed wyborem typu chroni przed oznaczeniem
+        // odznaczonych twórców jako dostarczonych
         val deliverable = initiallyAllowed.filter { canDeliver(it) }
         rejected += initiallyAllowed.map { it.entry.id }
             .filterNot(deliverable.map { it.entry.id }.toSet()::contains)
         if (deliverable.isEmpty()) {
             return NotificationDeliveryResult(revalidationRejectedVideoIds = rejected)
         }
-        return if (!usesSummaryNotification(deliverable.size)) {
+        return if (!forceSummary && !usesSummaryNotification(deliverable.size)) {
             val deliveredIds = coroutineScope {
                 deliverable.map { candidate ->
                     async(Dispatchers.IO) {
                         try {
                             candidate.entry.id.takeIf {
-                                notifyDirect(candidate) { canDeliver(candidate) }
+                                notifyDirect(candidate, onWatch) { canDeliver(candidate) }
                             }
                         } catch (cancelled: CancellationException) {
                             throw cancelled
@@ -127,7 +189,7 @@ class NotificationHelper(
                 },
             )
         } else {
-            if (notifySummary(deliverable.size)) {
+            if (notifySummary(deliverable.size, onWatch)) {
                 NotificationDeliveryResult(
                     systemNotificationsSent = 1,
                     deliveredVideoIds = deliverable.mapTo(mutableSetOf()) { it.entry.id },
@@ -144,6 +206,7 @@ class NotificationHelper(
 
     private suspend fun notifyDirect(
         candidate: NotificationCandidate,
+        onWatch: Boolean,
         canDeliver: suspend () -> Boolean,
     ): Boolean {
         if (!YOUTUBE_VIDEO_ID.matches(candidate.entry.id)) return false
@@ -160,7 +223,7 @@ class NotificationHelper(
             VideoKind.VIDEO -> "Nowy film: ${candidate.creator.name}"
             VideoKind.UNKNOWN -> "Nowy materiał: ${candidate.creator.name}"
         }
-        val thumbnail = try {
+        val thumbnail = candidate.thumbnailOverride ?: try {
             loadThumbnail(candidate.entry.id)
         } catch (_: Exception) {
             null
@@ -174,6 +237,7 @@ class NotificationHelper(
                 title = title,
                 text = candidate.entry.title,
                 pendingIntent = pendingIntent,
+                onWatch = onWatch,
             )
                 .setLargeIcon(thumbnail)
                 .setStyle(
@@ -189,6 +253,7 @@ class NotificationHelper(
             title = title,
             text = candidate.entry.title,
             pendingIntent = pendingIntent,
+            onWatch = onWatch,
         )
             .setStyle(NotificationCompat.BigTextStyle().bigText(candidate.entry.title))
             .build()
@@ -203,7 +268,8 @@ class NotificationHelper(
         title: String,
         text: String,
         pendingIntent: PendingIntent,
-    ): NotificationCompat.Builder = NotificationCompat.Builder(context, CHANNEL_ID)
+        onWatch: Boolean,
+    ): NotificationCompat.Builder = WearNotifications.content(NotificationCompat.Builder(context, CHANNEL_ID), onWatch, pendingIntent)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
             .setContentText(text)
@@ -216,7 +282,7 @@ class NotificationHelper(
             .setGroup(GROUP_KEY)
             .setTimeoutAfter(NOTIFICATION_TIMEOUT_MILLIS)
 
-    private fun notifySummary(count: Int): Boolean {
+    private fun notifySummary(count: Int, onWatch: Boolean): Boolean {
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra(MainActivity.EXTRA_OPEN_NOTIFICATIONS, true)
@@ -227,7 +293,7 @@ class NotificationHelper(
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+        val notification = WearNotifications.content(NotificationCompat.Builder(context, CHANNEL_ID), onWatch, pendingIntent)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("Nowe materiały ($count)")
             .setContentText("Dotknij, aby otworzyć sekcję Powiadomienia")
@@ -248,6 +314,35 @@ class NotificationHelper(
         return show(SUMMARY_NOTIFICATION_ID, notification)
     }
 
+    /**
+     * Q-06: powiadomienie testowe na zegarek. Aplikacje opasek (Mi Fitness, Zepp i podobne) pokazują aplikację
+     * na swojej liście „powiadomień aplikacji” dopiero, gdy zobaczą od niej jakiekolwiek powiadomienie — a
+     * lewicowYT wysyła je rzadko (tylko przy nowych materiałach). Ten przycisk daje od razu jedno, zawsze
+     * przekazywane na zegarek (nie setLocalOnly, poza grupą), bez treści i bez sieci.
+     */
+    fun notifyWatchTest(): Boolean {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            WATCH_TEST_NOTIFICATION_ID,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notification = WearNotifications.content(NotificationCompat.Builder(context, CHANNEL_ID), true, pendingIntent)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("lewicowYT — test zegarka")
+            .setContentText("Jeśli widzisz to na zegarku, powiadomienia działają.")
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_SOCIAL)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setTimeoutAfter(WATCH_TEST_TIMEOUT_MILLIS)
+            .build()
+        return show(WATCH_TEST_NOTIFICATION_ID, notification)
+    }
+
     private fun publicNotification(pendingIntent: PendingIntent) =
         NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
@@ -260,7 +355,10 @@ class NotificationHelper(
             .build()
 
     private fun loadThumbnail(videoId: String): Bitmap? {
+        // WebP (`/vi_webp/`) najpierw — mniejszy transfer; JPG jako pewny fallback, gdy dany rozmiar nie ma WebP.
         val urls = listOf(
+            "https://i.ytimg.com/vi_webp/$videoId/maxresdefault.webp",
+            "https://i.ytimg.com/vi_webp/$videoId/hq720.webp",
             "https://i.ytimg.com/vi/$videoId/maxresdefault.jpg",
             "https://i.ytimg.com/vi/$videoId/hq720.jpg",
         )
@@ -273,7 +371,8 @@ class NotificationHelper(
     private fun loadJpegFromNetwork(url: String): Bitmap? {
         val request = Request.Builder()
             .url(url)
-            .header("Accept", "image/jpeg,image/*;q=0.8")
+            .header("Accept", "image/webp,image/jpeg,image/*;q=0.8")
+            .header("User-Agent", BROWSER_USER_AGENT) // D-03 (B-14): jak reszta żądań do Google
             .get()
             .build()
         val bytes = thumbnailClient.newCall(request).execute().use { response ->
@@ -358,10 +457,10 @@ class NotificationHelper(
         }
     }
 
-    private fun hasNotificationPermission(): Boolean {
+    private fun hasNotificationPermission(channelId: String = CHANNEL_ID): Boolean {
         if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return false
         val channel = context.getSystemService(NotificationManager::class.java)
-            .getNotificationChannel(CHANNEL_ID)
+            .getNotificationChannel(channelId)
         if (channel?.importance == NotificationManager.IMPORTANCE_NONE) return false
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
             ContextCompat.checkSelfPermission(
@@ -373,8 +472,12 @@ class NotificationHelper(
     companion object {
         const val MAX_DIRECT_NOTIFICATIONS = 3
         private const val CHANNEL_ID = "youtube_updates"
+        private const val HEALTH_CHANNEL_ID = "primary_server_health"
+        private const val HEALTH_NOTIFICATION_ID = Int.MIN_VALUE + 1
         private const val GROUP_KEY = "pl.lewicowyt.app.YOUTUBE_UPDATES"
         private const val SUMMARY_NOTIFICATION_ID = Int.MIN_VALUE
+        private const val WATCH_TEST_NOTIFICATION_ID = Int.MIN_VALUE + 2
+        private const val WATCH_TEST_TIMEOUT_MILLIS = 10L * 60L * 1000L
         private const val NOTIFICATION_TIMEOUT_MILLIS =
             DataRetentionPolicy.NOTIFICATION_DAYS * DataRetentionPolicy.DAY_MILLIS
         private const val MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024

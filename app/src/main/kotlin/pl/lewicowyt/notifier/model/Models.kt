@@ -14,10 +14,9 @@ data class CreatorSource(
     val externalId: String?,
 )
 
-// @Immutable: pole `sources` to lista, przez którą Compose domyślnie uznałby
-// Creator za niestabilny (a jest używany w items() listy twórców). Obiekt jest
-// budowany raz z katalogu i nigdy nie mutowany, więc adnotacja jest prawdziwa i
-// przywraca pomijalność wiersza (#3).
+// @Immutable: przez listę `sources` Compose domyślnie brałby Creator za
+// niestabilny (a używamy go w items() listy twórców). budujemy go raz z katalogu
+// i nigdy nie mutujemy, więc adnotacja jest zgodna z prawdą i wraca pomijalność wiersza (#3)
 @Immutable
 data class Creator(
     val id: String,
@@ -36,15 +35,15 @@ enum class VideoKind {
 }
 
 /**
- * Jakość dowodu użytego do rozpoznania rodzaju materiału.
+ * jakość dowodu, na podstawie którego rozpoznajemy rodzaj materiału.
  *
- * Kolejność jest celowa: brak danych nie może nadpisać rozpoznanego typu,
- * a potwierdzona karta kanału ma pierwszeństwo przed heurystyką odtwarzacza.
+ * kolejność celowa: brak danych nie może nadpisać rozpoznanego typu, a pewna
+ * karta kanału bije heurystykę playera.
  */
 enum class VideoKindEvidence(val rank: Int, val isFinal: Boolean) {
     NONE(rank = 0, isFinal = false),
-    // RSS nie podaje rodzaju materiału. Zwykły film jest natychmiastowym,
-    // odwracalnym fallbackiem; każdy rzeczywisty dowód ma wyższy priorytet.
+    // RSS nie podaje rodzaju – zwykły film to natychmiastowy, odwracalny fallback;
+    // każdy realny dowód go bije
     DEFAULT_VIDEO_FALLBACK(rank = 1, isFinal = false),
     PLAYER_METADATA(rank = 10, isFinal = false),
     API_METADATA(rank = 20, isFinal = true),
@@ -66,12 +65,12 @@ data class VideoKindDecision(
 }
 
 /**
- * Łączy dwa wyniki niezależnie od kolejności odpowiedzi sieciowych.
+ * łączy dwa wyniki niezależnie od kolejności odpowiedzi z sieci.
  *
- * Aktywny LIVE/UPCOMING z API wygrywa w trakcie emisji. Po jej zakończeniu
- * potwierdzona karta kanału może zmienić ten stan w film albo archiwum streamu.
- * Konflikt równorzędnych, ale różnych dowodów pozostawia wcześniejszy wynik,
- * zamiast uzależniać typ od kolejności równoległych żądań.
+ * aktywny LIVE/UPCOMING z API wygrywa w trakcie emisji. po jej końcu pewna karta
+ * kanału może zmienić to na film albo archiwum streamu. konflikt równorzędnych,
+ * ale różnych dowodów zostawia wcześniejszy wynik, zamiast wiązać typ z kolejnością
+ * równoległych żądań.
  */
 fun chooseVideoKindDecision(
     current: VideoKindDecision,
@@ -114,8 +113,8 @@ enum class VideoOrigin {
 }
 
 /**
- * Wiarygodność czasu publikacji. Data względna z kafelka YouTube Web nie może
- * zastąpić dokładnego znacznika RSS lub Data API.
+ * wiarygodność czasu publikacji. względna data z kafelka YouTube Web nie zastąpi
+ * dokładnego znacznika z RSS lub Data API.
  */
 enum class PublishedAtEvidence(
     val rank: Int,
@@ -191,12 +190,13 @@ enum class MaterialStatusBadge {
     SCHEDULED,
     DESCRIPTION,
     MEMBERS_ONLY,
+    PRIVATE,
 }
 
 /**
- * UPCOMING jest stanem chwilowym. Po nadejściu zapisanego terminu nie opisujemy
- * materiału jako nadal zaplanowanego, nawet jeżeli kolejna synchronizacja nie
- * zdążyła jeszcze zastąpić starej klasyfikacji YouTube.
+ * UPCOMING to stan chwilowy. po zapisanym terminie nie pokazujemy materiału jako
+ * wciąż zaplanowanego, nawet jeśli kolejny sync nie zdążył podmienić starej
+ * klasyfikacji YouTube.
  */
 fun HistoryItem.displayKindAt(nowMillis: Long): VideoKind =
     if (kind == VideoKind.UPCOMING && publishedAtMillis <= nowMillis) {
@@ -205,7 +205,7 @@ fun HistoryItem.displayKindAt(nowMillis: Long): VideoKind =
         kind
     }
 
-/** Status transmisji i dostępność opisu są niezależne, dlatego karta może pokazać dwie ikony. */
+/** stan transmisji i dostępność opisu są niezależne, więc karta może mieć dwie ikony */
 fun HistoryItem.statusBadgesAt(nowMillis: Long): List<MaterialStatusBadge> = buildList {
     val isStillScheduled = publishedAtMillis > nowMillis &&
         (kind == VideoKind.UPCOMING || descriptionAvailability == DescriptionAvailability.SCHEDULED_STREAM)

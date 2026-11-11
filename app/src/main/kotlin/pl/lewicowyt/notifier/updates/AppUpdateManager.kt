@@ -24,11 +24,13 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import pl.lewicowyt.notifier.notifications.WearNotifications
 import pl.lewicowyt.notifier.R
 import pl.lewicowyt.notifier.diagnostics.DiagnosticCategory
 import pl.lewicowyt.notifier.diagnostics.DiagnosticLevel
 import pl.lewicowyt.notifier.diagnostics.DiagnosticLogStore
 import pl.lewicowyt.notifier.diagnostics.DiagnosticReasonCode
+import pl.lewicowyt.notifier.network.BROWSER_USER_AGENT
 
 data class PreparedUpdate(
     val update: AvailableUpdate,
@@ -65,6 +67,9 @@ class AppUpdateManager(
         if (pendingApk.isFile) {
             runCatching {
                 validateApk(pendingApk, update)
+                // C-18: asset wydania podmieniony pod tą samą wersją — stary plik nie pasuje do sumy, pobieramy od nowa
+                val expected = update.sha256Digest?.lowercase()?.removePrefix("sha256:")
+                check(expected == null || sha256(pendingApk) == expected) { "pending APK digest mismatch" }
                 return pendingApk
             }
             pendingApk.delete()
@@ -98,8 +103,7 @@ class AppUpdateManager(
     }
 
     private suspend fun prepareDeltaOrNull(update: AvailableUpdate): File? {
-        val manifestAsset = update.releaseAssets[DELTA_MANIFEST_ASSET_NAME]
-            ?: return null
+        val manifestAsset = update.deltaManifestAsset() ?: return null
         val manifestFile = File(updatesDirectory, DELTA_MANIFEST_ASSET_NAME)
         val patchFile = File(updatesDirectory, DELTA_PATCH_TEMP_NAME)
         val reconstructedApk = File(updatesDirectory, DELTA_TARGET_TEMP_NAME)
@@ -275,9 +279,8 @@ class AppUpdateManager(
             Intent(Intent.ACTION_VIEW, PROJECT_URL.toUri()),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val isRollback = prepared.update.policy == UpdatePolicy.SECURITY_ROLLBACK
         val isMandatory = prepared.update.policy != UpdatePolicy.OPTIONAL
-        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+        val notification = WearNotifications.phoneOnly(NotificationCompat.Builder(context, CHANNEL_ID)) // aktualizacja: tylko telefon
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(
                 if (isMandatory) {
@@ -286,21 +289,11 @@ class AppUpdateManager(
                     "Aktualizacja ${prepared.update.version} jest gotowa"
                 },
             )
-            .setContentText(
-                if (isRollback) {
-                    SECURITY_ROLLBACK_MESSAGE
-                } else {
-                    "Pobrano APK. Dotknij, aby rozpocząć instalację."
-                },
-            )
+            .setContentText("Pobrano APK. Dotknij, aby rozpocząć instalację.")
             .setStyle(
                 NotificationCompat.BigTextStyle().bigText(
-                    if (isRollback) {
-                        SECURITY_ROLLBACK_MESSAGE
-                    } else {
-                        "Wersja ${prepared.update.version} została pobrana i sprawdzona. " +
-                            "Dotknij, aby potwierdzić instalację w systemie Android."
-                    },
+                    "Wersja ${prepared.update.version} została pobrana i sprawdzona. " +
+                        "Dotknij, aby potwierdzić instalację w systemie Android.",
                 ),
             )
             .setContentIntent(installIntent)
@@ -324,7 +317,7 @@ class AppUpdateManager(
         )
         notificationManager.notify(
             UPDATE_NOTIFICATION_ID,
-            NotificationCompat.Builder(context, CHANNEL_ID)
+            WearNotifications.phoneOnly(NotificationCompat.Builder(context, CHANNEL_ID))
                 .setSmallIcon(R.drawable.ic_notification)
                 .setContentTitle("Nie udało się przygotować aktualizacji bezpieczeństwa")
                 .setContentText(message.take(MAX_NOTIFICATION_TEXT_CHARS))
@@ -370,14 +363,17 @@ class AppUpdateManager(
         val request = Request.Builder()
             .url(downloadUrl)
             .header("Accept", accept)
-            .header("User-Agent", "lewicowYT-updater")
+            // G-02 (B-14/D-03): GitHub i CDN assetów widzą zwykłą przeglądarkę, nie „lewicowYT-updater";
+            // przekierowania (openReleaseAssetResponse) kopiują ten nagłówek z żądania początkowego
+            .header("User-Agent", BROWSER_USER_AGENT)
             .build()
         val client = httpClient.newBuilder()
             .followRedirects(false)
             .followSslRedirects(false)
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(45, TimeUnit.SECONDS)
-            .callTimeout(5, TimeUnit.MINUTES)
+            // D-13: bez stałego 5-minutowego limitu całości (APK 60–80 MB przy ~1 Mb/s to 8–11 min) — przerywamy
+            // tylko zawieszony transfer (< 16 KB przez minutę), sprawdzane w pętli kopiowania niżej
             .build()
 
         openReleaseAssetResponse(client, request, expectedName).use { response ->
@@ -398,11 +394,20 @@ class AppUpdateManager(
             body.byteStream().use { input ->
                 FileOutputStream(target).use { output ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    var windowStart = System.nanoTime()
+                    var windowBytes = 0L
                     while (true) {
                         currentCoroutineContext().ensureActive()
                         val count = input.read(buffer)
                         if (count < 0) break
                         copied += count
+                        windowBytes += count
+                        val now = System.nanoTime()
+                        if (now - windowStart >= 60_000_000_000L) {
+                            if (windowBytes < 16L * 1024) throw IOException("Pobieranie pliku $kind stoi — przerwano.")
+                            windowStart = now
+                            windowBytes = 0L
+                        }
                         if (copied > maximumBytes) {
                             throw IOException("Plik $kind przekracza dozwolony rozmiar.")
                         }
@@ -425,14 +430,13 @@ class AppUpdateManager(
                         "SHA256_FAILED",
                         reason = DiagnosticReasonCode.SHA256_MISMATCH,
                     )
-                    throw DeltaPreparationException(
-                        if (kind == "delta") {
-                            DeltaFallbackReason.DELTA_PATCH_HASH_MISMATCH
-                        } else {
-                            DeltaFallbackReason.DELTA_MANIFEST_INVALID
-                        },
-                        "Suma SHA-256 pobranego pliku $kind jest nieprawidłowa.",
-                    )
+                    val message = "Suma SHA-256 pobranego pliku $kind jest nieprawidłowa."
+                    // B-90: zła suma PEŁNEGO APK to nie „nieprawidłowy manifest delty” — kody delty tylko dla delty
+                    throw when (kind) {
+                        "delta" -> DeltaPreparationException(DeltaFallbackReason.DELTA_PATCH_HASH_MISMATCH, message)
+                        "manifest" -> DeltaPreparationException(DeltaFallbackReason.DELTA_MANIFEST_INVALID, message)
+                        else -> IOException(message)
+                    }
                 }
                 DiagnosticLogStore.event(
                     DiagnosticCategory.UPDATE,
@@ -612,14 +616,9 @@ class AppUpdateManager(
                 "VERSION_CODE_FAILED",
                 reason = DiagnosticReasonCode.VERSION_CODE_INVALID,
             )
-            val rollbackHint = if (update.policy == UpdatePolicy.SECURITY_ROLLBACK) {
-                " Awaryjny APK musi zawierać starszy kod aplikacji, ale wyższy versionCode."
-            } else {
-                ""
-            }
             throw ApkValidationException(
                 DeltaFallbackReason.DELTA_TARGET_VERSION_INVALID,
-                "Android odrzuci APK, ponieważ jego versionCode nie jest wyższy.$rollbackHint",
+                "Android odrzuci APK, ponieważ jego versionCode nie jest wyższy.",
             )
         }
         DiagnosticLogStore.event(
@@ -672,10 +671,9 @@ class AppUpdateManager(
         val installedMultiple = installed.signingInfo?.hasMultipleSigners() == true
         val candidateMultiple = candidate.signingInfo?.hasMultipleSigners() == true
         if (installedMultiple || candidateMultiple) return false
-        // Legalna rotacja: aktywny certyfikat zainstalowanej wersji musi należeć
-        // do kryptograficznie zweryfikowanej historii kandydata. Kandydat
-        // podpisany wyłącznie dawnym kluczem nie zawiera aktywnego nowego
-        // certyfikatu i zostanie odrzucony.
+        // legalna rotacja: aktywny certyfikat zainstalowanej wersji musi być w
+        // kryptograficznie zweryfikowanej historii kandydata. kandydat podpisany
+        // samym starym kluczem nie ma nowego aktywnego cert i leci do odrzutu
         return candidateSigningHistory(candidate).containsAll(installedActive)
     }
 
@@ -709,7 +707,7 @@ class AppUpdateManager(
                 "Aktualizacje aplikacji",
                 NotificationManager.IMPORTANCE_HIGH,
             ).apply {
-                description = "Pobrane aktualizacje i pilne wycofania wersji"
+                description = "Pobrane aktualizacje i obowiązkowe poprawki bezpieczeństwa"
                 setShowBadge(true)
             },
         )
@@ -724,9 +722,6 @@ class AppUpdateManager(
 
         const val UPDATE_CACHE_DIRECTORY = "updates"
         const val PENDING_APK_NAME = "lewicowyt-update.apk"
-        const val SECURITY_ROLLBACK_MESSAGE =
-            "Z powodu zagrożenia bezpieczeństwa wymuszono cofnięcie wersji aplikacji. " +
-                "Więcej informacji znajdziesz na stronie projektu."
         const val PROJECT_URL = "https://emmunioo.github.io/lewicowyt"
 
         private const val CHANNEL_ID = "app_updates"

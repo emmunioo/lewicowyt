@@ -34,6 +34,11 @@ internal class BundledDatabase(
             databaseFile.absolutePath,
             SQLITE_OPEN_READWRITE or SQLITE_OPEN_CREATE or SQLITE_OPEN_FULLMUTEX,
         )
+        // T-19: tryb WAL — zapis nie wymusza pełnej synchronizacji dysku przy każdej transakcji (migracje i synchronizacja
+        // historii są wyraźnie szybsze); synchronous=NORMAL jest w WAL bezpieczne dla spójności bazy (po utracie zasilania
+        // może zginąć najwyżej ostatnia transakcja). Błąd (np. system plików bez obsługi WAL) nie przerywa otwarcia.
+        runCatching { connection.prepare("PRAGMA journal_mode = WAL").use { it.step() } }
+        runCatching { connection.prepare("PRAGMA synchronous = NORMAL").use { it.step() } }
     }
 
     fun execSQL(sql: String, bindArgs: Array<out Any?> = emptyArray()) = locked {
@@ -66,10 +71,10 @@ internal class BundledDatabase(
     }
 
     /**
-     * Mapuje wynik bezpośrednio z natywnego statementu. W przeciwieństwie do
-     * rawQuery() nie tworzy pośredniego MatrixCursor i dlatego nadaje się do
-     * ograniczonych, ale większych list Historii oraz przyszłej paginacji FTS.
-     * Mapper nie może zachować referencji do statementu poza wywołaniem.
+     * mapuje wynik wprost z natywnego statementu. inaczej niż rawQuery() nie robi
+     * pośredniego MatrixCursor, więc nadaje się do ograniczonych, ale większych
+     * list Historii i przyszłej paginacji FTS. mapper nie może trzymać referencji
+     * do statementu poza wywołaniem.
      */
     fun <T> queryRows(
         sql: String,
@@ -178,7 +183,14 @@ internal class BundledDatabase(
     fun endTransaction() {
         check(transactionOwner == Thread.currentThread()) { "Brak aktywnej transakcji" }
         try {
-            execute(if (transactionSuccessful) "COMMIT" else "ROLLBACK", emptyList())
+            try {
+                execute(if (transactionSuccessful) "COMMIT" else "ROLLBACK", emptyList())
+            } catch (error: Throwable) {
+                // D-19d: COMMIT nieudany (np. SQLITE_FULL/IO) — transakcja SQLite zostałaby otwarta i każde
+                // kolejne BEGIN IMMEDIATE padałoby do restartu procesu. Wycofujemy ją i zgłaszamy pierwotny błąd.
+                if (transactionSuccessful) runCatching { execute("ROLLBACK", emptyList()) }.exceptionOrNull()?.let(error::addSuppressed)
+                throw error
+            }
         } finally {
             transactionOwner = null
             transactionSuccessful = false

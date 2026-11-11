@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Nakładka manifestu tylko dla buildu debug. J-11a: atrybut usesCleartextTraffic NIE działa w żadnym
+  wariancie — od API 24 (minSdk 26) pierwszeństwo ma network_security_config, a ten w src/main dopuszcza
+  cleartext także w release. Granicę „http tylko w LAN" wymusza warstwa aplikacji (toCommunityUrlOrNull,
+  isPrivateHost — audyt F-03), nie ten plik.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <application
+        android:usesCleartextTraffic="true"
+        tools:replace="android:usesCleartextTraffic" />
+</manifest>

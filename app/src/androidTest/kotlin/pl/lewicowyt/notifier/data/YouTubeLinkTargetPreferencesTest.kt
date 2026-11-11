@@ -9,6 +9,9 @@ class YouTubeLinkTargetPreferencesTest {
     @Test
     fun selectedTargetIsStoredAndReadFromDataStore() = runBlocking {
         val repository = PreferencesRepository(ApplicationProvider.getApplicationContext())
+        // A-58: test pisze do PRAWDZIWEGO DataStore aplikacji — zapamiętujemy i przywracamy PEŁNY stan
+        // (cel linków ORAZ wybrany pakiet), żeby connectedAndroidTest nie nadpisał wyboru użytkownika.
+        val before = repository.current()
         try {
             repository.setOtherYouTubeAppPackage("com.android.calculator2")
             assertEquals(
@@ -20,7 +23,7 @@ class YouTubeLinkTargetPreferencesTest {
                 repository.current().otherYouTubeAppPackage,
             )
         } finally {
-            repository.setYouTubeLinkTarget(YouTubeLinkTarget.SYSTEM_DEFAULT)
+            repository.restoreYouTubeLinkState(before.youtubeLinkTarget, before.otherYouTubeAppPackage)
         }
     }
 }

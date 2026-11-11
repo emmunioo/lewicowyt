@@ -15,12 +15,16 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
 import java.io.OutputStreamWriter
+import java.security.SecureRandom
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import java.util.Base64
 import java.util.zip.Deflater
 import java.util.zip.GZIPOutputStream
 import java.util.zip.Inflater
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 import pl.lewicowyt.notifier.BuildConfig
 
 internal enum class DiagnosticCategory(val id: Int, val label: String) {
@@ -33,6 +37,7 @@ internal enum class DiagnosticCategory(val id: Int, val label: String) {
     UPDATE(6, "AKTUALIZACJE"),
     IMAGE(7, "OBRAZY"),
     DATABASE(8, "BAZA"),
+    COMMUNITY(9, "SPOŁECZNOŚĆ"),
     ;
 
     companion object {
@@ -68,8 +73,11 @@ internal enum class DiagnosticLevel(val id: Int, val label: String) {
 internal data class DiagnosticLogState(
     val unlocked: Boolean,
     val enabled: Boolean,
+    // dziennik ruchu sieciowego (każde zapytanie HTTP) — osobny przełącznik i osobne pliki
+    val trafficEnabled: Boolean = false,
     val storedBytes: Long,
-    val eventCount: Int,
+    // E-05: -1 = jeszcze nie policzone (liczenie dekoduje cały dziennik — tylko w tle, eventCount())
+    val eventCount: Int = -1,
 )
 
 internal data class DiagnosticEvent(
@@ -80,16 +88,16 @@ internal data class DiagnosticEvent(
 )
 
 /**
- * Prywatny, domyślnie wyłączony dziennik. Na telefonie rekordy mają krótki
- * format binarny i osobno kompresowany ładunek DEFLATE (poziom 9). Dzięki temu
- * zapis jest odporny na ubicie procesu i nie wymaga trzymania otwartego pliku.
- * Eksport jest standardowym, czytelnym plikiem tekstowym GZIP.
+ * prywatny dziennik, domyślnie off. na telefonie rekordy w krótkim formacie
+ * binarnym + osobno kompresowany ładunek DEFLATE (poziom 9) – zapis przeżywa
+ * ubicie procesu i nie trzyma otwartego pliku. eksport to zwykły czytelny GZIP.
  */
 internal object DiagnosticLogStore {
     private val lock = Any()
     private var appContext: Context? = null
     private var unlocked = false
     private var enabled = false
+    private var trafficEnabled = false
     private var lastFingerprint = ""
     private var lastFingerprintAtMillis = 0L
     private var exportSummary: List<String> = emptyList()
@@ -100,6 +108,8 @@ internal object DiagnosticLogStore {
         val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
         unlocked = preferences.getBoolean(KEY_UNLOCKED, false)
         enabled = unlocked && preferences.getBoolean(KEY_ENABLED, false)
+        trafficEnabled = enabled && preferences.getBoolean(KEY_TRAFFIC, false)
+        if (unlocked) loadHostSaltLocked(context)
         if (enabled) {
             appendLocked(
                 DiagnosticLevel.INFO,
@@ -114,12 +124,46 @@ internal object DiagnosticLogStore {
         DiagnosticLogState(
             unlocked = unlocked,
             enabled = enabled,
+            trafficEnabled = trafficEnabled,
             storedBytes = context?.let(::logFiles)?.sumOf(File::length) ?: 0L,
-            eventCount = context?.let(::readAllLocked)?.size ?: 0,
         )
     }
 
+    /**
+     * E-05: liczba zdarzeń wymaga zdekodowania wszystkich plików (z dziennikiem ruchu do ~8 MB) — wołać poza
+     * wątkiem UI. Czyta bez blokady, żeby nie wstrzymywać zapisu ruchu z wątków OkHttp; pliki są tylko
+     * dopisywane, a niedokończony rekord na końcu kończy odczyt — wynik jest tylko licznikiem do wyświetlenia.
+     */
+    fun eventCount(): Int {
+        val context = synchronized(lock) { appContext } ?: return 0
+        return readAll(context).size
+    }
+
     fun isEnabled(): Boolean = synchronized(lock) { enabled }
+
+    /** dziennik ruchu działa tylko przy włączonej diagnostyce (wyłączenie diagnostyki zatrzymuje też ruch). */
+    fun isTrafficEnabled(): Boolean = synchronized(lock) { enabled && trafficEnabled }
+
+    fun setTrafficEnabled(value: Boolean): Unit = synchronized(lock) {
+        val context = appContext ?: return
+        trafficEnabled = value && enabled
+        context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_TRAFFIC, trafficEnabled)
+            .apply()
+        if (enabled) {
+            appendLocked(
+                DiagnosticLevel.INFO,
+                DiagnosticCategory.NETWORK,
+                if (trafficEnabled) "Włączono dziennik ruchu sieciowego" else "Wyłączono dziennik ruchu sieciowego",
+            )
+        }
+    }
+
+    /** jedno zapytanie HTTP do osobnego dziennika ruchu (nie wypiera zdarzeń synchronizacji z głównego). */
+    fun traffic(level: DiagnosticLevel, message: String) = synchronized(lock) {
+        if (enabled && trafficEnabled) appendLocked(level, DiagnosticCategory.NETWORK, message, traffic = true)
+    }
 
     fun unlock(): Unit = synchronized(lock) {
         val context = appContext ?: return
@@ -129,17 +173,46 @@ internal object DiagnosticLogStore {
             .edit()
             .putBoolean(KEY_UNLOCKED, true)
             .apply()
+        loadHostSaltLocked(context)
+    }
+
+    /**
+     * J-09: sól skrótów hostów — losowa na instalację, tworzona przy odblokowaniu diagnostyki. Bez niej skrót
+     * był zwykłym SHA-256 nazwy, więc z eksportu dało się potwierdzić, z którego (publicznie znanego) serwera
+     * ktoś korzysta. Ukrycie panelu ją kasuje (razem z dziennikiem) — kolejne odblokowanie losuje nową.
+     */
+    private fun loadHostSaltLocked(context: Context) {
+        val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+        val stored = preferences.getString(KEY_HOST_SALT, null)
+            ?.let { runCatching { Base64.getDecoder().decode(it) }.getOrNull() }
+            ?.takeIf { it.size == HOST_SALT_BYTES }
+        DiagnosticLogCodec.hostSalt = stored ?: ByteArray(HOST_SALT_BYTES).also { salt ->
+            SecureRandom().nextBytes(salt)
+            preferences.edit().putString(KEY_HOST_SALT, Base64.getEncoder().encodeToString(salt)).apply()
+        }
     }
 
     fun hide(): Unit = synchronized(lock) {
         val context = appContext ?: return
         enabled = false
         unlocked = false
+        trafficEnabled = false
         context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_ENABLED, false)
+            .putBoolean(KEY_TRAFFIC, false)
             .putBoolean(KEY_UNLOCKED, false)
+            .remove(KEY_HOST_SALT)
             .apply()
+        DiagnosticLogCodec.hostSalt = null
+        // B-18: po ukryciu panelu nie ma już przycisku „Wyczyść”, a dziennik zawiera linki do materiałów,
+        // ID twórców i kanałów — ukrycie musi go usunąć, a nie zostawić na dysku.
+        logFiles(context).forEach { file ->
+            if (file.parentFile == diagnosticsDirectory(context)) file.delete()
+        }
+        lastFingerprint = ""
+        lastFingerprintAtMillis = 0L
+        exportSummary = emptyList()
     }
 
     fun setEnabled(value: Boolean): Unit = synchronized(lock) {
@@ -223,16 +296,22 @@ internal object DiagnosticLogStore {
         lastFingerprintAtMillis = 0L
     }
 
-    fun exportTo(destination: Uri): Boolean = synchronized(lock) {
-        val context = appContext ?: return false
-        val events = readAllLocked(context)
-        runCatching {
+    /**
+     * G-03: pod blokadą tylko migawka kontekstu i podsumowania; odczyt plików (tylko dopisywanych, jak w
+     * [eventCount]) i zapis do dostawcy plików (chmura, USB — dowolnie wolny) idą bez blokady, żeby nie
+     * wstrzymywać wpisów z wątków OkHttp ani state() na wątku UI.
+     */
+    fun exportTo(destination: Uri): Boolean {
+        val (context, summary) = synchronized(lock) { appContext to exportSummary.toList() }
+        if (context == null) return false
+        val events = readAll(context)
+        return runCatching {
             context.contentResolver.openOutputStream(destination, "w")?.use { output ->
                 BestSizeGzipOutputStream(output).use { gzip ->
                     BufferedWriter(OutputStreamWriter(gzip, Charsets.UTF_8)).use { writer ->
                         writer.appendLine("=== lewicowYT diagnostics ===")
                         writer.appendLine("APP | version=${BuildConfig.VERSION_NAME} | sdk=${Build.VERSION.SDK_INT}")
-                        exportSummary.forEach(writer::appendLine)
+                        summary.forEach(writer::appendLine)
                         writer.appendLine("LOG | secrets=redacted | urlQueries=redacted")
                         writer.appendLine()
                         events.forEach { event ->
@@ -256,6 +335,7 @@ internal object DiagnosticLogStore {
         level: DiagnosticLevel,
         category: DiagnosticCategory,
         rawMessage: String,
+        traffic: Boolean = false,
     ) {
         val context = appContext ?: return
         val message = DiagnosticLogCodec.sanitize(rawMessage)
@@ -274,9 +354,10 @@ internal object DiagnosticLogStore {
             message = message,
         )
         val encoded = DiagnosticLogCodec.encode(event)
-        val current = currentFile(context)
-        if (current.length() + encoded.size > MAX_FILE_BYTES) rotateLocked(context)
-        val target = currentFile(context)
+        val current = if (traffic) trafficFile(context) else currentFile(context)
+        val limit = if (traffic) MAX_TRAFFIC_FILE_BYTES else MAX_FILE_BYTES
+        if (current.length() + encoded.size > limit) rotateLocked(context, traffic)
+        val target = if (traffic) trafficFile(context) else currentFile(context)
         FileOutputStream(target, true).use { output ->
             if (target.length() == 0L) DataOutputStream(output).writeInt(FILE_MAGIC)
             output.write(encoded)
@@ -284,16 +365,18 @@ internal object DiagnosticLogStore {
         }
     }
 
-    private fun rotateLocked(context: Context) {
-        val current = currentFile(context)
-        val previous = previousFile(context)
+    private fun rotateLocked(context: Context, traffic: Boolean = false) {
+        val current = if (traffic) trafficFile(context) else currentFile(context)
+        val previous = if (traffic) trafficPreviousFile(context) else previousFile(context)
         previous.delete()
         if (current.isFile) current.renameTo(previous)
     }
 
-    private fun readAllLocked(context: Context): List<DiagnosticEvent> = buildList {
+    private fun readAll(context: Context): List<DiagnosticEvent> = buildList {
         logFiles(context).forEach { file ->
-            if (!file.isFile || file.length() !in 4..MAX_READ_BYTES) return@forEach
+            // E-09d: zwykły dziennik ma limit 1 MB, ruch 4 MB — każdy plik sprawdzany swoim limitem
+            val maxBytes = if (file.name.startsWith("traffic")) MAX_TRAFFIC_READ_BYTES else MAX_READ_BYTES
+            if (!file.isFile || file.length() !in 4..maxBytes) return@forEach
             runCatching {
                 DataInputStream(BufferedInputStream(file.inputStream())).use { input ->
                     if (input.readInt() != FILE_MAGIC) return@use
@@ -328,7 +411,10 @@ internal object DiagnosticLogStore {
 
     private fun currentFile(context: Context) = File(diagnosticsDirectory(context), CURRENT_FILE)
     private fun previousFile(context: Context) = File(diagnosticsDirectory(context), PREVIOUS_FILE)
-    private fun logFiles(context: Context) = listOf(previousFile(context), currentFile(context))
+    private fun trafficFile(context: Context) = File(diagnosticsDirectory(context), TRAFFIC_FILE)
+    private fun trafficPreviousFile(context: Context) = File(diagnosticsDirectory(context), TRAFFIC_PREVIOUS_FILE)
+    private fun logFiles(context: Context) =
+        listOf(previousFile(context), currentFile(context), trafficPreviousFile(context), trafficFile(context))
 
     private class BestSizeGzipOutputStream(output: OutputStream) : GZIPOutputStream(output) {
         init {
@@ -339,6 +425,14 @@ internal object DiagnosticLogStore {
     private const val PREFERENCES_NAME = "diagnostic_log_preferences"
     private const val KEY_UNLOCKED = "unlocked"
     private const val KEY_ENABLED = "enabled"
+    private const val KEY_TRAFFIC = "traffic"
+    private const val KEY_HOST_SALT = "host_salt"
+    private const val HOST_SALT_BYTES = 16
+    private const val TRAFFIC_FILE = "traffic.dlog"
+    private const val TRAFFIC_PREVIOUS_FILE = "traffic-previous.dlog"
+    // ruch: 2 × 4 MB skompresowanych wpisów (~kilkadziesiąt tysięcy zapytań — kilka dni zwykłego użycia)
+    private const val MAX_TRAFFIC_FILE_BYTES = 4L * 1_024L * 1_024L
+    private const val MAX_TRAFFIC_READ_BYTES = MAX_TRAFFIC_FILE_BYTES + 64L * 1024L
     private const val DIRECTORY_NAME = "diagnostics"
     private const val CURRENT_FILE = "current.dlog"
     private const val PREVIOUS_FILE = "previous.dlog"
@@ -401,7 +495,26 @@ internal object DiagnosticLogCodec {
         .replace(COOKIE, "[USUNIĘTE_COOKIE]")
         .replace(SENSITIVE_ASSIGNMENT, "$1=[USUNIĘTY_SEKRET]")
         .replace(URL_QUERY) { match -> match.groupValues[1] }
+        // E-01: temat LEP to sekret rotowany po każdym budziku — w dzienniku tylko szablon trasy
+        .replace(LEP_TOPIC_PATH, "/lep/$1/[TEMAT]")
         .replace(ANDROID_PRIVATE_PATH, "[PRYWATNA_ŚCIEŻKA]")
+        // A-40: komunikaty błędów sieci zawierały adresy .onion i IP serwerów społeczności — redagujemy je
+        .replace(ONION_HOST, "[ADRES_ONION]")
+        .replace(IPV4, "[IP]")
+        .replace(IPV6, "[IP]") // B-90: adresy IPv6 (np. serwera społeczności w LAN/sieci operatora)
+        // C-20: nazwy hostów spoza stałej listy (serwery społeczności) → skrót; z dziennika nie da się
+        // odczytać, z jakich serwerów ktoś korzysta, a ten sam host nadal da się rozpoznać w obrębie dziennika
+        .replace(URL_HOST) { m ->
+            val host = m.groupValues[2].lowercase()
+            if (KNOWN_HOSTS.any { host == it || host.endsWith(".$it") }) m.value
+            else m.groupValues[1] + "host#" + hostDigest(host)
+        }
+        // D-12: gołe hosty z komunikatów wyjątków („resolve host "x"", „connect to x/[IP]:2137", „x:443")
+        .replace(BARE_HOST) { m ->
+            val host = m.groupValues[2].lowercase()
+            if (KNOWN_HOSTS.any { host == it || host.endsWith(".$it") }) m.value
+            else m.groupValues[1] + "host#" + hostDigest(host)
+        }
         .replace(Regex("[\\r\\n\\t]+"), " ")
         .filter { it >= ' ' }
         .trim()
@@ -453,7 +566,37 @@ internal object DiagnosticLogCodec {
     private val SENSITIVE_ASSIGNMENT = Regex(
         "(?i)\\b(token|access_token|refresh_token|signature|x-amz-signature|password|secret)\\s*[:=]\\s*[^&;,\\s]+",
     )
+    private val LEP_TOPIC_PATH = Regex("/lep/(pub|sub)/[A-Za-z0-9_-]{16,128}")
     private val URL_QUERY = Regex("(https?://[^?\\s]+)\\?[^\\s]+")
+    private val URL_HOST = Regex("(?i)(https?://)([a-z0-9-]+(?:\\.[a-z0-9-]+)+)")
+    private val BARE_HOST = Regex(
+        "(?i)(host \"|host |connect to |to |from )([a-z0-9-]+(?:\\.[a-z0-9-]+)*\\.[a-z]{2,24})(?=[\"/:\\s,)]|$)",
+    )
+    private val KNOWN_HOSTS = listOf(
+        "youtube.com", "youtu.be", "ytimg.com", "googlevideo.com", "googleapis.com", "google.com", "gstatic.com",
+        "github.com", "githubusercontent.com", "firebaseio.com", "adguard-dns.com", "cloudflare-dns.com", "quad9.net",
+    )
+
+    /** J-09: sól na instalację (ustawia DiagnosticLogStore); null = losowa sól tego procesu (np. w testach). */
+    @Volatile
+    var hostSalt: ByteArray? = null
+    private val processSalt = ByteArray(16).also { SecureRandom().nextBytes(it) }
+
+    /**
+     * J-09: HMAC-SHA256(sól, host), 8 znaków hex — ten sam host rozpoznawalny w obrębie dziennika, ale skrótu
+     * nie da się sprawdzić z zewnątrz, licząc SHA-256 znanych nazw serwerów.
+     */
+    internal fun hostDigest(host: String, salt: ByteArray = hostSalt ?: processSalt): String =
+        Mac.getInstance("HmacSHA256").run {
+            init(SecretKeySpec(salt, "HmacSHA256"))
+            doFinal(host.toByteArray())
+        }.joinToString("") { "%02x".format(it) }.take(8)
+    private val ONION_HOST = Regex("(?i)\\b[a-z2-7]{16,56}\\.onion\\b")
+    private val IPV4 = Regex("\\b(?:(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\b")
+    // IPv6: wymagamy „::” albo co najmniej 5 grup — zwykłe godziny „12:30:45” nie są redagowane
+    private val IPV6 = Regex(
+        "(?i)(?<![0-9a-z])(?=[0-9a-f:]*::|(?:[0-9a-f]{1,4}:){4})[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}(?![0-9a-z])",
+    )
     private val ANDROID_PRIVATE_PATH = Regex(
         "(?:/data/(?:user/\\d+|data)/|/storage/emulated/\\d+/)[^\\s,;]+",
     )

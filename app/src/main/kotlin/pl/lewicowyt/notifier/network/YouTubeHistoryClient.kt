@@ -51,11 +51,10 @@ data class YouTubeHistoryPage(
 )
 
 /**
- * Czyta publiczny endpoint używany przez webowy interfejs YouTube.
- * Nie wymaga klucza YouTube Data API. Pobiera od razu żądaną kartę, a następnie
- * sprawdza, którą kartę YouTube rzeczywiście zaznaczył. Dzięki temu brak
- * `/streams` nie zmienia zwykłych filmów w archiwalne transmisje i nie wymaga
- * dodatkowego żądania listy kart dla każdego kanału.
+ * czyta publiczny endpoint webowego YouTube – bez klucza Data API. bierze od
+ * razu żądaną kartę i patrzy, którą YT faktycznie zaznaczył. dzięki temu brak
+ * `/streams` nie zamienia zwykłych filmów w archiwalne streamy i nie wymusza
+ * osobnego żądania listy kart na każdy kanał.
  */
 class YouTubeHistoryClient(
     private val http: HttpTextClient,
@@ -83,6 +82,18 @@ class YouTubeHistoryClient(
         return firstPageFromHtml(source, tab, nowMillis, validateChannelTab = false)
     }
 
+    /**
+     * Kanał bez kart Filmy/Transmisje/Shorty (np. tylko „Główna” albo same podcasty) nie oznacza w odpowiedzi
+     * wybranej karty. Jeśli to poprawna strona kanału (metadane kanału są), nie ma czego pobierać — pusta
+     * strona zamiast błędu „YouTube nie potwierdził wybranej karty kanału”, który blokował całą Historię.
+     */
+    private fun channelWithoutTabOrFail(json: JSONObject): YouTubeHistoryPage {
+        val isChannelPage = json.optJSONObject("metadata")?.has("channelMetadataRenderer") == true ||
+            json.has("header")
+        if (!isChannelPage) throw IOException("YouTube nie potwierdził wybranej karty kanału")
+        return emptyPage()
+    }
+
     private fun firstChannelPageFromBrowse(
         source: ResolvedSource,
         tab: YouTubeHistoryTab,
@@ -106,11 +117,11 @@ class YouTubeHistoryClient(
             complete = false,
         )
         var selectedTab = findSelectedYouTubeTab(json)
-            ?: throw IOException("YouTube nie potwierdził wybranej karty kanału")
+            ?: return channelWithoutTabOrFail(json)
 
         if (selectedTab.type != tab) {
-            // Stałe parametry wewnętrznego API mogą się zmienić. Odkrywamy
-            // aktualne endpointy z odpowiedzi kanału i ponawiamy najwyżej raz.
+            // stałe parametry wewnętrznego API mogą się zmienić – wyławiamy
+            // aktualne endpointy z odpowiedzi kanału i ponawiamy najwyżej raz
             val discovery = browse(
                 browseId = source.externalId,
                 params = null,
@@ -133,7 +144,7 @@ class YouTubeHistoryClient(
             )
             rememberAvailableTabs(source, json, nowMillis, complete = false)
             selectedTab = findSelectedYouTubeTab(json)
-                ?: throw IOException("YouTube nie potwierdził wybranej karty kanału")
+                ?: return channelWithoutTabOrFail(json)
         }
         if (selectedTab.type != tab) return emptyPage()
         return parsePage(
@@ -222,7 +233,7 @@ class YouTubeHistoryClient(
         return tabs
     }
 
-    /** Odświeża listę kart jednym żądaniem strony kanału. */
+    /** odświeża listę kart jednym żądaniem strony kanału */
     fun refreshChannelTabs(
         source: ResolvedSource,
         nowMillis: Long = System.currentTimeMillis(),
@@ -281,7 +292,7 @@ class YouTubeHistoryClient(
         if (validateChannelTab) {
             rememberAvailableTabs(source, json, nowMillis, complete = false)
             val selectedTab = findSelectedYouTubeTab(json)
-                ?: throw IOException("YouTube nie potwierdził wybranej karty kanału")
+                ?: return channelWithoutTabOrFail(json)
             if (selectedTab.type != tab) return emptyPage()
         }
         return parsePage(
@@ -381,9 +392,8 @@ class YouTubeHistoryClient(
     ): YouTubeHistoryPage {
         val items = linkedMapOf<String, YouTubeHistoryItem>()
         val membershipKinds = linkedMapOf<String, VideoKind>()
-        // Pierwsza odpowiedź zawiera także nieaktywne karty, nawigację i
-        // polecane materiały. Typ karty wolno przypisać wyłącznie filmom
-        // znajdującym się w zawartości aktualnie wybranej karty.
+        // pierwsza odpowiedź niesie też nieaktywne karty, nawigację i polecane –
+        // typ karty przypisujemy tylko filmom z zawartości aktualnie wybranej karty
         val content = when {
             previousCursorToken == null && tab == YouTubeHistoryTab.PLAYLIST ->
                 selectedYouTubeTabContent(json) ?: json
@@ -409,9 +419,8 @@ class YouTubeHistoryClient(
                 tab != YouTubeHistoryTab.PLAYLIST &&
                 membershipKinds.isNotEmpty()
             ) {
-                // Niektóre warianty kafelków nie zawierają daty. Członkostwo
-                // i kursor zachowujemy dla ograniczonej weryfikacji kandydatów;
-                // zwykły backfill sam zatrzymuje się po tej stronie.
+                // część kafelków nie ma daty. członkostwo i kursor trzymamy do
+                // ograniczonej weryfikacji kandydatów; zwykły backfill i tak staje po tej stronie
                 return YouTubeHistoryPage(
                     items = emptyList(),
                     nextCursor = token?.let {
@@ -562,12 +571,19 @@ class YouTubeHistoryClient(
             ?.takeIf { it.isNotBlank() }
             ?.take(MAX_TITLE_CHARS)
             ?: return null
-        val published = findStringValues(renderer)
-            .asSequence()
-            .map { it.take(MAX_PUBLISHED_TEXT_CHARS) }
-            .mapNotNull { parsePublishedTime(it, nowMillis) }
-            .firstOrNull()
+        // G-01: data tylko z jawnej ścieżki metadanych (secondaryText), nigdy z tytułu ani opisu dostępności —
+        // tytuł „Dzisiaj w Sejmie…" dawał wymyśloną datę publikacji. Zwykle kafelek Shorta daty nie ma: wtedy
+        // pozycji nie ma, a przynależność do karty i tak zostaje w membershipKinds.
+        val secondary = renderer.optJSONObject("overlayMetadata")
+            ?.optJSONObject("secondaryText")
+            ?.optString("content")
+            ?.takeIf { it.isNotBlank() }
+            ?.take(MAX_PUBLISHED_TEXT_CHARS)
             ?: return null
+        val published = parsePublishedTime(secondary, nowMillis) ?: return null
+        if (published.millis <= 0L || published.millis > nowMillis + MAX_FUTURE_MILLIS) {
+            return null
+        }
         return historyItem(
             videoId = videoId,
             title = title,
@@ -722,13 +738,14 @@ class YouTubeHistoryClient(
             .replace('\u00a0', ' ')
             .trim()
         if (normalized.isBlank()) return null
-        if ("wczoraj" in normalized || "yesterday" in normalized) {
+        // B-90: całe słowa, nie podciągi (np. tytuł/opis z „dzisiajszy” nie może dać daty „dziś”)
+        if (WORD_YESTERDAY.containsMatchIn(normalized)) {
             return PublishedAtDecision(
                 nowMillis - DAY_MILLIS,
                 PublishedAtEvidence.WEB_RELATIVE,
             )
         }
-        if ("dzisiaj" in normalized || "today" in normalized) {
+        if (WORD_TODAY.containsMatchIn(normalized)) {
             return PublishedAtDecision(nowMillis, PublishedAtEvidence.WEB_RELATIVE)
         }
 
@@ -768,7 +785,7 @@ class YouTubeHistoryClient(
                     evidence = PublishedAtEvidence.WEB_DATE,
                 )
             } catch (_: DateTimeParseException) {
-                // Spróbuj następnego formatu.
+                // lecimy do następnego formatu
             }
         }
         return runCatching { Instant.parse(text.trim()).toEpochMilli() }
@@ -819,14 +836,16 @@ class YouTubeHistoryClient(
         const val MAX_PUBLISHED_TEXT_CHARS = 200
         const val TAB_MEMORY_CACHE_MILLIS = 15L * 60L * 1_000L
         const val BROWSE_ENDPOINT = "https://www.youtube.com/youtubei/v1/browse"
-        // Publiczny identyfikator klienta YouTube Web obecny w odpowiedziach
-        // strony. Nie jest kluczem Data API użytkownika ani sekretem projektu.
+        // publiczny identyfikator klienta YouTube Web z odpowiedzi strony –
+        // to nie klucz Data API użytkownika ani sekret projektu
         const val PUBLIC_WEB_API_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
         const val DEFAULT_CLIENT_VERSION = "2.20260727.10.00"
         const val LOCKUP_VIDEO_CONTENT_TYPE = "LOCKUP_CONTENT_TYPE_VIDEO"
         const val DAY_MILLIS = 24L * 60L * 60L * 1_000L
         const val MAX_FUTURE_MILLIS = 2L * 365L * DAY_MILLIS
         const val MAX_RELATIVE_AGE_MILLIS = 10L * 365L * DAY_MILLIS
+        val WORD_YESTERDAY = Regex("""(?<!\p{L})(wczoraj|yesterday)(?!\p{L})""")
+        val WORD_TODAY = Regex("""(?<!\p{L})(dzisiaj|today)(?!\p{L})""")
         val RELATIVE_TIME = Regex(
             """(?:^|[^\p{L}\p{N}])(\d+)\s+""" +
                 """(sekund(?:a|y|ę)?|minut(?:a|y|ę)?|godzin(?:a|y|ę)?|""" +
@@ -905,8 +924,8 @@ private fun channelTabs(): List<YouTubeHistoryTab> = listOf(
 )
 
 /**
- * Rozpoznaje karty po identyfikatorze/parametrach endpointu, nigdy po
- * lokalizowanym tytule. Brak STREAMS jest prawidłowym wynikiem.
+ * karty rozpoznajemy po id/parametrach endpointu, nigdy po lokalizowanym tytule.
+ * brak STREAMS to poprawny wynik.
  */
 internal fun extractAvailableYouTubeTabs(value: Any?): Map<YouTubeHistoryTab, String> {
     val result = linkedMapOf<YouTubeHistoryTab, String>()
@@ -941,8 +960,8 @@ internal fun extractAvailableYouTubeTabs(value: Any?): Map<YouTubeHistoryTab, St
 }
 
 /**
- * Braki zapisujemy wyłącznie z właściwego, kompletnego paska kart kanału.
- * Dowolna zagnieżdżona lista (np. rekomendacje) nie może utworzyć ABSENT.
+ * braki zapisujemy tylko z właściwego, kompletnego paska kart kanału.
+ * żadna zagnieżdżona lista (np. rekomendacje) nie może zrobić ABSENT.
  */
 internal fun extractCompleteYouTubeChannelTabs(
     value: Any?,
@@ -1063,8 +1082,8 @@ private fun identifyYouTubeTab(
 }
 
 internal fun decodeTabParams(value: String): String = runCatching {
-    // URLDecoder interpretuje niezakodowane `+` jak spację, co uszkadza
-    // parametry Base64 zwrócone bez procentowego kodowania.
+    // URLDecoder bierze gołe `+` za spację i psuje parametry Base64 zwrócone
+    // bez procentowego kodowania
     URLDecoder.decode(value.replace("+", "%2B"), StandardCharsets.UTF_8.name())
 }.getOrDefault(value)
 
@@ -1099,11 +1118,11 @@ internal fun selectedYouTubeTabContent(value: Any?): Any? {
 }
 
 /**
- * Ogranicza odpowiedź kolejnej strony do kontenerów, które YouTube przeznaczył
- * do dopisania na bieżącej karcie. Renderery nawigacji i rekomendacji obecne
- * obok nich nie mogą uczestniczyć w klasyfikacji.
+ * tnie kolejną stronę do kontenerów, które YT przeznaczył do dopisania na
+ * bieżącej karcie. renderery nawigacji i rekomendacji obok nich do klasyfikacji
+ * nie wchodzą.
  *
- * Pusta tablica oznacza poprawny koniec; `null` oznacza nieznany format.
+ * pusta tablica = poprawny koniec; `null` = nieznany format.
  */
 internal fun youtubeContinuationContent(value: Any?): JSONArray? {
     val combined = JSONArray()
@@ -1154,9 +1173,9 @@ internal fun youtubeContinuationContent(value: Any?): JSONArray? {
 }
 
 /**
- * Zwraca wyłącznie token faktycznego elementu „załaduj następną stronę”.
- * Odpowiedzi YouTube zawierają też inne continuationCommand (nawigacja,
- * ponowienie i echo żądania), których nie wolno używać do stronicowania.
+ * zwraca tylko token faktycznego „załaduj następną stronę". odpowiedzi YT mają
+ * też inne continuationCommand (nawigacja, ponowienie, echo żądania), których do
+ * stronicowania używać nie wolno.
  */
 internal fun findYouTubeContinuationToken(
     value: Any?,

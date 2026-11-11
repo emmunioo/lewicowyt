@@ -97,8 +97,8 @@ class YouTubeSourceResolver(
     }
 
     /**
-     * Pobiera i zapamiętuje zdjęcie twórcy. Działa bez YouTube Data API.
-     * W przypadku playlisty próbuje odczytać avatar właściciela z jej strony.
+     * pobiera i zapamiętuje avatar twórcy, bez Data API. dla playlisty próbuje
+     * wyciągnąć avatar właściciela z jej strony.
      */
     fun resolveCreatorAvatar(creator: Creator): String? {
         database.getCreatorAvatar(creator.id)
@@ -222,12 +222,15 @@ class YouTubeSourceResolver(
     private fun looksLikePlaylistId(value: String): Boolean =
         PLAYLIST_ID.matches(value)
 
-    private companion object {
-        val CHANNEL_IN_URL = Regex("""youtube\.com/channel/(UC[\w-]{18,})""")
-        val CHANNEL_ID = Regex("""UC[A-Za-z0-9_-]{22}""")
-        val PLAYLIST_ID = Regex("""[A-Za-z0-9_-]{10,100}""")
-        val YOUTUBE_HOSTS = setOf("youtube.com", "www.youtube.com", "m.youtube.com")
-        const val MAX_YOUTUBE_PATH_CHARS = 500
+    internal companion object {
+        /** G-05e: jedna ścisła walidacja id kanału (UC + 22 znaki) dla wszystkich ścieżek rozwiązywania. */
+        fun isChannelId(value: String): Boolean = CHANNEL_ID.matches(value)
+
+        private val CHANNEL_IN_URL = Regex("""youtube\.com/channel/(UC[\w-]{18,})""")
+        private val CHANNEL_ID = Regex("""UC[A-Za-z0-9_-]{22}""")
+        private val PLAYLIST_ID = Regex("""[A-Za-z0-9_-]{10,100}""")
+        private val YOUTUBE_HOSTS = setOf("youtube.com", "www.youtube.com", "m.youtube.com")
+        private const val MAX_YOUTUBE_PATH_CHARS = 500
         val AVATAR_PATTERNS = listOf(
             Regex("""[\"']avatar[\"']\s*:\s*\{[\s\S]{0,800}?[\"']url[\"']\s*:\s*[\"']([^\"']+)[\"']"""),
             Regex("""<meta[^>]+property=[\"']og:image[\"'][^>]+content=[\"']([^\"']+)[\"']"""),

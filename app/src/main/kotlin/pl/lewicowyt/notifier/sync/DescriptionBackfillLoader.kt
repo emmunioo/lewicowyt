@@ -26,6 +26,7 @@ import pl.lewicowyt.notifier.diagnostics.DiagnosticSyncStage
 import pl.lewicowyt.notifier.diagnostics.DiagnosticSyncTrigger
 import pl.lewicowyt.notifier.diagnostics.DiagnosticYouTubeSource
 import pl.lewicowyt.notifier.diagnostics.diagnosticYouTubeVideoUrl
+import pl.lewicowyt.notifier.messaging.ServerNotificationHandler
 import pl.lewicowyt.notifier.network.YouTubeDataApiHistoryClient
 import pl.lewicowyt.notifier.network.DescriptionFetchResult
 import pl.lewicowyt.notifier.network.YouTubePageClassifier
@@ -46,8 +47,8 @@ private data class DescriptionValue(
 )
 
 /**
- * Niekrytyczny, ostatni etap partii Historii. Nigdy nie pobiera nowych filmów:
- * uzupełnia wyłącznie opisy rekordów, które już istnieją w lokalnej bazie.
+ * niekrytyczny, ostatni etap partii Historii. nigdy nie pobiera nowych filmów –
+ * tylko uzupełnia opisy rekordów, które już są w lokalnej bazie.
  */
 class DescriptionBackfillLoader(
     private val database: LocalDatabase,
@@ -112,10 +113,9 @@ class DescriptionBackfillLoader(
                     "retryDelayMinutes" to DESCRIPTION_RETRY_DELAY_MINUTES,
                 ),
             )
-        // Wyszukiwarka obejmuje całą zachowaną lokalnie historię, więc opisy
-        // uzupełniamy stopniowo także dla rekordów poza bieżącym filtrem czasu UI.
-        // Skan jest szerszy od partii, bo wyłączone per-kanał typy są
-        // odfiltrowywane dopiero po odczycie reguł użytkownika.
+        // wyszukiwarka widzi całą lokalną historię, więc opisy uzupełniamy też dla
+        // rekordów spoza bieżącego filtra czasu UI. skan jest szerszy niż partia,
+        // bo wyłączone per-kanał typy odsiewamy dopiero po odczycie reguł usera
             val cutoff = now - TimeUnit.DAYS.toMillis(DESCRIPTION_RETENTION_DAYS)
             val outstandingBefore = outstandingDescriptions(settings, cutoff).size
             val pending = database.pendingDescriptions(
@@ -124,7 +124,11 @@ class DescriptionBackfillLoader(
                 limit = MAX_PENDING_SCAN,
                 retryBeforeMillis = descriptionRetryBeforeMillis(now),
             ).filter { item ->
-                settings.isHistoryEnabledFor(item.creatorId, item.kind)
+                settings.isHistoryEnabledFor(item.creatorId, item.kind) &&
+                    // E-06: bez znanego kanału opis jest weryfikowany tytułem — przy tytule zastępczym każda
+                    // próba to pewna porażka, która po 3 razach blokuje opis na stałe; czekamy na naprawę tytułu
+                    !(item.title == ServerNotificationHandler.PLACEHOLDER_TITLE &&
+                        expectedChannelIdsByCreatorId[item.creatorId].isNullOrEmpty())
             }.take(batchLimit)
 
             val statusStarted = pending.isNotEmpty()
@@ -216,7 +220,14 @@ class DescriptionBackfillLoader(
                 null
             }
 
-            pending.forEach { item ->
+            // B-17: partia była liczona dla Data API (do 50). Gdy API zawiodło, cała reszta szłaby przez strony
+            // watch YouTube — przycinamy ją do limitu trybu bez klucza (jak gdyby klucza nie było).
+            val toProcess = if (apiAttempted && apiDescriptions == null) {
+                pending.take(descriptionBatchLimit(requested = maxItems, apiAvailable = false))
+            } else {
+                pending
+            }
+            toProcess.forEach { item ->
                 coroutineContext.ensureActive()
                 val itemStartedAtNanos = System.nanoTime()
                 val fetchStartedAtNanos = System.nanoTime()
@@ -440,8 +451,8 @@ class DescriptionBackfillLoader(
         selectedCreatorIds = settings.selectedCreatorIds,
         cutoffMillis = cutoffMillis,
         limit = MAX_PENDING_SCAN,
-        // Long.MAX_VALUE obejmuje także rekordy czekające obecnie na retry,
-        // dzięki czemu UI nie udaje, że wszystkie opisy są już gotowe.
+        // Long.MAX_VALUE łapie też rekordy czekające na retry, żeby UI nie udawało,
+        // że wszystkie opisy są już gotowe
         retryBeforeMillis = Long.MAX_VALUE,
     ).filter { item ->
         settings.isHistoryEnabledFor(item.creatorId, item.kind)
@@ -498,7 +509,7 @@ class DescriptionBackfillLoader(
     )
 
     companion object {
-        /** Większa partia jest używana tylko podczas jawnego doczytywania Historii. */
+        /** większa partia tylko przy jawnym doczytywaniu Historii */
         const val FOREGROUND_BATCH_SIZE = 24
 
         private const val MAX_PENDING_SCAN = 200
@@ -518,7 +529,7 @@ internal fun descriptionBatchLimit(
 
 internal const val NO_DESCRIPTION_SEARCH_TEXT = "Bez opisu"
 
-/** null oznacza błąd pobrania/walidacji; pusty poprawny opis staje się stanem końcowym. */
+/** null = błąd pobrania/walidacji; pusty poprawny opis to stan końcowy */
 internal fun descriptionForStorage(
     fetchSucceeded: Boolean,
     description: String?,

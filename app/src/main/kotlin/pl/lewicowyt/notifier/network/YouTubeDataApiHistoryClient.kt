@@ -27,17 +27,17 @@ sealed interface YouTubeApiKeyValidation {
 }
 
 /**
- * Szybka, oficjalna ścieżka historii. Jedna strona zawiera do 50 pozycji i ma
- * wielokrotnie mniejszą odpowiedź niż webowy interfejs YouTube.
+ * szybka, oficjalna ścieżka historii. jedna strona to do 50 pozycji, a odpowiedź
+ * jest wielokrotnie mniejsza niż z webowego YouTube.
  */
 class YouTubeDataApiHistoryClient(
     private val http: HttpTextClient,
     private val apiRequestHeaders: Map<String, String> = emptyMap(),
 ) {
     /**
-     * Wykonuje najtańsze żądanie kontrolne (1 jednostka limitu). Pusta lista
-     * kanałów jest prawidłowym wynikiem — o ważności klucza świadczy przyjęcie
-     * żądania przez YouTube Data API, nie istnienie testowego kanału.
+     * najtańsze żądanie kontrolne (1 jednostka limitu). pusta lista kanałów to
+     * poprawny wynik – o ważności klucza mówi to, że Data API przyjęło żądanie,
+     * a nie istnienie testowego kanału.
      */
     fun validateApiKey(apiKey: String): YouTubeApiKeyValidation {
         val normalized = apiKey.trim()
@@ -136,8 +136,8 @@ class YouTubeDataApiHistoryClient(
                 val publishedAtEvidence = if (exactPublished != null) {
                     PublishedAtEvidence.DATA_API
                 } else {
-                    // Dla ręcznej playlisty snippet.publishedAt może oznaczać
-                    // dodanie do playlisty, a nie publikację filmu.
+                    // przy ręcznej playliście snippet.publishedAt to może być data
+                    // dodania do playlisty, nie publikacji filmu
                     PublishedAtEvidence.PLAYLIST_ITEM
                 }
                 val publishedAtMillis = runCatching {
@@ -188,13 +188,9 @@ class YouTubeDataApiHistoryClient(
         )
     }
 
-    fun fetchVideoKinds(videoIds: Collection<String>, apiKey: String): Map<String, VideoKind> =
-        fetchVideoKindDecisions(videoIds, apiKey).mapValues { it.value.kind }
-
     /**
-     * Pobiera `snippet.description` dla maksymalnie 50 filmów na jedno żądanie
-     * videos.list. Puste opisy pozostają w mapie, aby nie uruchamiać dla nich
-     * zbędnego fallbacku Web.
+     * bierze `snippet.description` dla max 50 filmów na jedno videos.list.
+     * puste opisy zostają w mapie, żeby nie odpalać dla nich zbędnego fallbacku Web.
      */
     fun fetchVideoDescriptions(
         videoIds: Collection<String>,
@@ -253,10 +249,9 @@ class YouTubeDataApiHistoryClient(
                 val item = items.optJSONObject(index) ?: continue
                 val id = item.optString("id").takeIf(YOUTUBE_VIDEO_ID::matches) ?: continue
                 val decision = classifyDataApiVideoKindDecision(item)
-                // Data API nie ujawnia przynależności do kart „Shorty” i
-                // „Transmisje”. Niejednoznaczny wynik musi uruchomić
-                // klasyfikator strony/odtwarzacza, a nie blokować go samą
-                // obecnością identyfikatora w mapie.
+                // Data API nie zdradza przynależności do „Shortów" i „Transmisji".
+                // niejednoznaczny wynik ma odpalić klasyfikator strony/playera,
+                // a nie blokować go samą obecnością ID w mapie
                 if (decision.kind != VideoKind.UNKNOWN) {
                     put(id, decision)
                 }
@@ -319,11 +314,10 @@ internal fun parseDataApiVideoDescriptions(
 }
 
 /**
- * Data API podaje bieżący stan transmisji, ale po jej zakończeniu nie
- * rozróżnia wystarczająco pewnie archiwalnego streamu od filmu opublikowanego
- * jako Premiera. Nie podaje też orientacji ani przynależności do karty Shorts.
- * Takie przypadki pozostają UNKNOWN i są sprawdzane publicznym
- * odtwarzaczem/stroną YouTube.
+ * Data API podaje bieżący stan transmisji, ale po jej końcu nie odróżnia pewnie
+ * archiwalnego streamu od filmu wydanego jako Premiera. nie podaje też orientacji
+ * ani przynależności do karty Shorts. takie przypadki zostają UNKNOWN i idą do
+ * publicznego playera/strony YT.
  */
 internal fun classifyDataApiVideoKind(item: JSONObject): VideoKind {
     return classifyDataApiVideoKindDecision(item).kind

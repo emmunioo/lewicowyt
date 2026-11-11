@@ -17,7 +17,6 @@ class DiagnosticRunTest {
         assertTrue(first.syncId.matches(Regex("[0-9A-F]{8}")))
         assertEquals(first.syncId, retry.retryOf)
         assertNotEquals(first.syncId, retry.syncId)
-        assertEquals(first.syncId, first.syncId)
     }
 
     @Test

@@ -25,8 +25,8 @@ internal data class DiagnosticNetworkState(
 )
 
 /**
- * Synchronizacja może korzystać z sieci taryfowej tylko po zgodzie użytkownika.
- * Sieć oznaczona przez Androida jako bez limitu jest dozwolona zawsze.
+ * sync tyka sieć taryfową tylko za zgodą usera. sieć, którą Android oznaczył
+ * jako bez limitu, jest dozwolona zawsze.
  */
 internal fun SyncNetworkAccess.allowsSync(allowMobileData: Boolean): Boolean = when (this) {
     SyncNetworkAccess.UNAVAILABLE -> false
@@ -40,9 +40,10 @@ internal fun currentSyncNetworkAccess(context: Context): SyncNetworkAccess {
     val network = manager.activeNetwork ?: return SyncNetworkAccess.UNAVAILABLE
     val capabilities = manager.getNetworkCapabilities(network)
         ?: return SyncNetworkAccess.UNAVAILABLE
-    val hasInternet =
-        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    // M-02: do decyzji „taryfowa czy nie" wystarczy INTERNET — NIE wymagamy VALIDATED. Inaczej u osób
+    // z zablokowanym testem łączności Google (generate_204) sieć uchodziłaby za niedostępną i ręczny sync
+    // byłby na stałe zablokowany. (Sam fakt dostępności internetu i tak weryfikuje dopiero próba pobrania.)
+    val hasInternet = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     if (!hasInternet) return SyncNetworkAccess.UNAVAILABLE
 
     return if (

@@ -15,6 +15,8 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import pl.lewicowyt.notifier.community.CommunityDefaults
+import pl.lewicowyt.notifier.i18n.Pronoun
 import pl.lewicowyt.notifier.model.HistoryFilter
 
 private val Context.settingsDataStore by preferencesDataStore(name = "lewicowyt_settings")
@@ -29,8 +31,6 @@ enum class YouTubeLinkTarget {
     SYSTEM_DEFAULT,
     ALWAYS_ASK,
     YOUTUBE,
-    ALTERNATIVE_YOUTUBE,
-    NEWPIPE,
     BROWSER,
     OTHER_APP,
 }
@@ -38,6 +38,38 @@ enum class YouTubeLinkTarget {
 internal fun parseYouTubeLinkTarget(value: String?): YouTubeLinkTarget =
     value?.let { runCatching { YouTubeLinkTarget.valueOf(it) }.getOrNull() }
         ?: YouTubeLinkTarget.SYSTEM_DEFAULT
+
+/** preferencja „otwieraj w" dla jednej platformy linków społeczności (per platforma, jak dla YouTube). */
+data class CommunityLinkPref(
+    val target: YouTubeLinkTarget = YouTubeLinkTarget.SYSTEM_DEFAULT,
+    val packageName: String? = null,
+)
+
+internal fun parseCommunityLinkPrefs(raw: String?): Map<String, CommunityLinkPref> {
+    raw ?: return emptyMap()
+    return runCatching {
+        val obj = org.json.JSONObject(raw)
+        buildMap {
+            obj.keys().forEach { id ->
+                val o = obj.optJSONObject(id) ?: return@forEach
+                put(id, CommunityLinkPref(
+                    target = parseYouTubeLinkTarget(o.optString("t")),
+                    packageName = o.optString("p").ifBlank { null }?.takeIf(::isSafeAndroidPackageName),
+                ))
+            }
+        }
+    }.getOrDefault(emptyMap())
+}
+
+internal fun serializeCommunityLinkPrefs(prefs: Map<String, CommunityLinkPref>): String {
+    val obj = org.json.JSONObject()
+    prefs.forEach { (id, pref) ->
+        obj.put(id, org.json.JSONObject().put("t", pref.target.name).apply {
+            pref.packageName?.let { put("p", it) }
+        })
+    }
+    return obj.toString()
+}
 
 internal fun isSafeAndroidPackageName(value: String): Boolean =
     value.length in 3..255 && ANDROID_PACKAGE_NAME.matches(value)
@@ -59,7 +91,11 @@ data class AppSettings(
     val creatorHistoryDisabledTypes: Map<String, Set<HistoryFilter>> = emptyMap(),
     val creatorNotificationDisabledTypes: Map<String, Set<HistoryFilter>> = emptyMap(),
     val allowMobileData: Boolean = true,
+    val activeHoursEnabled: Boolean = false,
+    val activeHoursStartMinutes: Int = 8 * 60,
+    val activeHoursEndMinutes: Int = 22 * 60,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    val pronoun: Pronoun = Pronoun.ON,
     val accentColorArgb: Long = DEFAULT_ACCENT_COLOR_ARGB,
     val highContrastEnabled: Boolean = false,
     val youtubeLinkTarget: YouTubeLinkTarget = YouTubeLinkTarget.SYSTEM_DEFAULT,
@@ -67,10 +103,35 @@ data class AppSettings(
     val youtubeApiEnabled: Boolean = false,
     val youtubeApiNeedsValidation: Boolean = false,
     val automaticUpdatesEnabled: Boolean = true,
+    // gdy obraz z serwera społeczności jest za ciężki, apka sama go przekompresuje do JXL
+    val communityRecompressImages: Boolean = true,
+    // maksymalny rozmiar pliku JXL w KB (0 = bez limitu). powyżej – stopniowa kompresja w tle
+    val communityMaxJxlKb: Int = 0,
+    // pobieranie obrazów z serwerów społeczności (osobno feed i powiadomienia)
+    val communityDownloadImages: Boolean = true,
+    val communityDownloadNotificationImages: Boolean = true,
+    // powiadomienia o nowych materiałach także na sparowanym smartwatchu (mostek systemowy Androida)
+    val notifyOnWatch: Boolean = true,
+    // pobieranie animacji WebP (wyłącz, by oszczędzić transfer i pamięć)
+    val communityDownloadWebpAnimations: Boolean = true,
+    // jak daleko wstecz trzymać w bazie treść serwerów: osobno tekst i obrazy (w dniach)
+    val communityTextRetentionDays: Int = 60,
+    val communityImageRetentionDays: Int = 14,
+    // miniaturki YouTube: false = trzymaj pobrany WebP (większy plik, zero dodatkowego CPU);
+    // true = przekoduj do JXL (mniejszy plik na dysku, ale koszt kompresji i dekodowania na telefonie)
+    val youtubeThumbnailsAsJxl: Boolean = false,
+    // zapis mema (długie przytrzymanie): format ("ORIGINAL"/"JXL"/"WEBP"/"PNG"/"JPG"),
+    // jakość 1..100 i „moc kompresji" 0..100 (działa dla JXL/MozJPEG)
+    // R-16: domyślnie zapisujemy mem SKOMPRESOWANY (JXL) — mniejszy plik. Użytkownik może w ustawieniach
+    // wybrać „Oryginał” (bajt-w-bajt z serwera) albo inny format.
+    val communityMemeSaveFormat: String = "JXL",
+    val communityMemeSaveQuality: Int = 90,
+    val communityMemeSaveEffort: Int = 60,
+    // per platforma linków (id -> jak otwierać). Puste = domyślnie przeglądarka/system.
+    val communityLinkPrefs: Map<String, CommunityLinkPref> = emptyMap(),
     val lastBackgroundUpdateCheckAtMillis: Long = 0L,
     val lastSyncAtMillis: Long = 0L,
     val lastCompletedSyncAtMillis: Long = 0L,
-    val deferredDndSyncAtMillis: Long = 0L,
     val lastSyncSummary: String = "Jeszcze nie synchronizowano",
 )
 
@@ -100,7 +161,13 @@ class PreferencesRepository(private val context: Context) {
         val creatorNotificationDisabledTypes =
             stringSetPreferencesKey("creator_notification_disabled_types")
         val allowMobileData = booleanPreferencesKey("allow_mobile_data")
+        val activeHoursEnabled = booleanPreferencesKey("active_hours_enabled")
+        val activeHoursStart = intPreferencesKey("active_hours_start_minutes")
+        val activeHoursEnd = intPreferencesKey("active_hours_end_minutes")
+        // brak/"" = wbudowany serwer domyślny (B-11: czytane jako CommunityDefaults.SERVER_ID)
+        val primaryServerId = stringPreferencesKey("primary_server_id")
         val themeMode = stringPreferencesKey("theme_mode")
+        val pronoun = stringPreferencesKey("pronoun")
         val accentColor = longPreferencesKey("accent_color_argb")
         val highContrastEnabled = booleanPreferencesKey("high_contrast_enabled")
         val youtubeLinkTarget = stringPreferencesKey("youtube_link_target")
@@ -108,13 +175,26 @@ class PreferencesRepository(private val context: Context) {
         val youtubeApiEnabled = booleanPreferencesKey("youtube_api_enabled")
         val youtubeApiValidated = booleanPreferencesKey("youtube_api_validated")
         val automaticUpdatesEnabled = booleanPreferencesKey("automatic_updates_enabled")
+        val communityRecompressImages = booleanPreferencesKey("community_recompress_images")
+        val communityMaxJxlKb = intPreferencesKey("community_max_jxl_kb")
+        val communityDownloadImages = booleanPreferencesKey("community_download_images")
+        val communityDownloadNotificationImages =
+            booleanPreferencesKey("community_download_notification_images")
+        val communityDownloadWebpAnimations =
+            booleanPreferencesKey("community_download_webp_animations")
+        val communityTextRetentionDays = intPreferencesKey("community_text_retention_days")
+        val communityImageRetentionDays = intPreferencesKey("community_image_retention_days")
+        val youtubeThumbnailsAsJxl = booleanPreferencesKey("youtube_thumbnails_as_jxl")
+        val communityMemeSaveFormat = stringPreferencesKey("community_meme_save_format")
+        val communityMemeSaveQuality = intPreferencesKey("community_meme_save_quality")
+        val communityMemeSaveEffort = intPreferencesKey("community_meme_save_effort")
+        val communityLinkPrefs = stringPreferencesKey("community_link_prefs")
         val lastBackgroundUpdateCheckAt =
             longPreferencesKey("last_background_update_check_at")
-        // Klucz używany wyłącznie do jednorazowej migracji ze starszych wersji.
+        // tylko do jednorazowej migracji ze starszych wersji
         val youtubeApiKey = stringPreferencesKey("youtube_api_key")
         val lastSyncAt = longPreferencesKey("last_sync_at")
         val lastCompletedSyncAt = longPreferencesKey("last_completed_sync_at")
-        val deferredDndSyncAt = longPreferencesKey("deferred_dnd_sync_at")
         val lastSyncSummary = stringPreferencesKey("last_sync_summary")
     }
 
@@ -166,8 +246,8 @@ class PreferencesRepository(private val context: Context) {
                     Long.MIN_VALUE,
                 ) != storedAccent
             ) {
-                // Druga, niezależna kopia chroni wygląd przy migracji lub
-                // uszkodzeniu pojedynczego klucza Preferences DataStore.
+                // druga, niezależna kopia ratuje wygląd, gdyby pojedynczy klucz
+                // DataStore padł przy migracji
                 appearanceBackup.edit()
                     .putLong(APPEARANCE_BACKUP_ACCENT_KEY, storedAccent)
                     .apply()
@@ -177,9 +257,8 @@ class PreferencesRepository(private val context: Context) {
                 scheduleBackup.getInt(SCHEDULE_BACKUP_DAILY_HOUR_KEY, -1) != resolvedDailyHour ||
                 scheduleBackup.getInt(SCHEDULE_BACKUP_DAILY_MINUTE_KEY, -1) != resolvedDailyMinute
             ) {
-                // AlarmManager jest odbudowywany po aktualizacji procesu. Osobna
-                // kopia chroni harmonogram, gdy pojedynczy klucz DataStore jest
-                // chwilowo niedostępny albo zniknie podczas migracji ustawień.
+                // interwał zasila priorytety źródeł (SourcePriority) – osobna
+                // kopia trzyma harmonogram, gdyby klucz DataStore chwilowo zniknął
                 scheduleBackup.edit()
                     .putInt(SCHEDULE_BACKUP_INTERVAL_KEY, resolvedInterval)
                     .putInt(SCHEDULE_BACKUP_DAILY_HOUR_KEY, resolvedDailyHour)
@@ -215,9 +294,17 @@ class PreferencesRepository(private val context: Context) {
                     preferences[Keys.creatorNotificationDisabledTypes].orEmpty(),
                 ),
                 allowMobileData = preferences[Keys.allowMobileData] ?: true,
+                activeHoursEnabled = preferences[Keys.activeHoursEnabled] ?: false,
+                activeHoursStartMinutes = normalizeMinuteOfDay(
+                    preferences[Keys.activeHoursStart] ?: (8 * 60),
+                ),
+                activeHoursEndMinutes = normalizeMinuteOfDay(
+                    preferences[Keys.activeHoursEnd] ?: (22 * 60),
+                ),
                 themeMode = preferences[Keys.themeMode]
                     ?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() }
                     ?: ThemeMode.SYSTEM,
+                pronoun = Pronoun.fromRaw(preferences[Keys.pronoun]),
                 accentColorArgb = resolvedAccent,
                 highContrastEnabled = preferences[Keys.highContrastEnabled] ?: false,
                 youtubeLinkTarget = parseYouTubeLinkTarget(preferences[Keys.youtubeLinkTarget]),
@@ -231,22 +318,48 @@ class PreferencesRepository(private val context: Context) {
                     preferences[Keys.youtubeApiValidated] != true,
                 automaticUpdatesEnabled =
                     preferences[Keys.automaticUpdatesEnabled] ?: true,
+                communityRecompressImages =
+                    preferences[Keys.communityRecompressImages] ?: true,
+                communityMaxJxlKb =
+                    (preferences[Keys.communityMaxJxlKb] ?: 0).coerceIn(0, MAX_COMMUNITY_JXL_KB),
+                communityDownloadImages =
+                    preferences[Keys.communityDownloadImages] ?: true,
+                communityDownloadNotificationImages =
+                    preferences[Keys.communityDownloadNotificationImages] ?: true,
+                // zawsze włączone: wyboru, czy pokazać powiadomienie na zegarku, dokonuje aplikacja zegarka
+                // (Mi Fitness, Zepp…); dawna wartość „wyłączone” z wersji testowych jest świadomie ignorowana
+                notifyOnWatch = true,
+                communityDownloadWebpAnimations =
+                    preferences[Keys.communityDownloadWebpAnimations] ?: true,
+                communityTextRetentionDays = normalizeCommunityRetentionDays(
+                    preferences[Keys.communityTextRetentionDays] ?: 60,
+                ),
+                communityImageRetentionDays = normalizeCommunityRetentionDays(
+                    preferences[Keys.communityImageRetentionDays] ?: 14,
+                ),
+                youtubeThumbnailsAsJxl = preferences[Keys.youtubeThumbnailsAsJxl] ?: false,
+                // A-38: tylko znane formaty; śmieć/stara wartość → domyślny JXL (spójnie z konsumentami)
+                communityMemeSaveFormat =
+                    preferences[Keys.communityMemeSaveFormat]?.takeIf { it in MEME_SAVE_FORMATS } ?: "JXL",
+                communityMemeSaveQuality =
+                    (preferences[Keys.communityMemeSaveQuality] ?: 90).coerceIn(1, 100),
+                communityMemeSaveEffort =
+                    (preferences[Keys.communityMemeSaveEffort] ?: 60).coerceIn(0, 100),
+                communityLinkPrefs = parseCommunityLinkPrefs(preferences[Keys.communityLinkPrefs]),
                 lastBackgroundUpdateCheckAtMillis =
                     preferences[Keys.lastBackgroundUpdateCheckAt] ?: 0L,
                 lastSyncAtMillis = preferences[Keys.lastSyncAt] ?: 0L,
-                // Starsze instalacje nie miały osobnego znacznika ukończenia.
+                // starsze instalacje nie miały osobnego znacznika ukończenia
                 lastCompletedSyncAtMillis = preferences[Keys.lastCompletedSyncAt]
                     ?: preferences[Keys.lastSyncAt]
                     ?: 0L,
-                deferredDndSyncAtMillis = preferences[Keys.deferredDndSyncAt] ?: 0L,
                 lastSyncSummary = preferences[Keys.lastSyncSummary]
                     ?: "Jeszcze nie synchronizowano",
             )
         }
-        // DataStore emituje przy każdym zapisie pliku preferencji, także gdy
-        // wynikowe AppSettings są identyczne (np. powtórny zapis tej samej
-        // wartości). Bez tego każda taka emisja niepotrzebnie odpalała cały
-        // potok stanu w AppViewModel (filtr+sort historii) (#4).
+        // DataStore emituje przy każdym zapisie, nawet gdy AppSettings wychodzi
+        // identyczne (powtórny zapis tej samej wartości). bez tego każda emisja
+        // odpalała na darmo cały potok stanu w AppViewModel (filtr+sort) (#4)
         .distinctUntilChanged()
 
     suspend fun current(): AppSettings {
@@ -296,26 +409,8 @@ class PreferencesRepository(private val context: Context) {
         }
     }
 
-    suspend fun setIntervalMinutes(value: Int) {
-        val normalized = normalizeIntervalMinutes(value)
-        scheduleBackup.edit()
-            .putInt(SCHEDULE_BACKUP_INTERVAL_KEY, normalized)
-            .commit()
-        context.settingsDataStore.edit { it[Keys.intervalMinutes] = normalized }
-    }
-
-    suspend fun setDailyTime(hour: Int, minute: Int) {
-        val normalizedHour = hour.coerceIn(0, 23)
-        val normalizedMinute = minute.coerceIn(0, 59)
-        scheduleBackup.edit()
-            .putInt(SCHEDULE_BACKUP_DAILY_HOUR_KEY, normalizedHour)
-            .putInt(SCHEDULE_BACKUP_DAILY_MINUTE_KEY, normalizedMinute)
-            .commit()
-        context.settingsDataStore.edit {
-            it[Keys.dailyHour] = normalizedHour
-            it[Keys.dailyMinute] = normalizedMinute
-        }
-    }
+    // A-56: setIntervalMinutes/setDailyTime usunięte — harmonogram ręczny zniknął z UI (interwał stały 60 min);
+    // odczyt (resolveIntervalMinutes/…) zostaje dla zgodności z zapisanymi wcześniej ustawieniami.
 
     suspend fun setHistoryWindowDays(value: Int) {
         context.settingsDataStore.edit {
@@ -427,8 +522,97 @@ class PreferencesRepository(private val context: Context) {
         context.settingsDataStore.edit { it[Keys.allowMobileData] = value }
     }
 
+    suspend fun setActiveHoursEnabled(value: Boolean) {
+        context.settingsDataStore.edit { it[Keys.activeHoursEnabled] = value }
+    }
+
+    /**
+     * Id serwera głównego. B-11: brak wyboru (albo zapisane "") = WBUDOWANY serwer domyślny
+     * ([CommunityDefaults.SERVER_ID]) — od migracji to on dostarcza filmy budzikami LEP, więc "" nie może
+     * znaczyć „żaden" (wcześniej budziki z filmami od serwera domyślnego były wtedy odrzucane).
+     */
+    val primaryServerIdFlow: Flow<String> = context.settingsDataStore.data
+        .catch { error -> if (error is IOException) emit(emptyPreferences()) else throw error }
+        .map { it[Keys.primaryServerId].orEmpty().ifEmpty { CommunityDefaults.SERVER_ID } }
+        .distinctUntilChanged()
+
+    suspend fun currentPrimaryServerId(): String = primaryServerIdFlow.first()
+
+    suspend fun setPrimaryServerId(serverId: String) {
+        context.settingsDataStore.edit {
+            if (serverId.isBlank()) it.remove(Keys.primaryServerId) else it[Keys.primaryServerId] = serverId
+        }
+    }
+
+    suspend fun setActiveHours(startMinutes: Int, endMinutes: Int) {
+        context.settingsDataStore.edit {
+            it[Keys.activeHoursStart] = normalizeMinuteOfDay(startMinutes)
+            it[Keys.activeHoursEnd] = normalizeMinuteOfDay(endMinutes)
+        }
+    }
+
     suspend fun setAutomaticUpdatesEnabled(value: Boolean) {
         context.settingsDataStore.edit { it[Keys.automaticUpdatesEnabled] = value }
+    }
+
+    suspend fun setCommunityRecompressImages(value: Boolean) {
+        context.settingsDataStore.edit { it[Keys.communityRecompressImages] = value }
+    }
+
+    suspend fun setCommunityMaxJxlKb(value: Int) {
+        context.settingsDataStore.edit {
+            it[Keys.communityMaxJxlKb] = value.coerceIn(0, MAX_COMMUNITY_JXL_KB)
+        }
+    }
+
+    suspend fun setCommunityDownloadImages(value: Boolean) {
+        context.settingsDataStore.edit { it[Keys.communityDownloadImages] = value }
+    }
+
+    suspend fun setCommunityDownloadNotificationImages(value: Boolean) {
+        context.settingsDataStore.edit { it[Keys.communityDownloadNotificationImages] = value }
+    }
+
+    suspend fun setCommunityDownloadWebpAnimations(value: Boolean) {
+        context.settingsDataStore.edit { it[Keys.communityDownloadWebpAnimations] = value }
+    }
+
+    suspend fun setYoutubeThumbnailsAsJxl(value: Boolean) {
+        context.settingsDataStore.edit { it[Keys.youtubeThumbnailsAsJxl] = value }
+    }
+
+    suspend fun setCommunityTextRetentionDays(value: Int) {
+        context.settingsDataStore.edit {
+            it[Keys.communityTextRetentionDays] = normalizeCommunityRetentionDays(value)
+        }
+    }
+
+    suspend fun setCommunityImageRetentionDays(value: Int) {
+        context.settingsDataStore.edit {
+            it[Keys.communityImageRetentionDays] = normalizeCommunityRetentionDays(value)
+        }
+    }
+
+    suspend fun setCommunityMemeSaveFormat(value: String) {
+        if (value !in MEME_SAVE_FORMATS) return // A-38
+        context.settingsDataStore.edit { it[Keys.communityMemeSaveFormat] = value }
+    }
+
+    suspend fun setCommunityMemeSaveQuality(value: Int) {
+        context.settingsDataStore.edit { it[Keys.communityMemeSaveQuality] = value.coerceIn(1, 100) }
+    }
+
+    suspend fun setCommunityMemeSaveEffort(value: Int) {
+        context.settingsDataStore.edit { it[Keys.communityMemeSaveEffort] = value.coerceIn(0, 100) }
+    }
+
+    /** ustawia „otwieraj w" dla jednej platformy linków (target + opcjonalny pakiet innej aplikacji). */
+    suspend fun setCommunityLinkPref(platformId: String, target: YouTubeLinkTarget, packageName: String?) {
+        context.settingsDataStore.edit { prefs ->
+            val current = parseCommunityLinkPrefs(prefs[Keys.communityLinkPrefs]).toMutableMap()
+            current[platformId] = CommunityLinkPref(target, packageName?.takeIf(::isSafeAndroidPackageName))
+            prefs[Keys.communityLinkPrefs] = serializeCommunityLinkPrefs(current)
+        }
     }
 
     suspend fun reserveBackgroundUpdateCheck(
@@ -452,12 +636,24 @@ class PreferencesRepository(private val context: Context) {
         context.settingsDataStore.edit { it[Keys.themeMode] = value.name }
     }
 
+    suspend fun setPronoun(value: Pronoun) {
+        context.settingsDataStore.edit { it[Keys.pronoun] = value.name }
+    }
+
     suspend fun setHighContrastEnabled(value: Boolean) {
         context.settingsDataStore.edit { it[Keys.highContrastEnabled] = value }
     }
 
     suspend fun setYouTubeLinkTarget(value: YouTubeLinkTarget) {
         context.settingsDataStore.edit { it[Keys.youtubeLinkTarget] = value.name }
+    }
+
+    /** A-58: przywrócenie DOKŁADNEGO stanu linków YouTube (także braku pakietu) — dla testów instrumentalnych. */
+    internal suspend fun restoreYouTubeLinkState(target: YouTubeLinkTarget, otherPackage: String?) {
+        context.settingsDataStore.edit {
+            it[Keys.youtubeLinkTarget] = target.name
+            if (otherPackage != null) it[Keys.otherYouTubeAppPackage] = otherPackage else it.remove(Keys.otherYouTubeAppPackage)
+        }
     }
 
     suspend fun setOtherYouTubeAppPackage(packageName: String) {
@@ -470,9 +666,8 @@ class PreferencesRepository(private val context: Context) {
 
     suspend fun setAccentColor(argb: Long) {
         val normalized = normalizeAccentColor(argb)
-        // Backup jest zapisywany synchronicznie przed DataStore. Dzięki temu
-        // nawet przerwanie procesu bezpośrednio po przesunięciu suwaka nie
-        // przywróci domyślnej czerwieni przy następnym uruchomieniu/aktualizacji.
+        // backup leci synchronicznie przed DataStore – nawet ubicie procesu tuż
+        // po ruszeniu suwakiem nie przywróci domyślnej czerwieni po restarcie
         appearanceBackup.edit()
             .putLong(APPEARANCE_BACKUP_ACCENT_KEY, normalized)
             .commit()
@@ -511,8 +706,8 @@ class PreferencesRepository(private val context: Context) {
         secureApiKeyStore.write(legacyKey)
         context.settingsDataStore.edit {
             it[Keys.youtubeApiEnabled] = true
-            // Klucz zapisany przez starszą wersję musi przejść nowe żądanie
-            // kontrolne, zanim będzie ponownie używany.
+            // klucz ze starej wersji musi przejść nowe żądanie kontrolne,
+            // zanim znów go użyjemy
             it[Keys.youtubeApiValidated] = false
             it.remove(Keys.youtubeApiKey)
         }
@@ -539,9 +734,8 @@ class PreferencesRepository(private val context: Context) {
             if (completed) {
                 preferences[Keys.lastCompletedSyncAt] = timestamp
             } else if (!preferences.contains(Keys.lastCompletedSyncAt)) {
-                // Przy pierwszym uruchomieniu po aktualizacji zachowujemy dawny
-                // znacznik jako ostatnie ukończone sprawdzenie. Sama awaria nie
-                // może wyglądać dla harmonogramu jak świeża synchronizacja.
+                // przy pierwszym starcie po aktualizacji bierzemy dawny znacznik
+                // jako ostatni ukończony sync – awaria nie może udawać świeżego sprawdzenia
                 preferences[Keys.lastCompletedSyncAt] =
                     preferences[Keys.lastSyncAt] ?: 0L
             }
@@ -550,22 +744,10 @@ class PreferencesRepository(private val context: Context) {
         }
     }
 
-    suspend fun recordDeferredDndSync(timestamp: Long = System.currentTimeMillis()) {
-        context.settingsDataStore.edit { preferences ->
-            val previous = preferences[Keys.deferredDndSyncAt] ?: 0L
-            if (previous <= 0L || timestamp < previous) {
-                preferences[Keys.deferredDndSyncAt] = timestamp
-            }
-        }
-    }
-
-    suspend fun clearDeferredDndSync() {
-        context.settingsDataStore.edit { it.remove(Keys.deferredDndSyncAt) }
-    }
-
     private companion object {
         val HISTORY_WINDOWS = setOf(7, 14, 21, 30, 60)
         const val MAX_SYNC_SUMMARY_CHARS = 1_000
+        const val MAX_COMMUNITY_JXL_KB = 20_000
         const val APPEARANCE_BACKUP_NAME = "lewicowyt_appearance_backup"
         const val APPEARANCE_BACKUP_ACCENT_KEY = "accent_color_argb"
         const val SCHEDULE_BACKUP_NAME = "lewicowyt_schedule_backup"
@@ -575,6 +757,12 @@ class PreferencesRepository(private val context: Context) {
 
         fun normalizeHistoryDays(value: Int): Int =
         if (value in HISTORY_WINDOWS) value else 14
+
+        // retencja treści społeczności: 0 = nie trzymaj, inaczej 1..365 dni
+        fun normalizeCommunityRetentionDays(value: Int): Int = value.coerceIn(0, 365)
+
+        /** minuta doby przycięta do 0..1439 */
+        fun normalizeMinuteOfDay(value: Int): Int = value.coerceIn(0, 24 * 60 - 1)
 
         fun storedContentTypes(values: Set<String>?): Set<HistoryFilter> =
             if (values == null) {
@@ -630,9 +818,6 @@ internal fun resolveAccentColor(stored: Long?, backup: Long?): Long =
 internal fun isValidIntervalMinutes(value: Int): Boolean =
     value in MIN_INTERVAL_MINUTES..MAX_INTERVAL_MINUTES
 
-internal fun normalizeIntervalMinutes(value: Int): Int =
-    value.coerceIn(MIN_INTERVAL_MINUTES, MAX_INTERVAL_MINUTES)
-
 internal fun resolveIntervalMinutes(stored: Int?, backup: Int?): Int =
     stored?.takeIf(::isValidIntervalMinutes)
         ?: backup?.takeIf(::isValidIntervalMinutes)
@@ -659,3 +844,5 @@ private const val MIN_INTERVAL_MINUTES = 15
 private const val MAX_INTERVAL_MINUTES = 1440
 private const val MIN_ARGB = 0xFF000000L
 private const val MAX_ARGB = 0xFFFFFFFFL
+// A-38: dozwolone formaty zapisu memów (= nazwy CommunityImageExporter.Format)
+private val MEME_SAVE_FORMATS = setOf("ORIGINAL", "JXL", "WEBP", "PNG", "JPG")

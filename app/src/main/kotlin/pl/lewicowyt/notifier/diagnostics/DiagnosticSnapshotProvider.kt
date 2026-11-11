@@ -13,26 +13,19 @@ import pl.lewicowyt.notifier.data.CreatorCatalog
 import pl.lewicowyt.notifier.data.LocalDatabase
 import pl.lewicowyt.notifier.data.PreferencesRepository
 import pl.lewicowyt.notifier.images.JxlImageCache
-import pl.lewicowyt.notifier.worker.SyncScheduler
 import pl.lewicowyt.notifier.worker.currentDiagnosticNetworkState
 
 internal data class DiagnosticSnapshotResult(
     val databaseOk: Boolean,
-    val alarmsPresent: Int,
-    val alarmsExpected: Int,
     val fts5Available: Boolean,
 )
 
-/**
- * Tworzy wyłącznie tanią migawkę danych lokalnych i publicznych stanów systemu.
- * Nie uruchamia sieci ani synchronizacji i nie odczytuje identyfikatorów urządzenia.
- */
+/** Tania migawka lokalnych danych i stanu systemu – bez sieci, bez sync, bez ID urządzenia. */
 internal class DiagnosticSnapshotProvider(
     context: Context,
     private val catalog: CreatorCatalog,
     private val preferences: PreferencesRepository,
     private val database: LocalDatabase,
-    private val scheduler: SyncScheduler,
 ) {
     private val appContext = context.applicationContext
 
@@ -41,7 +34,7 @@ internal class DiagnosticSnapshotProvider(
         run: DiagnosticSyncRun? = null,
     ): DiagnosticSnapshotResult {
         if (!DiagnosticLogStore.isEnabled()) {
-            return DiagnosticSnapshotResult(false, 0, SyncScheduler.REGULAR_ALARM_QUEUE_SIZE, false)
+            return DiagnosticSnapshotResult(databaseOk = false, fts5Available = false)
         }
         val syncId = run?.syncId
         DiagnosticLogStore.event(
@@ -69,9 +62,7 @@ internal class DiagnosticSnapshotProvider(
                             Manifest.permission.POST_NOTIFICATIONS,
                         ) == PackageManager.PERMISSION_GRANTED
                     )
-            val exactAlarm = scheduler.hasExactAlarmAccess()
             val selected = catalog.creators.filter { it.id in settings.selectedCreatorIds }
-            val schedulerState = scheduler.diagnosticSnapshot()
             val db = database.diagnosticState()
             val images = JxlImageCache.diagnosticState(appContext)
             val transfer = DiagnosticNetworkUsage.snapshot()
@@ -84,7 +75,6 @@ internal class DiagnosticSnapshotProvider(
                 fields = mapOf(
                     "version" to BuildConfig.VERSION_NAME,
                     "sdk" to Build.VERSION.SDK_INT,
-                    "exactAlarm" to exactAlarm,
                     "notifications" to notificationsAllowed,
                     "notificationPolicy" to policyAccess,
                     "dnd" to dnd,
@@ -98,10 +88,8 @@ internal class DiagnosticSnapshotProvider(
                     "types" to settings.globalHistoryTypes.joinToString(",") { it.name },
                     "intervalMin" to settings.intervalMinutes,
                     "lastCompletedSync" to settings.lastCompletedSyncAtMillis,
-                    "nextAlarm" to schedulerState.nextAlarmAtMillis,
                 ),
             )
-            scheduler.logDiagnosticSnapshot(schedulerState, syncId, "SNAPSHOT")
             DiagnosticLogStore.event(
                 DiagnosticCategory.DATABASE,
                 DiagnosticLevel.INFO,
@@ -141,8 +129,7 @@ internal class DiagnosticSnapshotProvider(
             )
             DiagnosticLogStore.updateExportSummary(
                 listOf(
-                    "SYSTEM | sdk=${Build.VERSION.SDK_INT} | exactAlarm=$exactAlarm | notifications=$notificationsAllowed | dnd=$dnd | network=${network.type.name}",
-                    "SCHEDULERS | regular=${schedulerState.regularPresent}/${schedulerState.regularExpected} | retry=${schedulerState.retryPresent} | watchdog=${schedulerState.watchdogPresent} | dndProbe=${schedulerState.dndProbePresent}",
+                    "SYSTEM | sdk=${Build.VERSION.SDK_INT} | notifications=$notificationsAllowed | dnd=$dnd | network=${network.type.name}",
                     "DATABASE | engine=BUNDLED_SQLITE | sqlite=${db.sqliteVersion} | schema=${db.userVersion} | journal=${db.journalMode} | fts5=${db.fts5Available}",
                     "NETWORK_USAGE | uploadedHttpBodyBytes=${transfer.uploadedBytes} | downloadedHttpBodyBytes=${transfer.downloadedBytes} | totalHttpBodyBytes=${transfer.totalBytes} | scope=PROCESS_HTTP_BODY_ONLY",
                     "LAST_SYNC | completed=${settings.lastCompletedSyncAtMillis}",
@@ -150,11 +137,11 @@ internal class DiagnosticSnapshotProvider(
             )
             DiagnosticSnapshotResult(
                 databaseOk = true,
-                alarmsPresent = schedulerState.regularPresent,
-                alarmsExpected = schedulerState.regularExpected,
                 fts5Available = db.fts5Available,
             )
         } catch (error: Exception) {
+            // A-41: anulowanie korutyny NIE jest błędem migawki — przepuszczamy je dalej
+            if (error is kotlinx.coroutines.CancellationException) throw error
             DiagnosticLogStore.event(
                 DiagnosticCategory.APP,
                 DiagnosticLevel.ERROR,
@@ -164,7 +151,7 @@ internal class DiagnosticSnapshotProvider(
                 fields = mapOf("type" to error.javaClass.simpleName),
                 text = "Nie udało się zapisać pełnej migawki diagnostycznej",
             )
-            DiagnosticSnapshotResult(false, 0, SyncScheduler.REGULAR_ALARM_QUEUE_SIZE, false)
+            DiagnosticSnapshotResult(databaseOk = false, fts5Available = false)
         } finally {
             DiagnosticLogStore.event(
                 DiagnosticCategory.APP,

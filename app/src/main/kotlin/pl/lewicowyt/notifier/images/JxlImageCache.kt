@@ -4,15 +4,10 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.LruCache
-import com.awxkee.jxlcoder.JxlCoder
-import com.awxkee.jxlcoder.JxlChannelsConfiguration
-import com.awxkee.jxlcoder.JxlCompressionOption
-import com.awxkee.jxlcoder.JxlEffort
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,11 +19,12 @@ import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
-import pl.lewicowyt.notifier.BuildConfig
+import pl.lewicowyt.notifier.network.BROWSER_USER_AGENT
 import pl.lewicowyt.notifier.data.DataRetentionPolicy
 import pl.lewicowyt.notifier.diagnostics.DiagnosticCategory
 import pl.lewicowyt.notifier.diagnostics.DiagnosticLevel
 import pl.lewicowyt.notifier.diagnostics.DiagnosticLogStore
+import pl.lewicowyt.notifier.network.DerivedHttpClients
 import pl.lewicowyt.notifier.network.PrivacyHttpClient
 
 internal data class ImageCacheDiagnosticState(
@@ -38,10 +34,10 @@ internal data class ImageCacheDiagnosticState(
 )
 
 /**
- * Obraz jest dostępny od razu z pobranego JPG, a jego zamiana na JXL odbywa się
- * w tle. Plik źródłowy jest usuwany dopiero po zapisaniu i zweryfikowaniu JXL.
- * Pliki są adresowane SHA-256 zawartości, dlatego historia, powiadomienia i
- * awatary współdzielą jedną kopię identycznego obrazu niezależnie od URL.
+ * obraz jest od razu z pobranego JPG, a przeróbka na JXL leci w tle. plik
+ * źródłowy kasujemy dopiero po zapisaniu i sprawdzeniu JXL. adresujemy po SHA-256
+ * zawartości, więc historia, powiadomienia i awatary dzielą jedną kopię tego
+ * samego obrazu niezależnie od URL.
  */
 object JxlImageCache {
     private val memory = object : LruCache<String, Bitmap>(MEMORY_CACHE_KIB) {
@@ -52,6 +48,24 @@ object JxlImageCache {
     private val conversionsInProgress = ConcurrentHashMap.newKeySet<String>()
     private val cacheGeneration = AtomicLong()
     private val cacheMutationLock = Any()
+
+    /**
+     * Q3: czy pobrane miniaturki konwertować w tle do JXL. false (domyślnie) = trzymamy pobrany WebP/JPG
+     * bez konwersji (mniejszy transfer dzięki WebP, zero dodatkowego CPU na kompresję/dekodowanie JXL).
+     * true = konwersja do JXL (mniejszy plik na dysku, ale obciążenie telefonu). Ustawiane z preferencji
+     * przy starcie aplikacji i przy przełączeniu w ustawieniach.
+     */
+    @Volatile
+    var convertDownloadsToJxl: Boolean = false
+
+    private val recentFailures = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private const val NEGATIVE_CACHE_MS = 15L * 60 * 1000 // krótko: porażka mogła być chwilowym brakiem sieci
+    private const val MAX_NEGATIVE_ENTRIES = 2_000
+
+    private fun rememberFailure(url: String) {
+        if (recentFailures.size >= MAX_NEGATIVE_ENTRIES) recentFailures.clear()
+        recentFailures[url] = System.currentTimeMillis()
+    }
 
     suspend fun load(context: Context, url: String): Bitmap? = withContext(Dispatchers.IO) {
         if (BundledAvatarStore.isBundledAvatarUrl(url)) {
@@ -75,9 +89,14 @@ object JxlImageCache {
             generation = generation,
         )?.let { return@withContext it }
 
-        val downloaded = download(context, url) ?: return@withContext null
+        // A-43: krótki NEGATYWNY cache — nieudane pobranie/dekodowanie (404, uszkodzony plik) nie generuje nowego
+        // GET do CDN przy każdym wejściu na ekran; ponowna próba najwcześniej po [NEGATIVE_CACHE_MS].
+        val failedAt = recentFailures[url]
+        if (failedAt != null && System.currentTimeMillis() - failedAt < NEGATIVE_CACHE_MS) return@withContext null
+        val downloaded = download(context, url) ?: return@withContext null.also { rememberFailure(url) }
         val bitmap = decodeOriginal(downloaded)
-            ?: return@withContext null
+            ?: return@withContext null.also { rememberFailure(url) }
+        recentFailures.remove(url)
         val contentKey = ImageContentAddressing.contentKey(downloaded)
         val jpgFile = ImageContentAddressing.contentFile(
             directories.content,
@@ -100,7 +119,8 @@ object JxlImageCache {
         }
         if (stored) {
             remember(contentKey, bitmap)
-            if (!jxlFile.isFile) {
+            // Q3: konwersję do JXL robimy tylko, gdy user ją wybrał; inaczej trzymamy pobrany WebP/JPG.
+            if (convertDownloadsToJxl && !jxlFile.isFile) {
                 scheduleConversion(contentKey, jpgFile, jxlFile)
             }
         }
@@ -112,7 +132,7 @@ object JxlImageCache {
         val sha256: String,
     )
 
-    /** Pobiera dokładnie jeden obraz i sprawdza, czy CDN zwrócił avatar 176x176. */
+    /** pobiera jeden obraz i sprawdza, czy CDN dał avatar 176x176 */
     suspend fun downloadValidatedAvatar(context: Context, url: String): DownloadedAvatar? =
         withContext(Dispatchers.IO) {
             val bytes = download(context, url) ?: return@withContext null
@@ -124,8 +144,8 @@ object JxlImageCache {
         }
 
     /**
-     * Zapisuje już pobrane bajty bez drugiego żądania sieciowego. JPG jest
-     * podmieniany w tle na JXL 69 / effort 10 tak samo jak miniatury.
+     * zapisuje już pobrane bajty bez drugiego żądania. JPG idzie w tle na
+     * JXL 69 (tylko gdy włączone „Miniaturki YouTube w JXL” — B-13), tak samo jak miniatury.
      */
     suspend fun cacheDownloaded(
         context: Context,
@@ -171,17 +191,17 @@ object JxlImageCache {
     }
 
     /**
-     * Najstarszy katalog nie miał jednoznacznego formatu. Cache v2 zachowujemy
-     * i migrujemy leniwie podczas pierwszego użycia konkretnego URL-u, dzięki
-     * czemu aktualizacja nie pobiera ani nie kompresuje obrazów ponownie.
+     * najstarszy katalog nie miał jednoznacznego formatu. cache v2 zostaje i
+     * migruje leniwie przy pierwszym użyciu danego URL-u, więc aktualizacja nie
+     * pobiera ani nie kompresuje obrazów od nowa.
      */
     fun migrateExisting(context: Context) {
         deleteCacheDirectory(context, LEGACY_CACHE_DIRECTORY)
     }
 
     /**
-     * Cache jest wydzielonym katalogiem, więc można bezpiecznie usuwać zapisane
-     * miniatury i awatary starsze niż maksymalny zakres historii.
+     * cache to osobny katalog, więc bezpiecznie kasujemy miniatury i awatary
+     * starsze niż maksymalny zakres historii.
      */
     fun pruneExpired(
         context: Context,
@@ -266,8 +286,8 @@ object JxlImageCache {
     }
 
     /**
-     * Usuwa wyłącznie odtwarzalną pamięć obrazów aplikacji. Semafor pozwala
-     * dokończyć bieżący zapis przed skasowaniem katalogu.
+     * kasuje tylko odtwarzalny cache obrazów. semafor pozwala dokończyć bieżący
+     * zapis, zanim skasujemy katalog.
      */
     suspend fun clear(context: Context) = withContext(Dispatchers.IO) {
         synchronized(cacheMutationLock) {
@@ -347,8 +367,8 @@ object JxlImageCache {
             if (!source.isFile || source.length() !in 1..MAX_IMAGE_BYTES.toLong()) continue
             val bytes = runCatching { source.readBytes() }.getOrNull() ?: continue
             val bitmap = if (candidate.extension == JXL_EXTENSION) {
-                if (!JxlCoder.isJXL(bytes)) continue
-                runCatching { JxlCoder.decode(bytes) }.getOrNull()
+                if (!NativeJxl.isJxl(bytes)) continue
+                NativeJxl.decode(bytes)
                     ?.takeIf { isSafeDecodedSize(it.width, it.height) }
             } else {
                 decodeOriginal(bytes)
@@ -396,6 +416,9 @@ object JxlImageCache {
         sourceFile: File,
         jxlFile: File,
     ) {
+        // B-13: ustawienie „Miniaturki YouTube w JXL” (domyślnie WYŁĄCZONE) dotyczy KAŻDEJ ścieżki konwersji —
+        // wcześniej tylko świeże pobranie je sprawdzało, a odczyt z cache, migracja i awatary i tak kodowały JXL.
+        if (!convertDownloadsToJxl) return
         val generation = cacheGeneration.get()
         synchronized(cacheMutationLock) {
             if (generation != cacheGeneration.get()) return
@@ -425,24 +448,20 @@ object JxlImageCache {
                     }
                     val encoded = try {
                         runCatching {
-                            JxlCoder.encode(
+                            NativeJxl.encode(
                                 bitmap,
-                                JxlChannelsConfiguration.RGB,
-                                JxlCompressionOption.LOSSY,
-                                // O jeden poziom słabsza kompresja niż maksymalny
-                                // GLACIER (kolejność: …KITTEN, TORTOISE, GLACIER).
-                                // Znacząco tańsza dla CPU/baterii przy konwersji w
-                                // tle, plik jest tylko minimalnie większy (#2).
-                                JxlEffort.TORTOISE,
                                 JXL_QUALITY,
-                            )
+                                // effort 9 (TORTOISE): o poziom słabsza kompresja niż max (10). dużo lżejsza
+                                // dla CPU/baterii przy konwersji w tle, a plik ledwo większy (#2)
+                                9,
+                            ) ?: error("JXL encode failed")
                         }.onFailure { error ->
                             logJxlError("ENCODE_FAILED", inputBytes, error)
                         }.getOrNull()
                     } finally {
                         bitmap.recycle()
                     } ?: return@withPermit
-                    if (!JxlCoder.isJXL(encoded) || JxlCoder.getSize(encoded) == null) {
+                    if (!NativeJxl.isJxl(encoded) || NativeJxl.size(encoded) == null) {
                         logJxlError("VERIFY_FAILED", inputBytes, null)
                         return@withPermit
                     }
@@ -478,8 +497,9 @@ object JxlImageCache {
 
     private fun decodeJxl(file: File): Bitmap? {
         if (!file.isFile || file.length() !in 1..MAX_IMAGE_BYTES.toLong()) return null
-        return runCatching { JxlCoder.decode(file.readBytes()) }
-            .getOrNull()
+        val bytes = runCatching { file.readBytes() }.getOrNull() ?: return null
+        // WŁASNY dekoder JNI (libjxl) z limitami; brak zapasowego dekodera (jxl-coder usunięty)
+        return NativeJxl.decode(bytes)
             ?.takeIf { isSafeDecodedSize(it.width, it.height) }
     }
 
@@ -560,23 +580,31 @@ object JxlImageCache {
     }
 
     private fun download(context: Context, initialUrl: String): ByteArray? {
+        downloadOnce(context, initialUrl)?.let { return it }
+        // Miniaturki YouTube: nie każdy rozmiar ma wariant WebP (`/vi_webp/…​.webp`). Gdy WebP nie wyszedł,
+        // spróbuj klasycznego JPG (`/vi/…​.jpg`) — mniejszy WebP tam, gdzie jest; pewny JPG jako zapas.
+        val jpgFallback = youTubeWebpToJpg(initialUrl)
+        if (jpgFallback != null) downloadOnce(context, jpgFallback)?.let { return it }
+        return null
+    }
+
+    /** zamienia URL miniatury YouTube WebP na odpowiednik JPG, albo null gdy to nie jest taki URL. */
+    private fun youTubeWebpToJpg(url: String): String? {
+        if (!url.contains("/vi_webp/") || !url.endsWith(".webp", ignoreCase = true)) return null
+        return url.replace("/vi_webp/", "/vi/").substringBeforeLast('.') + ".jpg"
+    }
+
+    private fun downloadOnce(context: Context, initialUrl: String): ByteArray? {
         var currentUrl = initialUrl.toHttpUrlOrNull() ?: return null
-        val client = PrivacyHttpClient.get(context).newBuilder()
-            .followRedirects(false)
-            .followSslRedirects(false)
-            .connectTimeout(12, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
-            .build()
+        // T-11: klient budowany raz (nie przy każdej miniaturze)
+        val client = DerivedHttpClients.get(PrivacyHttpClient.get(context), THUMBNAIL_CLIENT_SPEC)
         repeat(MAX_REDIRECTS + 1) {
             if (!isAllowedImageUrl(currentUrl)) return null
             val request = Request.Builder()
                 .url(currentUrl)
-                .header(
-                    "User-Agent",
-                    "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 " +
-                        "Chrome/136 Mobile Safari/537.36 " +
-                        "lewicowYT/${BuildConfig.VERSION_NAME}",
-                )
+                // B-14: zwykły UA przeglądarki — bez „lewicowYT/<wersja>”, który przed CDN Google
+                // wyróżniał użytkowników aplikacji (i wersję) spośród reszty ruchu
+                .header("User-Agent", BROWSER_USER_AGENT)
                 .get()
                 .build()
             try {
@@ -648,7 +676,6 @@ object JxlImageCache {
             width.toLong() * height.toLong() <= MAX_DECODED_PIXELS
 
     const val JXL_QUALITY = 69
-    const val JXL_EFFORT = 10
     private const val AVATAR_SIZE_PX = 176
     private const val CACHE_DIRECTORY = "remote_images_v3"
     private const val URL_ADDRESSED_CACHE_DIRECTORY = "remote_images_v2"
@@ -658,6 +685,11 @@ object JxlImageCache {
     private const val ORIGINAL_EXTENSION = "jpg"
     private const val JXL_EXTENSION = "jxl"
     private const val MEMORY_CACHE_KIB = 12 * 1024
+    private val THUMBNAIL_CLIENT_SPEC = DerivedHttpClients.Spec(
+        connectTimeoutMillis = 12_000L,
+        readTimeoutMillis = 15_000L,
+        noRedirects = true,
+    )
     private const val MAX_IMAGE_BYTES = 8 * 1024 * 1024
     private const val MAX_IMAGE_DIMENSION = 4_096
     private const val MAX_IMAGE_PIXELS = 16_777_216L

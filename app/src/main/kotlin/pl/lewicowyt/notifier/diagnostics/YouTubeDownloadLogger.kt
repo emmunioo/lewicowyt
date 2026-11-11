@@ -20,9 +20,9 @@ internal enum class DiagnosticDownloadRole(val label: String) {
 }
 
 /**
- * Rejestruje wyłącznie publiczne identyfikatory materiałów. Link youtu.be nie
- * ma parametrów zapytania, więc filtr sekretów nie usuwa z niego videoId.
- * Czas pobrania do sekundy zapisuje sam DiagnosticLogStore.
+ * loguje tylko publiczne ID materiałów. link youtu.be nie ma query params, więc
+ * filtr sekretów nie wytnie z niego videoId. czas pobrania (do sekundy) zapisuje
+ * sam DiagnosticLogStore.
  */
 internal fun logYouTubeDownload(
     area: DiagnosticDownloadArea,

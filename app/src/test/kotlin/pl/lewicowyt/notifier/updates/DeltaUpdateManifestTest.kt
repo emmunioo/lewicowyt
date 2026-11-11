@@ -110,6 +110,17 @@ class DeltaUpdateManifestTest {
         )
     }
 
+    @Test fun manifestForOtherAbiMeansNoDeltaNotInvalidRelease() {
+        // D-18: wspólny manifest wskazuje APK innego ABI — pełny APK z powodem DELTA_NOT_AVAILABLE
+        val other = manifest().copy(target = manifest().target.copy(apkName = "lewicowYT-x-armv7.apk"))
+        val result = selectDeltaUpdate(other, update(), installed(), null)
+        assertEquals(
+            DeltaFallbackReason.DELTA_NOT_AVAILABLE,
+            (result as DeltaSelectionResult.UseFullApk).reason,
+        )
+        assertEquals("lewicowYT-1.9-beta-arm64-update.json", deltaManifestAssetNameFor("lewicowYT-1.9-beta-arm64.apk"))
+    }
+
     @Test fun rejectsPatchMetadataDifferentFromGitHubAsset() {
         val asset = update().releaseAssets.getValue("update.xdelta").copy(sizeBytes = 699)
         val result = selectDeltaUpdate(

@@ -4,8 +4,8 @@ import java.io.File
 import java.security.MessageDigest
 
 /**
- * Nazwy obrazów wynikają z ich zawartości, a nie z adresu URL. Dzięki temu
- * różne filmy korzystające z identycznej miniatury wskazują ten sam plik.
+ * nazwa obrazu wynika z jego zawartości, nie z URL – więc różne filmy z tą samą
+ * miniaturą wskazują ten sam plik.
  */
 internal object ImageContentAddressing {
     fun urlKey(url: String): String = sha256(url.toByteArray(Charsets.UTF_8))

@@ -2,14 +2,12 @@ package pl.lewicowyt.notifier.network
 
 import java.io.IOException
 import java.io.Reader
-import java.util.concurrent.TimeUnit
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import pl.lewicowyt.notifier.BuildConfig
 
 internal class HttpStatusException(
     val statusCode: Int,
@@ -18,7 +16,9 @@ internal class HttpStatusException(
 ) : IOException("HTTP $statusCode dla $safeUrl")
 
 class HttpTextClient(
-    private val baseClient: OkHttpClient = OkHttpClient(),
+    // D-19g: bez wartości domyślnej — domyślny OkHttpClient() to systemowy DNS i automatyczne przekierowania;
+    // produkcja zawsze podaje PrivacyHttpClient (AppGraph), testy podają klienta jawnie
+    private val baseClient: OkHttpClient,
 ) {
     fun getText(
         url: String,
@@ -33,11 +33,14 @@ class HttpTextClient(
         val request = commonRequestBuilder(targetUrl, headers)
             .get()
             .build()
-        val client = baseClient.newBuilder()
-            .connectTimeout(connectTimeoutMillis.toLong(), TimeUnit.MILLISECONDS)
-            .readTimeout(readTimeoutMillis.toLong(), TimeUnit.MILLISECONDS)
-            .callTimeout(callTimeoutMillis.toLong(), TimeUnit.MILLISECONDS)
-            .build()
+        val client = DerivedHttpClients.get( // T-11: raz na zestaw limitów, nie przy każdym żądaniu
+            baseClient,
+            DerivedHttpClients.Spec(
+                connectTimeoutMillis = connectTimeoutMillis.toLong(),
+                readTimeoutMillis = readTimeoutMillis.toLong(),
+                callTimeoutMillis = callTimeoutMillis.toLong(),
+            ),
+        )
         return client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 throw HttpStatusException(
@@ -62,11 +65,7 @@ class HttpTextClient(
             .header("Accept", JSON_RESPONSE_ACCEPT)
             .post(json.toRequestBody(JSON_MEDIA_TYPE))
             .build()
-        val client = baseClient.newBuilder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .callTimeout(35, TimeUnit.SECONDS)
-            .build()
+        val client = DerivedHttpClients.get(baseClient, POST_JSON_SPEC) // T-11
         return client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 throw HttpStatusException(
@@ -94,11 +93,8 @@ class HttpTextClient(
         headers: Map<String, String>,
     ): Request.Builder = Request.Builder()
         .url(targetUrl)
-        .header(
-            "User-Agent",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
-                "Chrome/136 Safari/537.36 lewicowYT/${BuildConfig.VERSION_NAME}",
-        )
+        // B-14: bez sufiksu „lewicowYT/<wersja>” — YouTube/Google/GitHub nie odróżniają ruchu aplikacji
+        .header("User-Agent", BROWSER_USER_AGENT)
         .header("Accept-Language", "pl-PL,pl;q=0.9,en;q=0.5")
         .header("Accept", TEXT_RESPONSE_ACCEPT)
         .apply {
@@ -145,6 +141,11 @@ class HttpTextClient(
     }
 
     private companion object {
+        val POST_JSON_SPEC = DerivedHttpClients.Spec(
+            connectTimeoutMillis = 15_000L,
+            readTimeoutMillis = 20_000L,
+            callTimeoutMillis = 35_000L,
+        )
         const val MAX_ERROR_BODY_CHARS = 64_000
         val JSON_MEDIA_TYPE = "application/json; charset=UTF-8".toMediaType()
         const val JSON_RESPONSE_ACCEPT = "application/json"
@@ -170,3 +171,11 @@ internal fun isAllowedTextResponseMime(contentType: String?): Boolean {
         mime.endsWith("+json") ||
         mime.endsWith("+xml")
 }
+
+/**
+ * B-14: wspólny, zwykły UA przeglądarki mobilnej dla żądań do YouTube/CDN Google/GitHub — bez identyfikatora
+ * aplikacji ani jej wersji (te wyróżniały użytkowników lewicowYT w logach dostawców).
+ */
+internal const val BROWSER_USER_AGENT =
+    "Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) " +
+        "Chrome/136.0.0.0 Mobile Safari/537.36"

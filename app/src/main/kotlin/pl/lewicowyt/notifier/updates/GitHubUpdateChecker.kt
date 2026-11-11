@@ -18,7 +18,6 @@ sealed interface UpdateCheckResult {
 enum class UpdatePolicy {
     OPTIONAL,
     MANDATORY_SECURITY_UPDATE,
-    SECURITY_ROLLBACK,
 }
 
 data class AvailableUpdate(
@@ -58,8 +57,8 @@ class GitHubUpdateChecker(
 
         val json = try {
             http.getText(
-                // /latest pomija wydania oznaczone przez GitHub jako prerelease.
-                // Lista pozwala becie wykrywać kolejne bety i późniejsze stable.
+                // /latest pomija to, co GitHub oznaczył jako prerelease – lista
+                // pozwala becie łapać kolejne bety i późniejsze stable
                 url = "https://api.github.com/repos/$normalizedRepository/releases?per_page=100",
                 maxChars = 4_000_000,
                 headers = mapOf("Accept" to "application/vnd.github+json"),
@@ -178,11 +177,13 @@ internal fun selectNewestInstallableRelease(
     releases: JSONArray,
     currentVersion: String,
     repository: String,
+    supportedAbis: List<String> = deviceSupportedAbis(),
 ): ReleaseCandidate? =
     installableReleaseCandidates(
         releases = releases,
         repository = repository,
         includePrereleases = currentVersionAllowsPrereleases(currentVersion),
+        supportedAbis = supportedAbis,
     )
         .maxWithOrNull { left, right ->
             compareReleaseVersions(left.version, right.version)
@@ -192,11 +193,13 @@ internal fun selectUpdateResultFromReleases(
     releases: JSONArray,
     currentVersion: String,
     repository: String,
+    supportedAbis: List<String> = deviceSupportedAbis(),
 ): UpdateCheckResult {
     val allCandidates = installableReleaseCandidates(
         releases = releases,
         repository = repository,
         includePrereleases = true,
+        supportedAbis = supportedAbis,
     )
     if (allCandidates.isEmpty()) {
         throw IllegalStateException(
@@ -204,59 +207,68 @@ internal fun selectUpdateResultFromReleases(
         )
     }
 
-    val currentReleaseExists = allCandidates.any {
-        compareReleaseVersions(it.version, currentVersion) == 0
-    }
-    val candidates = if (currentReleaseExists) {
-        installableReleaseCandidates(
-            releases = releases,
-            repository = repository,
-            includePrereleases = currentVersionAllowsPrereleases(currentVersion),
-        )
-    } else {
-        // Wycofanie wydania jest trybem awaryjnym. Wtedy instalacja stabilna
-        // może otrzymać również jawnie oznaczoną wersję ratunkową prerelease.
-        allCandidates
-    }
+    // M-11: proste i odporne na fałszywe alarmy — bierzemy NAJNOWSZE instalowalne wydanie nowsze niż bieżąca
+    // wersja (GitHub zwraca najnowsze pierwsze, więc strona 1 wystarcza — paginacja zbędna). Gdy nic nowszego
+    // nie ma (np. lokalna beta wyprzedza wydania albo repo ma >100 wydań, a to i tak najnowsze) → UpToDate.
+    // Nie wnioskujemy już trybu awaryjnego z „bieżące wydanie nie istnieje na liście" (źródło błędnych rollbacków).
+    val candidates = installableReleaseCandidates(
+        releases = releases,
+        repository = repository,
+        includePrereleases = currentVersionAllowsPrereleases(currentVersion),
+        supportedAbis = supportedAbis,
+    )
     val newerRelease = candidates
         .filter { compareReleaseVersions(it.version, currentVersion) > 0 }
         .maxWithOrNull { left, right ->
             compareReleaseVersions(left.version, right.version)
         }
+    // policy (OPTIONAL / MANDATORY) jest już wyznaczone per wydanie z JAWNEGO markera w opisie (patrz
+    // installableReleaseCandidates) — tu tylko wybieramy cel.
+    return newerRelease
+        ?.let { UpdateCheckResult.Available(it.update) }
+        ?: UpdateCheckResult.UpToDate(currentVersion)
+}
 
-    if (currentReleaseExists) {
-        return newerRelease
-            ?.let { UpdateCheckResult.Available(it.update) }
-            ?: UpdateCheckResult.UpToDate(currentVersion)
+/** Lista ABI urządzenia wg preferencji; BEZPIECZNIE (w czystym teście JVM Build.SUPPORTED_ABIS rzuca). */
+internal fun deviceSupportedAbis(): List<String> =
+    runCatching { android.os.Build.SUPPORTED_ABIS?.toList() }.getOrNull().orEmpty()
+
+/** Tokeny nazw APK dla danego ABI (dopasowanie …-arm64.apk / …-armv7.apk / …-x64.apk). */
+private fun abiNameTokens(abi: String): List<String> = when (abi.lowercase()) {
+    "arm64-v8a" -> listOf("arm64", "aarch64")
+    "armeabi-v7a" -> listOf("armv7", "armeabi-v7a", "armeabi")
+    "x86_64" -> listOf("x86_64", "x64")
+    "x86" -> listOf("x86")
+    else -> emptyList()
+}
+
+/**
+ * Czy pojedynczy APK nadaje się dla urządzenia: nazwa bez tokenu ABI = uniwersalny; z tokenem — musi to być
+ * ABI z listy urządzenia. Pusta lista ABI (test JVM) niczego nie wyklucza.
+ */
+internal fun isApkCompatibleWithAbis(apkName: String, supportedAbis: List<String>): Boolean {
+    if (supportedAbis.isEmpty()) return true
+    val allTokens = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86").flatMap(::abiNameTokens).distinct()
+    // dłuższe tokeny najpierw — „x86_64” nie może zostać rozpoznane jako „x86”
+    val named = allTokens.sortedByDescending { it.length }.firstOrNull { apkName.contains(it, ignoreCase = true) }
+        ?: return true
+    return supportedAbis.any { abi -> abiNameTokens(abi).any { it.equals(named, ignoreCase = true) } }
+}
+
+/** Pierwszy APK pasujący do NAJBARDZIEJ preferowanego ABI urządzenia (kolejność [supportedAbis]). */
+private fun selectApkForAbis(apks: List<ReleaseAsset>, supportedAbis: List<String>): ReleaseAsset? {
+    for (abi in supportedAbis) {
+        val tokens = abiNameTokens(abi)
+        apks.firstOrNull { a -> tokens.any { a.name.contains(it, ignoreCase = true) } }?.let { return it }
     }
-
-    // Brak bieżącego wydania z APK jest sygnałem awaryjnym. Jeśli istnieje
-    // nowsza wersja, jest bezpieczniejszym celem niż cofnięcie. Gdy jej nie ma,
-    // wybieramy najnowsze starsze wydanie. Android zaakceptuje taki rollback
-    // wyłącznie wtedy, gdy awaryjny APK ma wyższy techniczny versionCode.
-    if (newerRelease != null) {
-        return UpdateCheckResult.Available(
-            newerRelease.update.copy(policy = UpdatePolicy.MANDATORY_SECURITY_UPDATE),
-        )
-    }
-
-    val rollback = candidates
-        .filter { compareReleaseVersions(it.version, currentVersion) < 0 }
-        .maxWithOrNull { left, right ->
-            compareReleaseVersions(left.version, right.version)
-        }
-        ?: throw IllegalStateException(
-            "Bieżące wydanie zostało wycofane, ale nie ma awaryjnego APK.",
-        )
-    return UpdateCheckResult.Available(
-        rollback.update.copy(policy = UpdatePolicy.SECURITY_ROLLBACK),
-    )
+    return null
 }
 
 private fun installableReleaseCandidates(
     releases: JSONArray,
     repository: String,
     includePrereleases: Boolean,
+    supportedAbis: List<String>,
 ): List<ReleaseCandidate> {
     return (0 until releases.length())
         .mapNotNull { index ->
@@ -300,17 +312,42 @@ private fun installableReleaseCandidates(
                         )
                     }
                     .associateBy(ReleaseAsset::name)
-                val apk = releaseAssets.values.firstOrNull { asset ->
-                    asset.name.endsWith(".apk", ignoreCase = true) &&
-                        asset.sizeBytes <= MAX_APK_SIZE_BYTES
+                // F-16: wydanie ma osobne APK per ABI (…-arm.apk / …-x64.apk). Wybierz pasujący do
+                // urządzenia — inaczej instalacja padnie z INSTALL_FAILED_NO_MATCHING_ABIS. Dla wydań z
+                // jednym (uniwersalnym) APK bierzemy go wprost; przy wielu, gdy żaden nie pasuje do ABI,
+                // NIE instalujemy złego (zwracamy null).
+                val apks = releaseAssets.values.filter { asset ->
+                    asset.name.endsWith(".apk", ignoreCase = true) && asset.sizeBytes <= MAX_APK_SIZE_BYTES
                 }
-                    ?: return@runCatching null
+                val apk = when {
+                    apks.isEmpty() -> return@runCatching null
+                    // jeden APK: bierzemy wprost, CHYBA że jego nazwa wskazuje ABI, którego urządzenie nie obsługuje
+                    // (B-90: np. tylko „…-arm64.apk” na telefonie armv7 = pobranie na darmo i błąd instalacji)
+                    apks.size == 1 -> apks.first().takeIf { isApkCompatibleWithAbis(it.name, supportedAbis) }
+                        ?: return@runCatching null
+                    // L-13/O-1: wiele APK per ABI — wybieramy pasujący do NAJBARDZIEJ preferowanego ABI, które
+                    // urządzenie faktycznie wspiera (kolejność z SUPPORTED_ABIS). Nigdy nie wybieramy APK dla
+                    // ABI spoza listy urządzenia (np. arm64 na telefonie 32-bit = INSTALL_FAILED_NO_MATCHING_ABIS).
+                    // gdy brak pliku dla ABI urządzenia — APK uniwersalny (…-universal.apk, bez tokenu ABI)
+                    else -> selectApkForAbis(apks, supportedAbis)
+                        ?: apks.firstOrNull { isApkCompatibleWithAbis(it.name, supportedAbis) }
+                        ?: return@runCatching null
+                }
                 val apkName = apk.name
                 val releasePageUrl = requireSafeGitHubReleaseUrl(
                     value = release.getString("html_url"),
                     repository = repository,
                 )
                 val apkDownloadUrl = apk.downloadUrl
+                val body = release.optString("body").trim()
+                // M-11: „wymagana" tylko przez JAWNY marker w opisie wydania (autor wydania świadomie go wstawia).
+                // Wcześniej tryb awaryjny wywodził się z heurystyki „bieżące wydanie nie istnieje na liście", co
+                // dawało fałszywe „Wymagana aktualizacja"/rollback dla niewydanych bet i repo z >100 wydaniami.
+                val policy = if (body.contains(MANDATORY_MARKER, ignoreCase = true)) {
+                    UpdatePolicy.MANDATORY_SECURITY_UPDATE
+                } else {
+                    UpdatePolicy.OPTIONAL
+                }
                 ReleaseCandidate(
                     version = version,
                     update = AvailableUpdate(
@@ -320,9 +357,8 @@ private fun installableReleaseCandidates(
                         apkName = apkName,
                         apkSizeBytes = apk.sizeBytes,
                         sha256Digest = apk.sha256Digest,
-                        releaseNotes = release.optString("body")
-                            .trim()
-                            .take(MAX_RELEASE_NOTES_CHARS),
+                        releaseNotes = body.take(MAX_RELEASE_NOTES_CHARS),
+                        policy = policy,
                         releaseAssets = releaseAssets,
                     ),
                 )
@@ -335,6 +371,9 @@ private fun currentVersionAllowsPrereleases(currentVersion: String): Boolean =
         .getOrDefault(false)
 
 private val SHA256 = Regex("""[a-fA-F0-9]{64}""")
+// M-11: JAWNY marker w opisie wydania oznaczający aktualizację wymaganą (bezpieczeństwa). Tylko on włącza
+// tryb wymagany — bez niego każda nowsza wersja jest aktualizacją OPCJONALNĄ (żadnych fałszywych alarmów).
+private const val MANDATORY_MARKER = "[security-mandatory]"
 private const val MAX_VERSION_CHARS = 100
 private const val MAX_ASSET_NAME_CHARS = 200
 private const val MAX_RELEASE_NOTES_CHARS = 20_000
@@ -363,6 +402,11 @@ internal fun requireSafeGitHubReleaseUrl(value: String, repository: String): Str
         "GitHub zwrócił niebezpieczny adres wydania"
     }
     val expectedPrefix = "/${repository.trim().trim('/')}/"
+    // J-11c: „..” (także zakodowane %2e) po normalizacji przez OkHttp mogłoby wyjść poza katalog repozytorium
+    val rawPath = uri.rawPath.orEmpty()
+    require(".." !in uri.path.orEmpty() && !rawPath.contains("%2e", ignoreCase = true)) {
+        "Adres wydania zawiera niedozwoloną ścieżkę"
+    }
     require(uri.path.startsWith(expectedPrefix, ignoreCase = true)) {
         "Adres wydania nie należy do skonfigurowanego repozytorium"
     }

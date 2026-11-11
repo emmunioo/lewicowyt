@@ -4,6 +4,7 @@ import android.app.PendingIntent
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.content.IntentSender
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.widget.Toast
@@ -20,8 +21,6 @@ internal enum class YouTubeLinkRoute {
     SYSTEM,
     CHOOSER,
     YOUTUBE,
-    ALTERNATIVE_YOUTUBE,
-    NEWPIPE,
     BROWSER,
     OTHER_APP,
     NONE,
@@ -34,10 +33,7 @@ data class ExternalAppOption(
 
 internal data class YouTubeLinkAvailability(
     val system: Boolean,
-    val youtube: Boolean,
-    val newPipe: Boolean,
     val browserPackage: String?,
-    val alternativeYouTubePackages: List<String> = emptyList(),
 )
 
 internal data class YouTubeLinkPlan(
@@ -67,27 +63,17 @@ internal fun planYouTubeLinkOpen(
             fallbackReason = DiagnosticReasonCode.NO_LINK_HANDLER,
         )
     }
-    YouTubeLinkTarget.YOUTUBE -> preferredApplicationPlan(
-        available = availability.youtube,
-        route = YouTubeLinkRoute.YOUTUBE,
-        packageName = YOUTUBE_PACKAGE,
-        systemAvailable = availability.system,
-    )
-    YouTubeLinkTarget.ALTERNATIVE_YOUTUBE -> {
-        val packageName = availability.alternativeYouTubePackages.firstOrNull()
-        preferredApplicationPlan(
-            available = packageName != null,
-            route = YouTubeLinkRoute.ALTERNATIVE_YOUTUBE,
-            packageName = packageName.orEmpty(),
-            systemAvailable = availability.system,
+    // „YouTube" nie wymusza żadnej konkretnej apki – zwykły ACTION_VIEW, więc
+    // link idzie tam, gdzie Android kieruje linki YouTube (cokolwiek user ustawił
+    // jako domyślny handler)
+    YouTubeLinkTarget.YOUTUBE -> if (availability.system) {
+        YouTubeLinkPlan(YouTubeLinkRoute.SYSTEM)
+    } else {
+        YouTubeLinkPlan(
+            YouTubeLinkRoute.NONE,
+            fallbackReason = DiagnosticReasonCode.NO_LINK_HANDLER,
         )
     }
-    YouTubeLinkTarget.NEWPIPE -> preferredApplicationPlan(
-        available = availability.newPipe,
-        route = YouTubeLinkRoute.NEWPIPE,
-        packageName = NEWPIPE_PACKAGE,
-        systemAvailable = availability.system,
-    )
     YouTubeLinkTarget.BROWSER -> when {
         availability.browserPackage != null -> YouTubeLinkPlan(
             route = YouTubeLinkRoute.BROWSER,
@@ -117,23 +103,6 @@ internal fun planYouTubeLinkOpen(
     }
 }
 
-private fun preferredApplicationPlan(
-    available: Boolean,
-    route: YouTubeLinkRoute,
-    packageName: String,
-    systemAvailable: Boolean,
-): YouTubeLinkPlan = when {
-    available -> YouTubeLinkPlan(route, packageName)
-    systemAvailable -> YouTubeLinkPlan(
-        YouTubeLinkRoute.SYSTEM,
-        fallbackReason = DiagnosticReasonCode.APP_NOT_AVAILABLE,
-    )
-    else -> YouTubeLinkPlan(
-        YouTubeLinkRoute.NONE,
-        fallbackReason = DiagnosticReasonCode.NO_LINK_HANDLER,
-    )
-}
-
 class YouTubeLinkLauncher(context: Context) {
     private val appContext = context.applicationContext
     private val packageManager = appContext.packageManager
@@ -153,17 +122,11 @@ class YouTubeLinkLauncher(context: Context) {
         val systemIntent = viewIntent(uri)
         val browserPackage = findBrowserPackage(uri)
         val availability = YouTubeLinkAvailability(
-            // Nie blokujemy zwykłego ACTION_VIEW wynikiem resolveActivity().
-            // Android może znać domyślny klient YouTube (np. ReVanced), którego
-            // PackageManager nie ujawnia aplikacji przed faktycznym uruchomieniem.
+            // nie blokujemy ACTION_VIEW wynikiem resolveActivity() – Android może
+            // znać domyślny handler linku YT, którego PackageManager nie zdradza
+            // przed faktycznym odpaleniem
             system = true,
-            youtube = canHandle(viewIntent(uri, YOUTUBE_PACKAGE)),
-            newPipe = canHandle(viewIntent(uri, NEWPIPE_PACKAGE)),
             browserPackage = browserPackage,
-            alternativeYouTubePackages = findAlternativeYouTubePackages(
-                youtubeUri = uri,
-                browserPackage = browserPackage,
-            ),
         )
         val plan = planYouTubeLinkOpen(target, availability, otherAppPackage)
         if (plan.route == YouTubeLinkRoute.NONE) {
@@ -187,11 +150,39 @@ class YouTubeLinkLauncher(context: Context) {
         }
     }
 
+    /**
+     * Otwiera DOWOLNY bezpieczny link https wg wybranej preferencji (target + opcjonalny pakiet). Ta sama
+     * logika co [open], ale bez ograniczenia do hostów YouTube — dla platform deklarowanych przez serwery
+     * społeczności (twitter/twitch/…). Target YOUTUBE traktujemy jak SYSTEM (brak wymuszania apki).
+     */
+    fun openExternal(
+        url: String,
+        target: YouTubeLinkTarget,
+        otherAppPackage: String? = null,
+    ): Boolean {
+        val uri = url.takeIf(::isSafeExternalHttpsUrl)?.let(Uri::parse)
+        if (uri == null) { showNoHandler(); return false }
+        val systemIntent = viewIntent(uri)
+        val availability = YouTubeLinkAvailability(system = true, browserPackage = findBrowserPackage(uri))
+        val plan = planYouTubeLinkOpen(target, availability, otherAppPackage)
+        if (plan.route == YouTubeLinkRoute.NONE) { showNoHandler(); return false }
+        return try {
+            // R-12: nie zapamiętujemy wyboru z choosera dla linków platform społeczności
+            start(buildIntent(plan, uri, availability, rememberChoice = false)); true
+        } catch (_: ActivityNotFoundException) {
+            handleLaunchFailure(target, systemIntent, plan.route)
+        } catch (_: SecurityException) {
+            handleLaunchFailure(target, systemIntent, plan.route)
+        }
+    }
+
     fun launchableApplications(): List<ExternalAppOption> {
         val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        // A-44: filtry launchera zwykle NIE mają CATEGORY_DEFAULT, więc MATCH_DEFAULT_ONLY zwracał prawie pustą
+        // listę „Inna aplikacja". Flaga 0 = wszystkie aktywności MAIN+LAUNCHER (widoczne dzięki <queries>).
         return packageManager.queryIntentActivities(
             launcherIntent,
-            PackageManager.MATCH_DEFAULT_ONLY,
+            0,
         ).mapNotNull { info ->
             val packageName = info.activityInfo?.packageName
                 ?.takeIf(::isSafeAndroidPackageName)
@@ -267,26 +258,24 @@ class YouTubeLinkLauncher(context: Context) {
         plan: YouTubeLinkPlan,
         uri: Uri,
         availability: YouTubeLinkAvailability,
+        // R-12: czy zapamiętać wybór z choosera jako domyślną apkę do linków YouTube. TYLKO dla linków
+        // YouTube (open). Dla platform społeczności (openExternal: twitter/twitch/…) = false — inaczej wybór
+        // apki do np. Twitcha przestawiałby aplikację do linków YouTube (setOtherYouTubeAppPackage).
+        rememberChoice: Boolean = true,
     ): Intent = when (plan.route) {
         YouTubeLinkRoute.SYSTEM -> viewIntent(uri)
         YouTubeLinkRoute.CHOOSER -> createAlwaysAskChooser(
             targetIntent = viewIntent(uri),
             initialIntents = buildList {
-                // Android potrafi ukryć te aplikacje za zweryfikowanym deep linkiem YouTube.
-                // Android 10+ pokazuje najwyżej dwie jawnie dodane pozycje,
-                // dlatego najpierw gwarantujemy przeglądarkę i ReVanced.
+                // przeglądarkę dokładamy jawnie, bo Android potrafi ją schować za
+                // zweryfikowanym deep linkiem YT. reszta choosera to po prostu to,
+                // co user ma zainstalowane – niczego nie podpowiadamy
                 availability.browserPackage?.let { add(viewIntent(uri, it)) }
-                availability.alternativeYouTubePackages.firstOrNull()?.let { packageName ->
-                    add(viewIntent(uri, packageName))
-                }
-                if (size < MAX_CHOOSER_INITIAL_INTENTS && availability.newPipe) {
-                    add(viewIntent(uri, NEWPIPE_PACKAGE))
-                }
             }.distinctBy { it.`package` }.take(MAX_CHOOSER_INITIAL_INTENTS),
+            // system zgłasza wybraną apkę do receivera, a ten ją zapamiętuje — tylko dla linków YouTube
+            chosenComponentSender = if (rememberChoice) rememberChoiceSender() else null,
         )
         YouTubeLinkRoute.YOUTUBE,
-        YouTubeLinkRoute.ALTERNATIVE_YOUTUBE,
-        YouTubeLinkRoute.NEWPIPE,
         YouTubeLinkRoute.BROWSER,
         YouTubeLinkRoute.OTHER_APP,
         -> viewIntent(uri, requireNotNull(plan.packageName))
@@ -298,13 +287,23 @@ class YouTubeLinkLauncher(context: Context) {
         appContext.startActivity(intent)
     }
 
+    // IntentSender, którym chooser zgłasza wybraną apkę do ChosenYouTubeAppReceiver
+    // (zapamiętanie). FLAG_MUTABLE, bo system dopisuje EXTRA_CHOSEN_COMPONENT;
+    // komponent jest jawny i nieeksportowany, więc mutowalność nic nie otwiera
+    private fun rememberChoiceSender(): IntentSender =
+        PendingIntent.getBroadcast(
+            appContext,
+            CHOSEN_APP_REQUEST_CODE,
+            Intent(appContext, ChosenYouTubeAppReceiver::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
+        ).intentSender
+
     private fun canHandle(intent: Intent): Boolean =
         packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY) != null
 
     /**
-     * Kandydatów na przeglądarkę szukamy neutralnym adresem HTTPS, dzięki czemu
-     * aplikacje obsługujące wyłącznie deep linki YouTube nie są kandydatami.
-     * Nie zapisujemy ani nie logujemy otrzymanej listy pakietów.
+     * przeglądarki szukamy neutralnym adresem HTTPS, żeby apki obsługujące tylko
+     * deep linki YT nie wchodziły w grę. listy pakietów nie zapisujemy ani nie logujemy.
      */
     private fun findBrowserPackage(youtubeUri: Uri): String? {
         val neutralIntent = viewIntent(Uri.parse(BROWSER_PROBE_URL))
@@ -316,53 +315,6 @@ class YouTubeLinkLauncher(context: Context) {
         )?.activityInfo?.packageName
             ?.takeUnless { it == "android" }
         return defaultPackage?.takeIf { it in candidates } ?: candidates.singleOrNull()
-    }
-
-    /**
-     * Wykrywa aplikacje odtwarzające standardowe linki YouTube bez przywiązywania
-     * się wyłącznie do jednej nazwy pakietu. Dzięki temu działa oficjalny
-     * ReVanced, RVX i inne zgodne klienty, również z własną nazwą pakietu.
-     */
-    private fun findAlternativeYouTubePackages(
-        youtubeUri: Uri,
-        browserPackage: String?,
-    ): List<String> {
-        val excluded = buildSet {
-            add(YOUTUBE_PACKAGE)
-            add(NEWPIPE_PACKAGE)
-            add(appContext.packageName)
-            browserPackage?.let(::add)
-            addAll(findBrowserPackages())
-        }
-        val candidates = (
-            packageManager.queryIntentActivities(
-                viewIntent(youtubeUri),
-                PackageManager.MATCH_DEFAULT_ONLY,
-            ).mapNotNull { it.activityInfo?.packageName } +
-                // Android 12+ może pominąć niewybrany handler zweryfikowanej
-                // domeny w queryIntentActivities(), mimo że jawny Intent do
-                // tego pakietu działa. Znane klienty sprawdzamy więc osobno.
-                KNOWN_ALTERNATIVE_YOUTUBE_PACKAGES.filter { packageName ->
-                    canHandle(viewIntent(youtubeUri, packageName))
-                }
-            ).distinct()
-            .filterNot(excluded::contains)
-
-        val systemDefault = packageManager.resolveActivity(
-            viewIntent(youtubeUri),
-            PackageManager.MATCH_DEFAULT_ONLY,
-        )?.activityInfo?.packageName
-            ?.takeUnless { it == "android" }
-
-        return candidates.sortedWith(
-            compareBy<String> {
-                when {
-                    it == systemDefault -> 0
-                    it in KNOWN_ALTERNATIVE_YOUTUBE_PACKAGES -> 1
-                    else -> 2
-                }
-            }.thenBy { it },
-        )
     }
 
     private fun findBrowserPackages(): List<String> =
@@ -401,18 +353,22 @@ class YouTubeLinkLauncher(context: Context) {
 }
 
 /**
- * Android może domyślnie pominąć chooser, gdy znajdzie tylko jednego kandydata.
- * Wyłączenie automatycznego uruchomienia sprawia, że tryb "Pytaj za każdym razem"
- * rzeczywiście pokazuje systemowy ekran wyboru także w takim przypadku.
+ * przy jednym kandydacie Android lubi pominąć chooser. wyłączenie auto-launch
+ * sprawia, że "Pytaj za każdym razem" faktycznie pokazuje ekran wyboru i wtedy.
  */
 internal fun createAlwaysAskChooser(
     targetIntent: Intent,
     initialIntents: List<Intent> = emptyList(),
+    chosenComponentSender: IntentSender? = null,
 ): Intent =
     Intent.createChooser(targetIntent, "Otwórz link w").apply {
         putExtra(Intent.EXTRA_AUTO_LAUNCH_SINGLE_CHOICE, false)
         if (initialIntents.isNotEmpty()) {
             putExtra(Intent.EXTRA_INITIAL_INTENTS, initialIntents.toTypedArray())
+        }
+        // po wyborze system zgłasza komponent tym senderem (zapamiętanie)
+        chosenComponentSender?.let {
+            putExtra(Intent.EXTRA_CHOSEN_COMPONENT_INTENT_SENDER, it)
         }
     }
 
@@ -425,11 +381,16 @@ internal fun isSafeYouTubeExternalUrl(value: String): Boolean = runCatching {
         (host == "youtu.be" || host == "youtube.com" || host?.endsWith(".youtube.com") == true)
 }.getOrDefault(false)
 
-private const val YOUTUBE_PACKAGE = "com.google.android.youtube"
-private const val NEWPIPE_PACKAGE = "org.schabi.newpipe"
-private val KNOWN_ALTERNATIVE_YOUTUBE_PACKAGES = setOf(
-    "app.revanced.android.youtube",
-    "app.rvx.android.youtube",
-)
+/** dowolny bezpieczny link zewnętrzny: https, bez userinfo, host obecny. D-16: dowolny poprawny port (np. :2137,
+ *  domyślny port serwera społeczności) — TLS chroni tak samo; wcześniej takie linki były po cichu ignorowane. */
+internal fun isSafeExternalHttpsUrl(value: String): Boolean = runCatching {
+    val uri = URI(value)
+    uri.scheme.equals("https", ignoreCase = true) &&
+        uri.userInfo == null &&
+        (uri.port == -1 || uri.port in 1..65535) &&
+        !uri.host.isNullOrBlank()
+}.getOrDefault(false)
+
 private const val BROWSER_PROBE_URL = "https://example.com/"
 private const val MAX_CHOOSER_INITIAL_INTENTS = 2
+private const val CHOSEN_APP_REQUEST_CODE = 0x59_54_43

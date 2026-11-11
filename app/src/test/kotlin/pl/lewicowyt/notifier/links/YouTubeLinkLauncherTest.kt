@@ -18,6 +18,9 @@ class YouTubeLinkLauncherTest {
             assertEquals(target, parseYouTubeLinkTarget(target.name))
         }
         assertEquals(YouTubeLinkTarget.SYSTEM_DEFAULT, parseYouTubeLinkTarget("invalid"))
+        // Usunięte presety (dawne ReVanced/NewPipe) degradują do domyślnego.
+        assertEquals(YouTubeLinkTarget.SYSTEM_DEFAULT, parseYouTubeLinkTarget("ALTERNATIVE_YOUTUBE"))
+        assertEquals(YouTubeLinkTarget.SYSTEM_DEFAULT, parseYouTubeLinkTarget("NEWPIPE"))
     }
 
     @Test
@@ -37,54 +40,19 @@ class YouTubeLinkLauncherTest {
     }
 
     @Test
-    fun `youtube is preferred when available and falls back when missing`() {
+    fun `youtube option uses ordinary action view so android default handler wins`() {
+        // „YouTube" nie wymusza oficjalnej aplikacji — otwiera link zwykłym
+        // ACTION_VIEW, więc trafia tam, gdzie Android kieruje linki YouTube.
         assertEquals(
-            YouTubeLinkRoute.YOUTUBE,
-            planYouTubeLinkOpen(
-                YouTubeLinkTarget.YOUTUBE,
-                available(youtube = true),
-            ).route,
+            YouTubeLinkRoute.SYSTEM,
+            planYouTubeLinkOpen(YouTubeLinkTarget.YOUTUBE, available()).route,
         )
         val fallback = planYouTubeLinkOpen(
             YouTubeLinkTarget.YOUTUBE,
-            available(youtube = false),
+            available(system = false),
         )
-        assertEquals(YouTubeLinkRoute.SYSTEM, fallback.route)
-        assertEquals(DiagnosticReasonCode.APP_NOT_AVAILABLE, fallback.fallbackReason)
-    }
-
-    @Test
-    fun `newpipe is preferred when available and falls back when missing`() {
-        assertEquals(
-            YouTubeLinkRoute.NEWPIPE,
-            planYouTubeLinkOpen(
-                YouTubeLinkTarget.NEWPIPE,
-                available(newPipe = true),
-            ).route,
-        )
-        val fallback = planYouTubeLinkOpen(
-            YouTubeLinkTarget.NEWPIPE,
-            available(newPipe = false),
-        )
-        assertEquals(YouTubeLinkRoute.SYSTEM, fallback.route)
-        assertEquals(DiagnosticReasonCode.APP_NOT_AVAILABLE, fallback.fallbackReason)
-    }
-
-    @Test
-    fun `alternative youtube client prefers detected package and falls back when missing`() {
-        val detected = planYouTubeLinkOpen(
-            YouTubeLinkTarget.ALTERNATIVE_YOUTUBE,
-            available(alternativePackages = listOf("app.revanced.android.youtube")),
-        )
-        assertEquals(YouTubeLinkRoute.ALTERNATIVE_YOUTUBE, detected.route)
-        assertEquals("app.revanced.android.youtube", detected.packageName)
-
-        val fallback = planYouTubeLinkOpen(
-            YouTubeLinkTarget.ALTERNATIVE_YOUTUBE,
-            available(alternativePackages = emptyList()),
-        )
-        assertEquals(YouTubeLinkRoute.SYSTEM, fallback.route)
-        assertEquals(DiagnosticReasonCode.APP_NOT_AVAILABLE, fallback.fallbackReason)
+        assertEquals(YouTubeLinkRoute.NONE, fallback.route)
+        assertEquals(DiagnosticReasonCode.NO_LINK_HANDLER, fallback.fallbackReason)
     }
 
     @Test
@@ -125,10 +93,10 @@ class YouTubeLinkLauncherTest {
     }
 
     @Test
-    fun `no application supporting link returns none`() {
+    fun `no link handler returns none`() {
         val result = planYouTubeLinkOpen(
-            YouTubeLinkTarget.NEWPIPE,
-            available(system = false, newPipe = false),
+            YouTubeLinkTarget.SYSTEM_DEFAULT,
+            available(system = false),
         )
         assertEquals(YouTubeLinkRoute.NONE, result.route)
         assertEquals(DiagnosticReasonCode.NO_LINK_HANDLER, result.fallbackReason)
@@ -149,15 +117,18 @@ class YouTubeLinkLauncherTest {
 
     private fun available(
         system: Boolean = true,
-        youtube: Boolean = false,
-        newPipe: Boolean = false,
         browserPackage: String? = null,
-        alternativePackages: List<String> = emptyList(),
     ) = YouTubeLinkAvailability(
-        system,
-        youtube,
-        newPipe,
-        browserPackage,
-        alternativePackages,
+        system = system,
+        browserPackage = browserPackage,
     )
+
+    @Test
+    fun `D-16 https links with custom port are allowed, unsafe ones are not`() {
+        assertTrue(isSafeExternalHttpsUrl("https://serwer.example:2137/artykul"))
+        assertTrue(isSafeExternalHttpsUrl("https://example.org/x"))
+        assertFalse(isSafeExternalHttpsUrl("http://example.org/x"))
+        assertFalse(isSafeExternalHttpsUrl("https://user:pass@example.org/x"))
+        assertFalse(isSafeExternalHttpsUrl("https:///brak-hosta"))
+    }
 }

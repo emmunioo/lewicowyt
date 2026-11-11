@@ -83,31 +83,26 @@ Nie wolno generować publicznej delty z APK debug ani ze wstępnego APK do
 analizy. Gdy finalny podpisany wariant nowego wydania jest gotowy, generator
 należy uruchomić względem finalnego, publicznego APK wersji bazowej.
 
-## Awaryjne wycofanie wydania
+## Aktualizacja obowiązkowa i wycofanie wydania
 
-Jeśli na liście GitHub Releases nie ma wydania z APK odpowiadającego
-zainstalowanemu `versionName`, aplikacja uznaje wersję za wycofaną. Wtedy:
+**1.9-beta i nowsze:** aktualizacja jest obowiązkowa (trwałe powiadomienie, pobranie niezależnie od
+przełącznika automatycznych aktualizacji) **tylko**, gdy opis wydania zawiera znacznik
+`[security-mandatory]`. Usunięcie wydania z listy NIE jest już sygnałem wycofania. Nie wpisuj znacznika
+do opisu, jeśli aktualizacja nie jest naprawdę obowiązkowa.
 
-1. nowsze dostępne wydanie staje się obowiązkową aktualizacją bezpieczeństwa;
-2. gdy nowszego nie ma, wybierane jest najwyższe starsze wydanie;
-3. pobieranie odbywa się niezależnie od przełącznika automatycznych aktualizacji;
-4. użytkownik otrzymuje trwałe powiadomienie i nadal potwierdza instalację
-   w systemie.
+**1.8-beta i starsze (wciąż zainstalowane u użytkowników):** działa stary mechanizm — jeśli na liście
+GitHub Releases nie ma wydania z APK odpowiadającego zainstalowanemu `versionName`, aplikacja uznaje
+wersję za wycofaną i każe zaktualizować się do nowszej (albo najwyższej starszej). Dlatego:
 
-Nie wolno po prostu wskazać dawnego APK z niższym `versionCode`, ponieważ Android
-zablokuje downgrade. Aby wycofać przykładową wersję `1.5-beta` z
-`versionCode = 15`:
+- **nie usuwaj i nie zamieniaj w szkic wydania `v1.8-beta`** (ani starszych) w celu porządkowania listy —
+  wszyscy użytkownicy tej wersji dostaliby trwałe „Wymagana aktualizacja bezpieczeństwa";
+- aktualizator 1.8 wybiera **pierwszy alfabetycznie** plik `.apk` z wydania (nie zna ABI) — patrz
+  zasady nazewnictwa w *Publikowanie wersji 1.9-beta*.
 
-1. przywróć kod ostatniej bezpiecznej wersji;
-2. ustaw nowy `versionName`, np. `1.4-security-rollback.1`;
-3. ustaw `versionCode` większy od 15, np. `16`;
-4. podpisz APK tym samym kluczem;
-5. opublikuj go jako osobne wydanie z identycznym tagiem
-   `v1.4-security-rollback.1`;
-6. dopiero po sprawdzeniu awaryjnego APK usuń wydanie `v1.5-beta`.
-
-Usunięcie wydania jest zdalnym sygnałem bezpieczeństwa, dlatego nie należy robić
-tego tylko w celu porządkowania listy Releases.
+Wycofanie niebezpiecznej wersji w 1.9+: nie wskazuj dawnego APK z niższym `versionCode` (Android zablokuje
+downgrade). Przywróć kod ostatniej bezpiecznej wersji, nadaj nowy `versionName` (np.
+`1.9-security-rollback.1`) i wyższy `versionCode`, podpisz tym samym kluczem i opublikuj z tagiem
+`v1.9-security-rollback.1` oraz znacznikiem `[security-mandatory]` w opisie.
 
 ## Pierwsze wysłanie kodu
 
@@ -180,8 +175,8 @@ oraz w osobnej, zaszyfrowanej kopii awaryjnej.
 Plik `app/build.gradle.kts` powinien zawierać:
 
 ```kotlin
-versionCode = 19
-versionName = "1.8-beta"
+versionCode = 20
+versionName = "1.9-beta"
 ```
 
 Każda kolejna publikacja musi zwiększyć `versionCode`, nawet jeśli zmienia się
@@ -192,7 +187,10 @@ wyłącznie przyrostek wersji.
 1. Wybierz `Build → Generate Signed App Bundle or APK`.
 2. Zaznacz `APK`.
 3. Wskaż właściwy plik klucza, alias i oba hasła.
-4. Wybierz wariant `release`.
+4. Wybierz warianty `…Release` (`arm64Release`, `armv7Release`, `x64Release`, `universalRelease`).
+   **Nigdy nie podpisuj kluczem produkcyjnym wariantu debug** — debug ma ten sam `applicationId` i
+   `versionCode`, więc zainstalowałby się jako aktualizacja wersji publicznej, a `debuggable=true` daje
+   przez `adb run-as` dostęp do prywatnych danych (klucze E2E, baza). Debug APK trzymaj poza folderami wydań.
 5. Włącz podpis V2; V1 może pozostać włączony jako dodatkowa zgodność.
 6. Zakończ kreator i zachowaj wskazaną ścieżkę do APK.
 
@@ -200,18 +198,46 @@ Standardowe artefakty Gradle trafiają do sąsiedniego katalogu
 `../KOMPILACJA/app/outputs/`. Kreator podpisanego APK może zapisać końcowy plik
 w dowolnym folderze wskazanym w polu `Destination Folder`.
 
+Wszystkie cztery warianty naraz: w kreatorze w kroku wyboru wariantów zaznacz je jednocześnie
+(`arm64Release`, `armv7Release`, `x64Release`, `universalRelease`) — kreator zbuduje i podpisze każdy
+w jednym przebiegu. Do samych niepodpisanych artefaktów kontrolnych służy lokalna konfiguracja uruchomienia
+„Wszystkie APK (release)" (`.idea/runConfigurations`, wybierz ją na liście obok przycisku ▶).
+
 Projekt celowo nie przechowuje danych podpisu w Gradle ani GitHub Actions.
 Wygenerowany przez CI wariant release jest niepodpisanym artefaktem kontrolnym,
 nie plikiem przeznaczonym do publikacji.
 
 ## Kontrola APK przed publikacją
 
-W Android Studio użyj `Build → Analyze APK` i sprawdź:
+Najpierw upewnij się, że APK powstał **z bieżących źródeł** (data pliku nowsza niż ostatnie zmiany w
+`app/src`) i że w folderze, z którego wgrywasz, nie ma starszych buildów ani debug APK.
 
-- nazwę pakietu `pl.lewicowyt.notifier`;
-- `versionName` równe `1.8-beta`;
-- `versionCode` równe `19`;
-- brak klucza YouTube API, haseł i pliku klucza podpisu.
+Dla każdego z czterech plików (narzędzia z Android SDK `build-tools/36.0.0`):
+
+```powershell
+aapt2 dump badging .\lewicowYT-1.9-beta-arm64.apk | Select-String "package|debuggable|native-code"
+```
+
+Oczekiwane: `pl.lewicowyt.notifier`, `versionCode='20'`, `versionName='1.9-beta'`, **brak**
+`application-debuggable`.
+
+```powershell
+apksigner verify --verbose --print-certs .\lewicowYT-1.9-beta-arm64.apk
+```
+
+Oczekiwane: podpis v2 poprawny, certyfikat SHA-256
+`2d242f3390a37913459085f86edf96484f2ccc3866e327325d2915c74a8e980a` (ten sam co 1.7-beta i 1.8-beta —
+inny certyfikat = użytkownicy nie zaktualizują aplikacji bez odinstalowania).
+
+```powershell
+zipalign -c -P 16 -v 4 .\lewicowYT-1.9-beta-arm64.apk
+```
+
+Oczekiwane: `Verification successful` (wyrównanie 16 KB, wymagane przez Androida 15+).
+
+```powershell
+Get-FileHash -Algorithm SHA256 .\lewicowYT-1.9-beta-arm64.apk
+```
 
 Jeżeli przekazujesz APK do MobSF lub innego skanera, wybierz podpisany wariant
 `release`. Raport, którego pierwsza strona podaje `app-debug.apk`, certyfikat
@@ -219,52 +245,48 @@ Jeżeli przekazujesz APK do MobSF lub innego skanera, wybierz podpisany wariant
 publicznego wydania i będzie poprawnie zgłaszał narzędzia debugowania jako
 problemy wysokiego poziomu.
 
-Podpis można zweryfikować narzędziem z Android SDK:
-
-```powershell
-apksigner verify --verbose --print-certs .\lewicowYT-1.8-beta.apk
-```
-
-Zapisz również sumę kontrolną:
-
-```powershell
-Get-FileHash -Algorithm SHA256 .\lewicowYT-1.8-beta.apk
-```
-
-## Publikowanie wersji 1.8-beta
+## Publikowanie wersji 1.9-beta
 
 1. Poczekaj, aż kontrole GitHub Actions zakończą się powodzeniem.
 2. W repozytorium otwórz `Releases → Draft a new release`.
-3. Utwórz tag:
-
-```text
-v1.8-beta
-```
-
+3. Utwórz tag `v1.9-beta` (`versionName` musi być równy tagowi bez `v`).
 4. Zaznacz wydanie jako **pre-release**.
-5. Zawsze dołącz finalny podpisany APK, np.:
+5. Dołącz cztery podpisane APK o dokładnie takich nazwach:
 
 ```text
-lewicowYT-1.8-beta.apk
+lewicowYT-1.9-beta-all-universal.apk
+lewicowYT-1.9-beta-arm64.apk
+lewicowYT-1.9-beta-armv7.apk
+lewicowYT-1.9-beta-x64.apk
 ```
 
-6. Opcjonalnie wygeneruj i dołącz do tego samego wydania:
+   **Plik uniwersalny musi być pierwszy alfabetycznie** (stąd `all-`): aktualizator 1.8-beta bierze
+   pierwszy `.apk` z wydania bez sprawdzania ABI, więc przy nazwie `…-universal.apk` dostałby
+   `…-arm64.apk`, którego telefony 32-bitowe i x86_64 nie zainstalują. Nazwa nie może zawierać
+   `arm64`, `aarch64`, `armv7`, `armeabi`, `x64` ani `x86` — aktualizator 1.9 uznaje wtedy plik za
+   uniwersalny, a skrypt strony rozpoznaje go po końcówce `-universal.apk`.
+6. Opcjonalnie dołącz aktualizacje różnicowe: każdy APK ma WŁASNY manifest
+   `<nazwa APK bez .apk>-update.json` (np. `lewicowYT-1.9-beta-arm64-update.json`) i własną poprawkę
+   xdelta. Wspólny `lewicowYT-update.json` (czytany przez 1.8-beta) może opisywać tylko plik uniwersalny —
+   1.8 wymaga, by `target.apkName` był równy nazwie wybranego APK. Jeżeli poprawka nie daje co najmniej
+   20% oszczędności albo generator zgłosi błąd, opublikuj wyłącznie pełne APK. Nie twórz ręcznie manifestu.
+7. **Przed publikacją** sprawdź kolejność plików w szkicu — pierwszy wpis kończący się na `.apk` musi być
+   plikiem uniwersalnym:
 
-```text
-lewicowYT-1.7-beta-to-1.8-beta.xdelta
-lewicowYT-update.json
+```powershell
+gh api repos/emmunioo/lewicowyt/releases --jq '.[] | select(.tag_name=="v1.9-beta") | [.assets[].name]'
 ```
 
-Jeżeli poprawka nie daje co najmniej 20% oszczędności albo generator zgłosi
-błąd, opublikuj wyłącznie pełny APK. Nie twórz ręcznie manifestu.
+8. W opisie podaj SHA-256 czterech plików, najważniejsze zmiany i to, że 1.9 nie obsługuje już
+   procesorów x86 32-bit. Bez `[security-mandatory]`, jeśli aktualizacja nie jest obowiązkowa.
+9. Opublikuj wydanie. Zaktualizuj i wypchnij stronę `lewicowYT-pages` (linki, wersja, sumy).
+10. Sprawdź ścieżkę 1.8 → 1.9: na emulatorze x86_64 zainstaluj `lewicowYT-1.8-beta.apk` →
+    `Sprawdź aktualizacje` → ma się pobrać i zainstalować plik uniwersalny.
 
-7. W opisie podaj SHA-256 APK oraz najważniejsze znane ograniczenia.
-8. Opublikuj wydanie i sprawdź w aplikacji przycisk `Sprawdź aktualizacje`.
+Historyczne artefakty starszych wersji i buildy sprzed ostatnich zmian w kodzie nie mogą być
+źródłem SHA-256 ani raportów dla nowego APK 1.9-beta.
 
-Historyczne artefakty 1.5-beta, 1.6-beta, 1.6.1-beta i 1.7-beta nie mogą być
-źródłem SHA-256 ani raportów dla nowego APK 1.8-beta.
-
-### Zakres zmian 1.8-beta
+### Zakres zmian 1.8-beta (historyczne, już opublikowane)
 
 Wydanie skupione głównie na wydajności, plus dwóch nowych twórców:
 

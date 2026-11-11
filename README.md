@@ -1,15 +1,17 @@
-# lewicowYT 1.8-beta
+# lewicowYT 1.9-beta
 
 Natywna aplikacja dla Androida do lokalnego obserwowania wybranych kanałów
 YouTube. Porządkuje filmy, Shorty i transmisje, zachowuje historię oraz informuje
-o nowych publikacjach bez konta w aplikacji, Firebase i własnego serwera.
+o nowych publikacjach bez konta w aplikacji.
 
-Wersja 1.8-beta to wydanie skupione na wydajności: filtrowanie i sortowanie
-Historii liczy się poza wątkiem interfejsu, odświeżanie historii nie
-dekompresuje już zbędnie pełnych opisów, a pula materiałów trzymana w pamięci
-rośnie wraz z przewijaniem zamiast ładować od razu tysiące pozycji. Miniatury
-pobierają się w rozmiarze dopasowanym do wyświetlanego kafelka, a konwersja
-obrazów w tle zużywa mniej CPU i baterii.
+Wersja 1.9-beta przenosi wykrywanie nowych materiałów na lekki serwer w chmurze:
+zamiast cyklicznie odpytywać YouTube w tle, aplikacja odbiera powiadomienie push
+(Firebase Cloud Messaging) w momencie publikacji. Serwer wysyła wyłącznie
+identyfikator kanału i filmu — to telefon pobiera tytuł oraz miniaturę i sam
+decyduje, czy i co pokazać, na podstawie wybranych twórców i rodzajów materiałów.
+Dzięki temu znika potrzeba dokładnych alarmów, usługi pierwszoplanowej i
+ustawienia baterii „Bez ograniczeń”, a zużycie energii wyraźnie spada. Historia,
+Ulubione, wyszukiwarka i ustawienia pozostają w całości lokalne.
 
 > lewicowYT jest niezależnym, nieoficjalnym projektem. Nie jest produktem ani
 > oficjalnym klientem Google lub YouTube i nie jest przez nie wspierany.
@@ -54,26 +56,27 @@ obrazów w tle zużywa mniej CPU i baterii.
 
 ### Powiadomienia i działanie w tle
 
-- szybkie wykrywanie nowych publikacji przez różnicę poprawnych snapshotów
-  YouTube RSS lub przez Data API, jeżeli użytkownik poda klucz;
-- trwały punkt odniesienia dla każdego kanału chroni przed ponownym
-  zgłaszaniem starych materiałów;
+- powiadomienia o nowych materiałach dostarcza lekki serwer w chmurze przez
+  Firebase Cloud Messaging; serwer wykrywa nowe publikacje, sprawdzając publiczne
+  kanały RSS obserwowanych twórców, i przekazuje wyłącznie identyfikator kanału
+  oraz filmu;
+- telefon subskrybuje jeden wspólny temat i filtruje strumień lokalnie: sprawdza,
+  czy dany twórca jest obserwowany i czy jego rodzaj materiału ma się pokazać —
+  serwer nie zna listy obserwowanych twórców żadnego urządzenia;
+- po odebraniu powiadomienia aplikacja sama pobiera tytuł oraz miniaturę i
+  dopisuje materiał do sekcji Powiadomienia i Historii;
+- twórcy oparci na playliście są potwierdzani po stronie telefonu: aplikacja
+  sprawdza, czy film należy do właściwej playlisty, zanim pokaże powiadomienie;
 - do trzech nowych materiałów otrzymuje osobne powiadomienia; większa paczka
   tworzy jedno powiadomienie zbiorcze;
-- każdy wykryty materiał trafia również osobno do sekcji Powiadomienia;
-- dokładne alarmy Androida, kolejka przyszłych terminów, krótki WakeLock i
-  watchdog zwiększają niezawodność przy wygaszonym ekranie;
-- aplikacja wstrzymuje sieć podczas systemowego trybu Nie przeszkadzać i
-  nadrabia zaległe sprawdzenie po jego zakończeniu;
-- pierwsza synchronizacja uruchamia się automatycznie po pierwszym wyborze
-  twórców.
 - zanonimizowana publiczna wersja powiadomienia nie ujawnia tytułu, twórcy ani
-  miniatury na ekranie blokady.
+  miniatury na ekranie blokady;
+- powiadomienia push docierają niezależnie od dokładnych alarmów i ustawienia
+  baterii, dlatego 1.9-beta ich już nie wymaga.
 
-Android nadal może ograniczać pracę aplikacji. Dla największej niezawodności
-należy przyznać dostęp do Alarmów i przypomnień oraz ustawić użycie baterii
-na **Bez ograniczeń**. Interwał 15 minut może zużywać więcej energii,
-szczególnie bez klucza API i przy wielu kanałach.
+Historię odświeżasz przy otwarciu aplikacji oraz ręcznie. Te odświeżenia nadal
+korzystają z YouTube RSS, Web i opcjonalnego Data API, ale nie generują już
+powiadomień systemowych — te dostarcza serwer.
 
 ### Źródła danych
 
@@ -133,8 +136,12 @@ awarii lewicowYT.
 
 ## Prywatność i bezpieczeństwo
 
-- brak konta aplikacji, Firebase, telemetrii i własnego backendu;
-- obserwowani twórcy, historia i ustawienia pozostają lokalnie;
+- brak konta aplikacji i telemetrii; obserwowani twórcy, historia i ustawienia
+  pozostają lokalnie;
+- powiadomienia o nowych materiałach dostarcza serwer push (Firebase Cloud
+  Messaging) przez jeden wspólny temat: dostawca widzi tylko, że urządzenie
+  korzysta z aplikacji, a nie których twórców śledzi; serwer wykrywa publikacje
+  na obserwowanych kanałach i nie zna ustawień ani tożsamości użytkowników;
 - HTTPS oraz opcjonalny fallback DoH AdGuard, jeżeli Android nie ma własnego
   aktywnego Prywatnego DNS;
 - brak dostępu do lokalizacji, kontaktów, mikrofonu i kamery;
@@ -149,8 +156,8 @@ Szczegóły: [SECURITY_AUDIT.md](SECURITY_AUDIT.md),
 
 ## Aktualizacje
 
-Aplikacja sprawdza publiczne GitHub Releases razem z synchronizacją, nie częściej
-niż raz na 2 godziny. APK jest pobierany do prywatnego cache aplikacji. Obsługa
+Aplikacja sprawdza publiczne GitHub Releases przy odświeżeniu Historii, nie
+częściej niż raz na 2 godziny. APK jest pobierany do prywatnego cache aplikacji. Obsługa
 przekierowań GitHuba ma limit kroków i allowlistę hostów HTTPS. Przed otwarciem
 systemowego instalatora aplikacja sprawdza dostępny SHA-256, limit rozmiaru,
 `applicationId`, wersję i zgodność certyfikatu. Android zawsze wymaga końcowego
@@ -171,7 +178,6 @@ manifest publikuje z plików tymczasowych dopiero po pełnej walidacji.
 - Android 8.0 lub nowszy (API 26+);
 - połączenie z internetem;
 - zgoda na powiadomienia na Androidzie 13+;
-- zgoda na Alarmy i przypomnienia dla dokładnego harmonogramu;
 - opcjonalnie darmowy klucz YouTube Data API v3.
 
 ## Budowanie

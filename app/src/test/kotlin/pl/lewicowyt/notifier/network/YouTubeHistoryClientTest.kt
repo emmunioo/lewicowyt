@@ -1,5 +1,6 @@
 package pl.lewicowyt.notifier.network
 
+import okhttp3.OkHttpClient
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -237,7 +238,7 @@ class YouTubeHistoryClientTest {
             title = "Wiedz, że coś się dzieje",
             publishedText = "2 dni temu",
         )
-        val client = YouTubeHistoryClient(HttpTextClient())
+        val client = YouTubeHistoryClient(HttpTextClient(OkHttpClient()))
 
         val videoPage = client.parsePage(
             json = response,
@@ -272,7 +273,7 @@ class YouTubeHistoryClientTest {
             publishedText = "3 tygodnie temu",
         )
 
-        val item = YouTubeHistoryClient(HttpTextClient()).parsePage(
+        val item = YouTubeHistoryClient(HttpTextClient(OkHttpClient())).parsePage(
             json = response,
             tab = YouTubeHistoryTab.VIDEOS,
             apiKey = "test",
@@ -293,7 +294,7 @@ class YouTubeHistoryClientTest {
             publishedText = "2 filmy na playliście",
         )
 
-        val page = YouTubeHistoryClient(HttpTextClient()).parsePage(
+        val page = YouTubeHistoryClient(HttpTextClient(OkHttpClient())).parsePage(
             json = response,
             tab = YouTubeHistoryTab.VIDEOS,
             apiKey = "test",
@@ -307,7 +308,7 @@ class YouTubeHistoryClientTest {
 
     @Test
     fun `playlist lockup is ignored`() {
-        val client = YouTubeHistoryClient(HttpTextClient())
+        val client = YouTubeHistoryClient(HttpTextClient(OkHttpClient()))
         val response = JSONObject(
             """
             {
@@ -389,7 +390,45 @@ class YouTubeHistoryClientTest {
             }
             """.trimIndent(),
         )
-        val page = YouTubeHistoryClient(HttpTextClient()).parsePage(
+        val page = YouTubeHistoryClient(HttpTextClient(OkHttpClient())).parsePage(
+            json = response,
+            tab = YouTubeHistoryTab.SHORTS,
+            apiKey = "test",
+            clientVersion = "test",
+            nowMillis = 1_800_000_000_000L,
+            previousCursorToken = null,
+        )
+
+        assertTrue(page.items.isEmpty())
+        assertEquals(VideoKind.SHORT, page.membershipKinds["Oj0-9Ks6d7k"])
+    }
+
+    @Test
+    fun `G-01 short title that looks like a date does not invent publication time`() {
+        val response = JSONObject(
+            """
+            {
+              "tabRenderer": {
+                "selected": true,
+                "content": {
+                  "shortsLockupViewModel": {
+                    "onTap": {
+                      "innertubeCommand": {
+                        "reelWatchEndpoint": {"videoId":"Oj0-9Ks6d7k"}
+                      }
+                    },
+                    "accessibilityText": "Wczoraj w Sejmie, 3 dni temu, 12 tys. wyświetleń",
+                    "overlayMetadata": {
+                      "primaryText": {"content":"Dzisiaj w Sejmie: 3 dni temu pisałem o tym"},
+                      "secondaryText": {"content":"12 tys. wyświetleń"}
+                    }
+                  }
+                }
+              }
+            }
+            """.trimIndent(),
+        )
+        val page = YouTubeHistoryClient(HttpTextClient(OkHttpClient())).parsePage(
             json = response,
             tab = YouTubeHistoryTab.SHORTS,
             apiKey = "test",
@@ -416,7 +455,7 @@ class YouTubeHistoryClientTest {
             }
             """.trimIndent(),
         )
-        val page = YouTubeHistoryClient(HttpTextClient()).parsePage(
+        val page = YouTubeHistoryClient(HttpTextClient(OkHttpClient())).parsePage(
             json = response,
             tab = YouTubeHistoryTab.STREAMS,
             apiKey = "test",
@@ -453,7 +492,7 @@ class YouTubeHistoryClientTest {
             }
             """.trimIndent(),
         )
-        val page = YouTubeHistoryClient(HttpTextClient()).parsePage(
+        val page = YouTubeHistoryClient(HttpTextClient(OkHttpClient())).parsePage(
             json = response,
             tab = YouTubeHistoryTab.VIDEOS,
             apiKey = "test",
@@ -468,7 +507,7 @@ class YouTubeHistoryClientTest {
 
     @Test
     fun `unknown continuation shape is rejected instead of scanning whole response`() {
-        val client = YouTubeHistoryClient(HttpTextClient())
+        val client = YouTubeHistoryClient(HttpTextClient(OkHttpClient()))
 
         assertThrows(java.io.IOException::class.java) {
             client.parsePage(

@@ -1,5 +1,6 @@
 package pl.lewicowyt.notifier.network
 
+import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
@@ -10,7 +11,7 @@ import pl.lewicowyt.notifier.model.VideoKind
 import pl.lewicowyt.notifier.model.VideoKindEvidence
 
 class YouTubeFeedClientTest {
-    private val client = YouTubeFeedClient(HttpTextClient())
+    private val client = YouTubeFeedClient(HttpTextClient(OkHttpClient()))
 
     @Test
     fun `rss keeps exact publication timestamp for reported PoDaMi video`() {

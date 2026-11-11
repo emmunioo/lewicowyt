@@ -4,20 +4,35 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!--
+      NOTE FOR GOOGLE PLAY REVIEWERS — why this app uses foreground services:
+      * specialUse (EmbeddedPushService): built-in UnifiedPush distributor. Notifications are sent by
+        user-chosen community servers that are self-hosted by independent operators (often reachable only as
+        Tor .onion services). Those operators cannot hold the credentials of this app's Firebase project, so
+        FCM cannot deliver their end-to-end encrypted notifications. The only way to receive them in real time
+        is one persistent long-poll connection per community server, kept by this service. It runs only while
+        the user subscribes to at least one community server and has "Instant notifications" enabled
+        (Settings → Community servers → ⚙ → Push notifications); the user can switch to battery-saver polling or
+        to an external UnifiedPush distributor app at any time, which stops the service.
+        Full declaration text: docs/GOOGLE_PLAY_REVIEW.md.
+      * mediaPlayback (AudioPlaybackService): user-started audio playback of community posts, with media
+        session controls in the notification and on the lock screen.
+      The app does NOT use dataSync and does NOT request REQUEST_IGNORE_BATTERY_OPTIMIZATIONS.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- krótka blokada wybudzenia na czas obsługi odebranego budzika (odszyfrowanie + powiadomienie), max 60 s -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- B-06: wznowienie odbioru push po restarcie telefonu i po aktualizacji aplikacji -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- zapis mema do Galerii na Androidzie < 10 (na 10+ używamy MediaStore bez uprawnień) -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <queries>
         <package android:name="com.google.android.youtube" />
-        <package android:name="app.revanced.android.youtube" />
-        <package android:name="app.rvx.android.youtube" />
-        <package android:name="org.schabi.newpipe" />
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <category android:name="android.intent.category.BROWSABLE" />
@@ -73,25 +88,77 @@
         </provider>
 
         <receiver
-            android:name=".worker.ScheduleChangeReceiver"
+            android:name=".links.ChosenYouTubeAppReceiver"
+            android:exported="false" />
+
+        <!-- B-06: po restarcie telefonu / aktualizacji apki podnosi wbudowany odbiór push -->
+        <receiver
+            android:name=".community.push.PushBootReceiver"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.TIME_SET" />
-                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
-                <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 
-        <receiver
-            android:name=".worker.ReliableSyncAlarmReceiver"
-            android:exported="false" />
-
         <service
-            android:name=".worker.ReliableSyncService"
+            android:name=".messaging.FeedMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- dźwięk (Opus) z serwerów społeczności w tle: sesja multimediów (powiadomienie, ekran blokady,
+             słuchawki). Eksport wymagany przez system do sterowania sesją; obcych klientów sesja odrzuca. -->
+        <service
+            android:name=".audio.AudioPlaybackService"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
+
+        <!--
+          Wbudowany dystrybutor UnifiedPush (tryb natychmiastowy): usługa pierwszoplanowa z long-pollem LEP.
+          Typ specialUse (jedyny): dataSync nie pasuje (to nie transfer danych zlecony przez użytkownika, a od
+          Androida 15 ma limit 6 h/dobę i zakaz startu po restarcie telefonu), remoteMessaging dotyczy
+          przekazywania SMS-ów między urządzeniami. Na Androidzie < 14 typy usług nie są wymuszane — usługa
+          startuje tam z typem z manifestu (EmbeddedPushService.startAsForeground).
+          The value below is shown to Google Play reviewers (PROPERTY_SPECIAL_USE_FGS_SUBTYPE).
+        -->
+        <service
+            android:name=".community.push.EmbeddedPushService"
             android:exported="false"
-            android:foregroundServiceType="dataSync"
-            android:stopWithTask="false" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Built-in UnifiedPush push-notification distributor. Notifications come from user-chosen community servers run by independent operators (often Tor .onion only); they cannot hold this app's Firebase credentials, so FCM cannot deliver their end-to-end encrypted messages. The service keeps one long-poll connection per subscribed server so new-content notifications arrive within seconds. It runs only while the user subscribes to a server with Instant notifications enabled; switching to battery-saver polling or an external UnifiedPush distributor app stops it." />
+        </service>
+
+
+        <!-- F-05: wyłącz AUTO-init Firebase (FID + token FCM nie powstają SAME przy każdym starcie,
+             w clearnecie, bez zgody) oraz Analytics. Token tworzymy JAWNIE dopiero, gdy włączony jest
+             push przez Google (patrz LewicowYTApplication). Użytkownik korzystający tylko z serwerów
+             .onion nie kontaktuje się wtedy z Google. -->
+        <meta-data android:name="firebase_messaging_auto_init_enabled" android:value="false" />
+        <meta-data android:name="firebase_analytics_collection_deactivated" android:value="true" />
+        <!-- E-02: WebView (okno świeczki) nie wysyła metryk użycia do Google -->
+        <meta-data android:name="android.webkit.WebView.MetricsOptOut" android:value="true" />
+
+        <!-- UnifiedPush: dystrybutor (np. ntfy) dostarcza tu push od serwerów społeczności.
+             exported=true jest wymagane, by dystrybutor mógł dosięgnąć odbiornika. -->
+        <receiver
+            android:name=".community.push.CommunityPushReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.connector.MESSAGE" />
+                <action android:name="org.unifiedpush.android.connector.UNREGISTERED" />
+                <action android:name="org.unifiedpush.android.connector.NEW_ENDPOINT" />
+                <action android:name="org.unifiedpush.android.connector.REGISTRATION_FAILED" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

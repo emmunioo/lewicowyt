@@ -40,9 +40,16 @@ jobs:
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
 
+      # A-54: app/google-services.json nie jest w repozytorium (.gitignore) — w CI odtwarzamy go z sekretu
+      # repozytorium GOOGLE_SERVICES_JSON (pełna treść pliku). Bez sekretu krok nic nie robi.
+      - name: google-services.json z sekretu
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON" ]; then printf '%s' "$GOOGLE_SERVICES_JSON" > app/google-services.json; fi
+
       - name: Test, lint and build debug and release
         run: >-
           ./gradlew --no-daemon --max-workers=2
-          :app:testDebugUnitTest :app:testReleaseUnitTest
-          :app:lintDebug :app:lintRelease
+          :app:test :app:lint
           :app:assembleDebug :app:assembleRelease

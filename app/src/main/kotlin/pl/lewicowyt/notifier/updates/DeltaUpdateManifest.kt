@@ -137,9 +137,12 @@ internal fun selectDeltaUpdate(
     val target = manifest.target
     val officialTargetHash = update.sha256Digest?.lowercase()
         ?: return DeltaSelectionResult.UseFullApk(DeltaFallbackReason.DELTA_NOT_AVAILABLE)
+    // D-18: wspólny manifest opisuje APK innego ABI — to brak delty dla tego pliku, nie uszkodzone wydanie
+    if (target.apkName != update.apkName) {
+        return DeltaSelectionResult.UseFullApk(DeltaFallbackReason.DELTA_NOT_AVAILABLE)
+    }
     if (
         target.versionName != update.version ||
-        target.apkName != update.apkName ||
         target.apkSize != update.apkSizeBytes ||
         target.apkSha256 != officialTargetHash
     ) {
@@ -196,6 +199,17 @@ internal fun deltaFingerprint(
 }
 
 internal const val DELTA_MANIFEST_ASSET_NAME = "lewicowYT-update.json"
+
+/**
+ * D-18: wydanie ma osobne APK per ABI (…-arm64/…-armv7/…-x64/…-universal), a manifest delta opisuje JEDEN plik
+ * docelowy. Dlatego najpierw szukamy manifestu dla WYBRANEGO APK („<nazwa APK bez .apk>-update.json"), a dopiero
+ * potem wspólnego „lewicowYT-update.json" (wydania z jednym APK / starsze).
+ */
+internal fun deltaManifestAssetNameFor(apkName: String): String =
+    apkName.removeSuffix(".apk").removeSuffix(".APK") + "-update.json"
+
+internal fun AvailableUpdate.deltaManifestAsset() =
+    releaseAssets[deltaManifestAssetNameFor(apkName)] ?: releaseAssets[DELTA_MANIFEST_ASSET_NAME]
 internal const val XDELTA_ALGORITHM = "xdelta3-vcdiff"
 internal const val DELTA_MANIFEST_SCHEMA_VERSION = 1
 internal const val MIN_DELTA_SAVINGS_PERCENT = 20L

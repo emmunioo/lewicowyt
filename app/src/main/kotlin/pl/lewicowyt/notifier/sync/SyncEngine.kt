@@ -90,14 +90,15 @@ class SyncEngine(
     fun isSyncInProgress(): Boolean = syncMutex.isLocked
 
     /**
-     * Pozwala wykonać operację administracyjną dopiero po zakończeniu lub
-     * anulowaniu synchronizacji i blokuje start następnej do czasu jej końca.
+     * puszcza operację administracyjną dopiero po końcu lub anulowaniu syncu i
+     * blokuje start następnego, aż się skończy.
      */
     suspend fun <T> runExclusiveMaintenance(block: suspend () -> T): T =
         syncMutex.withLock { block() }
 
     internal suspend fun sync(
         deliverSystemNotifications: Boolean = true,
+        suppressPendingNotifications: Boolean = false,
         diagnosticRun: DiagnosticSyncRun = DiagnosticSyncRun.create(DiagnosticSyncTrigger.MANUAL),
     ): SyncOutcome = syncMutex.withLock {
         withContext(Dispatchers.IO) {
@@ -117,7 +118,7 @@ class SyncEngine(
                 "Start; twórcy=${selectedCreators.size}; źródło=${if (apiKey.isBlank()) "RSS+Web" else "RSS+API"}",
             )
             val classificationSemaphore = Semaphore(MAX_PARALLEL_CLASSIFICATIONS)
-            val prioritizedSources = runCatching {
+            val prioritizedAttempt = runCatching {
                 sourcePriorityScheduler.prioritizeSources(
                     creators = selectedCreators,
                     intervalMinutes = settings.intervalMinutes,
@@ -128,7 +129,10 @@ class SyncEngine(
                     "Nie udało się ustalić adaptacyjnej kolejności; używam katalogu",
                     error,
                 )
-            }.getOrElse {
+            }
+            // D-19h: czy użyto kolejności adaptacyjnej (true), czy fallbacku katalogu (false)
+            val adaptivePriority = prioritizedAttempt.isSuccess
+            val prioritizedSources = prioritizedAttempt.getOrElse {
                 selectedCreators.flatMap { creator ->
                     creator.sources.map { source -> creator to source }
                 }
@@ -137,7 +141,7 @@ class SyncEngine(
                 "SOURCE_PRIORITY",
                 fields = mapOf(
                     "sources" to prioritizedSources.size,
-                    "adaptive" to prioritizedSources.size,
+                    "adaptive" to adaptivePriority,
                 ),
             )
             val completedPriorityObservations = Collections.synchronizedList(
@@ -167,8 +171,8 @@ class SyncEngine(
                 runCatching {
                     sourcePriorityScheduler.recordOutcomes(completed)
                 }.onFailure { error ->
-                    // Model jest optymalizacją kolejności. Jego awaria nie może
-                    // unieważnić poprawnie zakończonego sprawdzania YouTube.
+                    // model to tylko optymalizacja kolejności – jego wywrotka
+                    // nie może psuć poprawnie zakończonego sprawdzenia YT
                     AppLog.warning(
                         "SourcePriority",
                         "Nie udało się zaktualizować lokalnego modelu kolejności",
@@ -280,8 +284,8 @@ class SyncEngine(
                 }
             }
 
-            // Starsze rekordy z wersji <= 0.3.0 były zapisywane jako zwykłe filmy.
-            // Klasyfikujemy je stopniowo, aby nie wykonywać dziesiątek zapytań naraz.
+            // rekordy z <= 0.3.0 leciały jako zwykłe filmy – klasyfikujemy je
+            // stopniowo, żeby nie odpalać dziesiątek zapytań naraz
             val resolvedHistoryKinds = linkedMapOf<String, VideoKindDecision>()
             val failedHistoryKinds = mutableListOf<String>()
             for (historyItem in unclassifiedItems) {
@@ -298,16 +302,16 @@ class SyncEngine(
                 database.recordFailedVideoClassifications(failedHistoryKinds)
             }
 
-            // Użytkownik mógł zmienić wybór kanałów podczas trwających zapytań.
-            // Odczytujemy ustawienie ponownie bezpośrednio przed dostarczeniem.
+            // user mógł przełączyć wybór kanałów w trakcie zapytań – czytamy
+            // ustawienie jeszcze raz tuż przed dostarczeniem
             val deliverySettings = preferences.current()
             val deliveryCreatorIds = deliverySettings.selectedCreatorIds
             val (allowedPending, suppressedPending) =
                 database.pendingNotifications(deliveryCreatorIds).partition {
                     deliverySettings.isNotificationEnabledFor(it.creatorId, it.kind)
                 }
-            // Rekord wyłączonego rodzaju nie może czekać ukryty i wywołać starego
-            // powiadomienia po ponownym włączeniu ustawienia.
+            // wpis wyłączonego rodzaju nie może czaić się ukryty i odpalić
+            // starego powiadomienia po ponownym włączeniu opcji
             database.markVideosNotified(suppressedPending.map { it.videoId })
             suppressedPending.forEach { item ->
                 diagnosticRun.notificationDecision(
@@ -338,10 +342,16 @@ class SyncEngine(
                             latest.isNotificationEnabledFor(candidate.creator.id, candidate.kind)
                     }
                 }
+            } else if (suppressPendingNotifications) {
+                // R-20: RĘCZNY sync — user sam odświeżył i widzi już wszystko w Historii. Oznaczamy
+                // te wpisy jako dostarczone, żeby ActiveHoursReleaseWorker NIE zalał go później
+                // powiadomieniami o materiałach, które właśnie przewinął. Push odebrany poza oknem
+                // ciszy nadal czeka (notified=0) i leci jednym zbiorczym po otwarciu okna.
+                database.markVideosNotified(uniqueCandidates.map { it.entry.id })
+                NotificationDeliveryResult()
             } else {
-                // Sprawdzenie po zakończeniu DND może przypadać przed terminem
-                // wybranym przez użytkownika. Materiały trafiają wtedy do skrzynki
-                // i pozostają nieoznaczone, aby właściwy alarm mógł je dostarczyć.
+                // sprawdzenie po DND może wypaść przed terminem wybranym przez usera –
+                // materiały lądują w skrzynce nieoznaczone, żeby dostarczył je właściwy alarm
                 NotificationDeliveryResult()
             }
             if (!deliverSystemNotifications) {
@@ -394,8 +404,8 @@ class SyncEngine(
             }
             database.markVideosNotified(delivery.deliveredVideoIds)
 
-            // Kontrola profilowych jest rzadka i nie może zablokować właściwej
-            // synchronizacji filmów ani dostarczenia powiadomień.
+            // kontrola awatarów jest rzadka i nie może blokować właściwego
+            // sync filmów ani dostarczenia powiadomień
             try {
                 avatarUpdater.refreshDue(catalog.creators)
             } catch (cancelled: CancellationException) {
@@ -408,8 +418,8 @@ class SyncEngine(
                 )
             }
 
-            // Opisy są ostatnim, niekrytycznym etapem. Dotyczy to wyłącznie
-            // rekordów już zapisanych w Historii i nie opóźnia powiadomień.
+            // opisy to ostatni, niekrytyczny etap – tylko dla rekordów już w
+            // Historii, nie opóźnia powiadomień
             runCatching {
                 diagnosticRun.measure(DiagnosticSyncStage.DESCRIPTION) {
                     descriptionBackfill.enrichExistingHistory(
@@ -513,9 +523,8 @@ class SyncEngine(
             }
 
             if (!sourceInitialized) {
-                // Pierwsze uruchomienie tworzy punkt odniesienia bez zgłaszania
-                // całej istniejącej historii. Baza ufa przy tym wyłącznie
-                // wpisom potwierdzonym przez YouTube podczas zapisu kursora.
+                // pierwszy przebieg tworzy punkt odniesienia bez zgłaszania całej
+                // historii; baza ufa tylko wpisom potwierdzonym przez YT przy zapisie kursora
                 database.seedSource(
                     sourceKey = sourceKey,
                     creator = creator,
@@ -738,9 +747,8 @@ class SyncEngine(
         }
         val rssResult = rssRequest.await()
         val dataApiResult = dataApiRequest?.await()
-        // Sprzeczna tożsamość RSS unieważnia całe źródło. Nie wolno w tej
-        // sytuacji ratować wyniku API/Web, bo zostałby przypisany do twórcy,
-        // dla którego właśnie otrzymaliśmy niespójny dokument źródłowy.
+        // sprzeczna tożsamość RSS unieważnia całe źródło – nie ratujemy wtedy
+        // wyniku API/Web, bo przypisałby się do twórcy z niespójnym dokumentem
         requireNoFeedIdentityFailure(rssResult)
         if (rssResult.isFailure) diagnosticRun.sourceError(DiagnosticYouTubeSource.RSS)
         if (dataApiResult?.isFailure == true) {
@@ -1033,6 +1041,20 @@ class SyncEngine(
                     cursorPublishedAtMillis = cursorPublishedAtMillis,
                     hasNextPage = nextToken != null,
                     chronological = resolved.type != SourceType.PLAYLIST,
+                )
+            ) {
+                return result.values.toList()
+            }
+            // B-16: playlista nie jest chronologiczna, więc kiedyś przewijaliśmy ją do końca przy KAŻDYM syncu
+            // (do 40 jednostek quota na źródło). Gdy strona nie wnosi niczego nowego — same znane materiały,
+            // żaden nie jest nowszy od kursora — dalsze strony to stara zawartość; kończymy.
+            if (
+                resolved.type == SourceType.PLAYLIST &&
+                cursorPublishedAtMillis != null &&
+                isPlaylistPageAlreadyKnown(
+                    publishedTimes = page.items.map { it.entry.publishedAtMillis },
+                    cursorPublishedAtMillis = cursorPublishedAtMillis,
+                    allIdsKnown = page.items.all { database.containsVideo(it.entry.id) },
                 )
             ) {
                 return result.values.toList()
@@ -1359,3 +1381,13 @@ private suspend inline fun <T> runSuspendCatching(
 } catch (error: Exception) {
     Result.failure(error)
 }
+
+/**
+ * B-16: strona playlisty, której WSZYSTKIE pozycje są już w lokalnej Historii i żadna nie jest nowsza od
+ * kursora powiadomień, nie wnosi nic do powiadomień — można przestać przewijać (pusta strona nie kończy).
+ */
+internal fun isPlaylistPageAlreadyKnown(
+    publishedTimes: List<Long>,
+    cursorPublishedAtMillis: Long,
+    allIdsKnown: Boolean,
+): Boolean = publishedTimes.isNotEmpty() && allIdsKnown && publishedTimes.none { it > cursorPublishedAtMillis }

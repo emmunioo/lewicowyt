@@ -8,10 +8,20 @@ import java.io.File
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import pl.lewicowyt.notifier.community.CommunityConsentGate
+import pl.lewicowyt.notifier.community.CommunityConsentState
+import pl.lewicowyt.notifier.community.CommunityContentCodec
+import pl.lewicowyt.notifier.community.CommunityManifest
+import pl.lewicowyt.notifier.community.CommunityPost
+import pl.lewicowyt.notifier.community.CommunityTerms
+import pl.lewicowyt.notifier.community.CommunityTransportKind
+import pl.lewicowyt.notifier.community.CommunityUpdateKind
+import pl.lewicowyt.notifier.community.communityServerId
 import pl.lewicowyt.notifier.model.DescriptionAvailability
 import pl.lewicowyt.notifier.model.MEMBERS_ONLY_DESCRIPTION_MARKER
 import pl.lewicowyt.notifier.model.SCHEDULED_STREAM_DESCRIPTION_MARKER
@@ -38,7 +48,8 @@ class BundledDatabaseMigrationTest {
     fun completeSchema22MigrationPreservesDataAndEnablesFtsAndCompressedDescriptions() {
         val database = LocalDatabase(context, DATABASE_NAME)
         try {
-            assertEquals(26, scalarInt(database, "PRAGMA user_version"))
+            // odporne na przyszłe bumpy: migracja ma dojść dokładnie do bieżącej wersji schematu
+            assertEquals(LocalDatabase.DATABASE_VERSION, scalarInt(database, "PRAGMA user_version"))
             assertEquals("ok", scalarText(database, "PRAGMA integrity_check"))
             LEGACY_TABLES.forEach { table ->
                 assertEquals("Brak danych po migracji w $table", 1, tableRows(database, table))
@@ -49,6 +60,28 @@ class BundledDatabaseMigrationTest {
             assertTrue(hasColumn(database, "video_history", "description_availability"))
             assertTrue(hasObject(database, "table", "video_history_fts"))
             assertTrue(hasObject(database, "trigger", "video_history_fts_insert"))
+            // migracja do 27 dokłada tabele serwerów społeczności, nie ruszając danych
+            assertTrue(hasObject(database, "table", "community_servers"))
+            assertTrue(hasObject(database, "table", "community_consents"))
+            // migracja do 31: wspólny magazyn treści (słownik autorów + ściśnięte pozycje)
+            assertTrue(hasObject(database, "table", "community_authors"))
+            assertTrue(hasObject(database, "table", "community_items"))
+            // migracja do 33: wykrywanie streamów, które stały się prywatne
+            assertTrue(hasObject(database, "table", "stream_privacy"))
+            // migracja do 34 (#10): walidatory warunkowego GET-a per serwer; dane sprzed migracji zachowane
+            assertTrue(hasColumn(database, "community_servers", "manifest_etag"))
+            assertTrue(hasColumn(database, "community_servers", "manifest_last_modified"))
+            // migracja do 35 (H-01): hash regulaminu z ostatniego manifestu do bramki zgody poza UI
+            assertTrue(hasColumn(database, "community_servers", "manifest_terms_hash"))
+            // migracja do 36 (R-01): push/primaryFeed trzymane w bazie do odtworzenia w restoredState
+            assertTrue(hasColumn(database, "community_servers", "push_json"))
+            assertTrue(hasColumn(database, "community_servers", "primary_feed_json"))
+            // migracja do 37 (R-09): tekst+wersja regulaminu do offline „Przejrzyj regulamin"
+            assertTrue(hasColumn(database, "community_servers", "manifest_terms_text"))
+            assertTrue(hasColumn(database, "community_servers", "manifest_terms_version"))
+            // migracja do 38 (A-35): mapa video_id → rowid FTS, pokrywa każdy wiersz historii
+            assertTrue(hasObject(database, "table", "video_history_fts_map"))
+            assertEquals(tableRows(database, "video_history"), tableRows(database, "video_history_fts_map"))
             val creatorSearch = database.searchHistory(
                 query = "ral",
                 selectedCreatorIds = setOf("creator"),
@@ -99,6 +132,60 @@ class BundledDatabaseMigrationTest {
         }
     }
 
+    /**
+     * #10: walidatory warunkowego GET-a (ETag / Last-Modified) zapisują się i odczytują per serwer, a brak
+     * walidatora w kolejnym zapisie NIE kasuje poprzedniego (zachowujemy szansę na 304).
+     */
+    @Test
+    fun manifestValidatorsPersistAndSurviveMissingUpdate() {
+        val database = LocalDatabase(context, DATABASE_NAME)
+        try {
+            val serverId = communityServerId("https://serwer.example")
+            database.addCommunityServer(serverId, "https://serwer.example", 1_000L)
+            database.updateCommunityServerManifestCache(
+                serverId = serverId,
+                displayName = "Serwer",
+                transport = CommunityTransportKind.HTTPS_POLL,
+                canBePrimary = false,
+                fetchedAtMillis = 2_000L,
+                etag = "\"sha256-abc\"",
+                lastModified = "Wed, 21 Oct 2026 07:28:00 GMT",
+                termsHash = "hash-v1",
+                pushJson = null,
+                primaryFeedJson = null,
+                termsText = null,
+                termsVersion = null,
+            )
+            database.communityServer(serverId)!!.let {
+                assertEquals("\"sha256-abc\"", it.manifestEtag)
+                assertEquals("Wed, 21 Oct 2026 07:28:00 GMT", it.manifestLastModified)
+                assertEquals("hash-v1", it.manifestTermsHash)
+            }
+            // kolejny zapis bez walidatorów (serwer ich chwilowo nie podał) — poprzednie zostają
+            database.updateCommunityServerManifestCache(
+                serverId = serverId,
+                displayName = "Serwer",
+                transport = CommunityTransportKind.HTTPS_POLL,
+                canBePrimary = false,
+                fetchedAtMillis = 3_000L,
+                etag = null,
+                lastModified = null,
+                termsHash = "hash-v1",
+                pushJson = null,
+                primaryFeedJson = null,
+                termsText = null,
+                termsVersion = null,
+            )
+            database.communityServer(serverId)!!.let {
+                assertEquals("\"sha256-abc\"", it.manifestEtag)
+                assertEquals("Wed, 21 Oct 2026 07:28:00 GMT", it.manifestLastModified)
+                assertEquals("hash-v1", it.manifestTermsHash)
+            }
+        } finally {
+            database.close()
+        }
+    }
+
     @Test
     fun schema25BackfillsDescriptionAvailabilityWithoutDecompression() {
         context.deleteDatabase(SCHEMA_25_DATABASE_NAME)
@@ -132,7 +219,8 @@ class BundledDatabaseMigrationTest {
 
         val database = LocalDatabase(context, SCHEMA_25_DATABASE_NAME)
         try {
-            assertEquals(26, scalarInt(database, "PRAGMA user_version"))
+            // odporne na przyszłe bumpy: migracja ma dojść dokładnie do bieżącej wersji schematu
+            assertEquals(LocalDatabase.DATABASE_VERSION, scalarInt(database, "PRAGMA user_version"))
             assertEquals("ok", scalarText(database, "PRAGMA integrity_check"))
             assertTrue(hasColumn(database, "video_history", "description_availability"))
             // Backfill w czystym SQL nie dekompresuje żadnego BLOB-a, a mimo to
@@ -207,7 +295,8 @@ class BundledDatabaseMigrationTest {
 
         val database = LocalDatabase(context, SCHEMA_23_DATABASE_NAME)
         try {
-            assertEquals(26, scalarInt(database, "PRAGMA user_version"))
+            // odporne na przyszłe bumpy: migracja ma dojść dokładnie do bieżącej wersji schematu
+            assertEquals(LocalDatabase.DATABASE_VERSION, scalarInt(database, "PRAGMA user_version"))
             assertTrue(database.containsVideo(VIDEO_ID))
             assertTrue(database.recentHistory(limit = 1).single().isFavorite)
             assertFalse(hasColumn(database, "video_history", "description"))
@@ -240,7 +329,8 @@ class BundledDatabaseMigrationTest {
 
         val database = LocalDatabase(context, WAL_TARGET_DATABASE_NAME)
         try {
-            assertEquals(26, scalarInt(database, "PRAGMA user_version"))
+            // odporne na przyszłe bumpy: migracja ma dojść dokładnie do bieżącej wersji schematu
+            assertEquals(LocalDatabase.DATABASE_VERSION, scalarInt(database, "PRAGMA user_version"))
             assertTrue(database.containsVideo(VIDEO_ID))
             LEGACY_TABLES.forEach { table ->
                 assertEquals("WAL nie zachował $table", 1, tableRows(database, table))
@@ -289,6 +379,196 @@ class BundledDatabaseMigrationTest {
                 assertEquals("after", cursor.getString(0))
                 assertEquals(1, cursor.getInt(1))
             }
+        } finally {
+            database.close()
+        }
+    }
+
+    @Test
+    fun communityServerAndConsentRoundTrip() {
+        val database = LocalDatabase(context, COMMUNITY_DATABASE_NAME)
+        try {
+            assertTrue(hasObject(database, "table", "community_servers"))
+            assertTrue(hasObject(database, "table", "community_consents"))
+
+            val endpoint = "https://serwer.example/manifest"
+            val serverId = communityServerId(endpoint)
+            database.addCommunityServer(serverId, endpoint, addedAtMillis = 1_000L)
+            // ponowne dodanie nie kasuje enabled/added
+            database.addCommunityServer(serverId, endpoint, addedAtMillis = 9_999L)
+
+            val servers = database.communityServers()
+            assertEquals(1, servers.size)
+            assertEquals(serverId, servers.single().serverId)
+            assertEquals(endpoint, servers.single().endpoint)
+            assertEquals(1_000L, servers.single().addedAtMillis)
+            assertTrue(servers.single().enabled)
+
+            database.updateCommunityServerManifestCache(
+                serverId,
+                displayName = "Serwer X",
+                transport = CommunityTransportKind.ONION_POLL,
+                canBePrimary = true,
+                fetchedAtMillis = 2_000L,
+                etag = null,
+                lastModified = null,
+                termsHash = null,
+                pushJson = null,
+                primaryFeedJson = null,
+                termsText = null,
+                termsVersion = null,
+            )
+            val cached = database.communityServer(serverId)!!
+            assertEquals("Serwer X", cached.displayName)
+            assertEquals(CommunityTransportKind.ONION_POLL, cached.transport)
+            assertEquals(2_000L, cached.lastManifestFetchMillis)
+            assertTrue(cached.canBePrimary)
+            // domyślnie: powiadamiaj ze wszystkiego, nic nie wyciszone, reklamy włączone
+            assertTrue(cached.notifyEnabled)
+            assertTrue(cached.notifyMuted.isEmpty())
+            assertTrue(cached.displayMuted.isEmpty())
+            assertTrue(cached.adsEnabled)
+            database.setCommunityServerAdsEnabled(serverId, false)
+            assertFalse(database.communityServer(serverId)!!.adsEnabled)
+            // dwie osie wyciszeń: powiadomienia i wyświetlanie (klucze platforma / platforma/twórca)
+            database.setCommunityServerNotifyMuted(serverId, setOf("Twitter", "youtube/abc"))
+            database.setCommunityServerDisplayMuted(serverId, setOf("ads"))
+            val muted = database.communityServer(serverId)!!
+            assertEquals(setOf("twitter", "youtube/abc"), muted.notifyMuted)
+            assertEquals(setOf("ads"), muted.displayMuted)
+
+            database.setCommunityServerNotifyEnabled(serverId, false)
+            assertFalse(database.communityServer(serverId)!!.notifyEnabled)
+
+            database.setCommunityServerEnabled(serverId, false)
+            assertFalse(database.communityServer(serverId)!!.enabled)
+
+            // najpierw odmowa, potem zgoda na te same warunki – decyzja się podmienia
+            val terms = CommunityTerms.of(versionLabel = "2", text = "Regulamin serwera X.")
+            database.recordCommunityConsent(
+                CommunityConsentGate.recordFor(serverId, terms, accepted = false, presentedAtMillis = 3_000L, decidedAtMillis = 3_100L),
+            )
+            assertFalse(database.communityConsentForTerms(serverId, terms.contentHash)!!.accepted)
+
+            database.recordCommunityConsent(
+                CommunityConsentGate.recordFor(serverId, terms, accepted = true, presentedAtMillis = 4_000L, decidedAtMillis = 4_100L),
+            )
+            val stored = database.communityConsentForTerms(serverId, terms.contentHash)!!
+            assertTrue(stored.accepted)
+            assertEquals("Regulamin serwera X.", stored.termsText)
+            assertEquals("2", stored.termsVersionLabel)
+            assertEquals(4_100L, stored.decidedAtMillis)
+            assertEquals(CommunityConsentState.ACCEPTED, CommunityConsentGate.evaluate(stored, terms))
+
+            // zmiana treści regulaminu → brak zapisanej decyzji dla nowego hasha
+            val newTerms = CommunityTerms.of(versionLabel = "2", text = "Regulamin serwera X. Punkt 6.")
+            assertNull(database.communityConsentForTerms(serverId, newTerms.contentHash))
+            assertEquals(terms.contentHash, database.latestCommunityConsent(serverId)!!.termsHash)
+
+            database.deleteCommunityServer(serverId)
+            assertTrue(database.communityServers().isEmpty())
+            assertNull(database.communityConsentForTerms(serverId, terms.contentHash))
+            assertEquals("ok", scalarText(database, "PRAGMA integrity_check"))
+        } finally {
+            database.close()
+        }
+    }
+
+    @Test
+    fun communityContentRoundTripCompressesTextAndNormalizesAuthors() {
+        val database = LocalDatabase(context, COMMUNITY_CONTENT_DATABASE_NAME)
+        try {
+            assertTrue(hasObject(database, "table", "community_authors"))
+            assertTrue(hasObject(database, "table", "community_items"))
+
+            val serverId = "srv-content"
+            val longText = "Długi tekst posta społeczności o sprawiedliwości. ".repeat(60)
+            val manifest = CommunityManifest(
+                contractVersion = 1,
+                name = "Serwer treści",
+                description = null,
+                transport = CommunityTransportKind.HTTPS_POLL,
+                capabilities = emptySet(),
+                terms = CommunityTerms.of("1", "R"),
+                posts = listOf(
+                    CommunityPost("Ralindel", "https://s/a.jxl", "post", longText, "https://youtube.com/post/1", null, null, publishedAtMillis = 10L, update = CommunityUpdateKind.NONE),
+                    CommunityPost("Ralindel", "https://s/a.jxl", "post", "krótki drugi", "https://youtube.com/post/2", null, null, publishedAtMillis = 20L),
+                ),
+            )
+            val stored = CommunityContentCodec.toStored(serverId, manifest)
+            // dłuższy tekst faktycznie się ściska (ZSTD na urządzeniu) – blob mniejszy niż oryginał
+            val longStored = stored.items.first { it.originalSize > 1000 }
+            assertTrue("Tekst powinien się skompresować", longStored.blob.size < longStored.originalSize)
+
+            database.replaceCommunityContent(serverId, stored)
+            // jeden autor w słowniku mimo dwóch postów
+            assertEquals(1, scalarInt(database, "SELECT count(*) FROM community_authors"))
+            assertEquals(2, scalarInt(database, "SELECT count(*) FROM community_items"))
+
+            val back = CommunityContentCodec.fromStored(database.communityStoredItems(serverId))
+            assertEquals(2, back.posts.size)
+            // najnowszy pierwszy (published_ms DESC)
+            assertEquals("krótki drugi", back.posts[0].text)
+            val long = back.posts.first { it.text.length > 1000 }
+            assertEquals(longText, long.text)
+            assertEquals("Ralindel", long.author)
+            assertEquals("https://s/a.jxl", long.authorImageUrl)
+
+            // usunięcie serwera kasuje pozycje i osierocony słownik autorów
+            database.deleteCommunityServer(serverId)
+            assertEquals(0, scalarInt(database, "SELECT count(*) FROM community_items"))
+            assertEquals(0, scalarInt(database, "SELECT count(*) FROM community_authors"))
+            assertEquals("ok", scalarText(database, "PRAGMA integrity_check"))
+        } finally {
+            database.close()
+        }
+    }
+
+    @Test
+    fun communityFavoritesRetentionAndServerDeletion() {
+        val database = LocalDatabase(context, COMMUNITY_FAV_DATABASE_NAME)
+        try {
+            val serverId = "srv-fav"
+            fun post(id: String, pub: Long) = CommunityPost(
+                author = "A", authorImageUrl = null, type = "post", text = "t-$id",
+                url = "https://www.youtube.com/post/$id", imageUrl = "https://s/$id.jxl",
+                notifyImageUrl = null, imageQuality = 80, publishedAtMillis = pub,
+            )
+            val manifest = CommunityManifest(
+                contractVersion = 1, name = "S", description = null,
+                transport = CommunityTransportKind.HTTPS_POLL, capabilities = emptySet(),
+                terms = CommunityTerms.of("1", "R"),
+                posts = listOf(post("OLD", 1_000L), post("NEW", 100_000L)),
+            )
+            fun store() = database.replaceCommunityContent(serverId, CommunityContentCodec.toStored(serverId, manifest))
+            store()
+            assertEquals(2, scalarInt(database, "SELECT count(*) FROM community_items"))
+
+            // retencja tekstu: stary (nie-ulubiony) znika, nowy zostaje
+            database.pruneCommunityContent(textBeforeMillis = 50_000L, imageBeforeMillis = 0L, pruneAllText = false, pruneAllImage = false)
+            assertEquals(1, scalarInt(database, "SELECT count(*) FROM community_items"))
+
+            // ulubiony przetrwa i ponowne pobranie, i retencję
+            store()
+            database.setCommunityItemFavorite(serverId, "yt-post:OLD", true)
+            assertTrue("yt-post:OLD" in database.communityFavoriteItemIds(serverId))
+            store() // odświeżenie nie kasuje ulubionego
+            assertTrue("yt-post:OLD" in database.communityFavoriteItemIds(serverId))
+            database.pruneCommunityContent(textBeforeMillis = 50_000L, imageBeforeMillis = 0L, pruneAllText = false, pruneAllImage = false)
+            assertTrue("yt-post:OLD" in database.communityFavoriteItemIds(serverId))
+
+            // retencja obrazu: NEW (nie-ulubiony) traci obraz, ale tekst zostaje; ulubiony OLD trzyma obraz
+            database.pruneCommunityContent(textBeforeMillis = 0L, imageBeforeMillis = 200_000L, pruneAllText = false, pruneAllImage = false)
+            val items = database.communityStoredItems(serverId).associateBy { it.itemId }
+            assertNull(items.getValue("yt-post:NEW").imageUrl)
+            assertEquals(2, database.communityStoredItems(serverId).size) // tekst NEW nadal jest
+            assertEquals("https://s/OLD.jxl", items.getValue("yt-post:OLD").imageUrl)
+
+            // jawne usunięcie przez serwer kasuje nawet ulubiony
+            database.deleteCommunityItems(serverId, listOf("yt-post:OLD"))
+            assertFalse("yt-post:OLD" in database.communityFavoriteItemIds(serverId))
+            assertNull(database.communityStoredItems(serverId).firstOrNull { it.itemId == "yt-post:OLD" })
+            assertEquals("ok", scalarText(database, "PRAGMA integrity_check"))
         } finally {
             database.close()
         }
@@ -541,6 +821,9 @@ class BundledDatabaseMigrationTest {
             WAL_SOURCE_DATABASE_NAME,
             WAL_TARGET_DATABASE_NAME,
             CONTENT_VALUES_DATABASE_NAME,
+            COMMUNITY_DATABASE_NAME,
+            COMMUNITY_CONTENT_DATABASE_NAME,
+            COMMUNITY_FAV_DATABASE_NAME,
         ).forEach(context::deleteDatabase)
     }
 
@@ -551,6 +834,9 @@ class BundledDatabaseMigrationTest {
         const val WAL_SOURCE_DATABASE_NAME = "bundled-wal-source.db"
         const val WAL_TARGET_DATABASE_NAME = "bundled-wal-target.db"
         const val CONTENT_VALUES_DATABASE_NAME = "bundled-content-values-test.db"
+        const val COMMUNITY_DATABASE_NAME = "bundled-community-test.db"
+        const val COMMUNITY_CONTENT_DATABASE_NAME = "bundled-community-content-test.db"
+        const val COMMUNITY_FAV_DATABASE_NAME = "bundled-community-fav-test.db"
         const val VIDEO_ID = "abcdefghijk"
         const val DAY_MILLIS = 24L * 60L * 60L * 1000L
         val LEGACY_TABLES = listOf(

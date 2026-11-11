@@ -24,8 +24,9 @@ app/build
 __pycache__/
 *.py[cod]
 
-# Stan sesji asystenta (blokada procesu, nie treść projektu)
-/.claude/
+
+# A-54: konfiguracja Firebase projektu (klucz Web API z ograniczeniami w konsoli GCP) — nie publikujemy
+app/google-services.json
 
 # Nigdy nie publikuj kluczy podpisu ani haseł
 *.jks
@@ -37,3 +38,12 @@ signing.properties
 hs_err_pid*.log
 replay_pid*.log
 *.hprof
+
+# Plany i notatki robocze — nie są kodem źródłowym, nie publikujemy
+/PLAN_*.md
+/docs/
+
+# Nie są potrzebne do zbudowania aplikacji — nie publikujemy w tym repozytorium
+/server/
+/serwer-spolecznosci-test/
+/tools/archiwum/
