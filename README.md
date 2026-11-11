@@ -190,6 +190,10 @@ Przygotowanie awatarów przed wydaniem uruchamia wyłącznie przypięte pliki
 należy tworzyć skryptem `tools/New-SourceArchive.ps1` albo użyć automatycznego
 archiwum taga GitHuba; nie należy pakować całego katalogu roboczego.
 
+Własna wersja: plik `app/google-services.json` (konfiguracja Firebase, wymagana przez wtyczkę Google Services)
+nie jest publikowany. Skopiuj `app/google-services.json.example` jako `app/google-services.json` — wystarczy do
+kompilacji — albo wstaw własną konfigurację z konsoli Firebase, jeśli chcesz mieć działające powiadomienia FCM.
+
 ```powershell
 .\gradlew.bat :app:assembleDebug
 ```
